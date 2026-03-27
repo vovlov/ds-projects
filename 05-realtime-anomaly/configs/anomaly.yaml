@@ -1,0 +1,31 @@
+data:
+  n_points: 2000
+  anomaly_rate: 0.03
+  seed: 42
+
+detector:
+  type: "statistical"  # "statistical" or "lstm"
+  window_size: 50
+  threshold_sigma: 3.0
+
+lstm:
+  hidden_size: 32
+  n_layers: 1
+  window_size: 30
+  stride: 10
+  epochs: 50
+  batch_size: 64
+  learning_rate: 0.001
+
+streaming:
+  kafka_bootstrap_servers: "localhost:9092"
+  topic: "metrics"
+  consumer_group: "anomaly-detector"
+
+monitoring:
+  prometheus_port: 9090
+  grafana_port: 3000
+
+api:
+  host: "0.0.0.0"
+  port: 8000

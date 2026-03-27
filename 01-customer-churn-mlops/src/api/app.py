@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import pickle
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Customer Churn Prediction API",

@@ -1,0 +1,30 @@
+ingestion:
+  data_dir: "data/documents"
+  supported_extensions:
+    - "*.txt"
+    - "*.md"
+
+chunking:
+  chunk_size: 512
+  chunk_overlap: 64
+  separators:
+    - "\n\n"
+    - "\n"
+    - ". "
+    - " "
+    - ""
+
+retrieval:
+  collection_name: "documents"
+  persist_dir: "data/chroma_db"
+  n_results: 5
+  distance_metric: "cosine"
+
+generation:
+  model: "claude-sonnet-4-20250514"
+  max_tokens: 1024
+  temperature: 0.0
+
+api:
+  host: "0.0.0.0"
+  port: 7860

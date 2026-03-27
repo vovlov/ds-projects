@@ -1,0 +1,25 @@
+data:
+  n_nodes: 1000
+  n_transactions: 5000
+  fraud_rate: 0.08
+  seed: 42
+  test_size: 0.2
+
+baseline:
+  model: "catboost"
+  iterations: 200
+  depth: 6
+  learning_rate: 0.1
+  auto_class_weights: "Balanced"
+
+gnn:
+  model: "gcn"  # "gcn" or "sage"
+  hidden_channels: 64
+  epochs: 300
+  learning_rate: 0.01
+  weight_decay: 0.0005
+  dropout: 0.3
+
+api:
+  host: "0.0.0.0"
+  port: 8000

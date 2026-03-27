@@ -1,0 +1,21 @@
+model:
+  type: "rule_based"  # "rule_based" or "transformer"
+  transformer_model: "bert-base-multilingual-cased"
+
+labels:
+  - "O"
+  - "B-PER"
+  - "I-PER"
+  - "B-ORG"
+  - "I-ORG"
+  - "B-LOC"
+  - "I-LOC"
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  max_batch_size: 100
+
+demo:
+  host: "0.0.0.0"
+  port: 8501
