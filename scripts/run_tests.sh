@@ -26,7 +26,6 @@ import pytest
 sys.exit(pytest.main([
     '${PROJECT}/tests/',
     '-v', '--tb=short',
-    '--override-ini=rootdir=${PROJECT}',
-    '-p', 'no:conftest',
+    '--rootdir=${PROJECT}',
 ]))
 "
