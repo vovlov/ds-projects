@@ -98,3 +98,28 @@ class TestGeneration:
         chunks = [{"text": "Some text", "metadata": {"source": "doc.txt"}}]
         prompt = build_prompt("Question?", chunks)
         assert "doc.txt" in prompt
+
+    def test_generate_answer_without_api_key(self):
+        """Without ANTHROPIC_API_KEY, should return error message, not crash."""
+        import os
+
+        old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            from src.generation.chain import generate_answer
+
+            result = generate_answer("Test?", [{"text": "ctx", "metadata": {"source": "t"}}])
+            assert "Error" in result["answer"] or "ANTHROPIC_API_KEY" in result["answer"]
+        finally:
+            if old_key:
+                os.environ["ANTHROPIC_API_KEY"] = old_key
+
+
+class TestAPI:
+    def test_health_endpoint(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "healthy"

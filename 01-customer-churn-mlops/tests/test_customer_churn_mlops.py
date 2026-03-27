@@ -89,3 +89,23 @@ class TestDataQuality:
 
     def test_monthly_charges_positive(self, raw_df):
         assert (raw_df["MonthlyCharges"] > 0).all()
+
+
+class TestAPI:
+    def test_health_endpoint(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert "status" in resp.json()
+
+    def test_predict_validation(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        # Missing required fields should fail
+        resp = client.post("/predict", json={"gender": "Male"})
+        assert resp.status_code == 422  # Pydantic validation error

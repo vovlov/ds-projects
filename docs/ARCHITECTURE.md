@@ -1,43 +1,69 @@
-# Architecture Decisions
+# Архитектурные решения / Architecture Decisions
 
-## Design Principles
+Здесь описаны ключевые решения — почему выбраны именно эти инструменты, а не альтернативы. Цель — показать осознанный подход, а не «взял первое попавшееся».
 
-1. **Reproducibility first** — Any project runs with `make setup && make run-{name}`
-2. **Production patterns** — Every model has an API, tests, and Docker image
-3. **Monorepo** — Shared tooling (CI, linting, Makefile) with independent project dependencies
-4. **Progressive complexity** — Projects 01→05 increase in architectural complexity
+## Принципы / Design Principles
 
-## Technology Choices
+1. **Воспроизводимость** — любой проект запускается с `make setup && make run-{name}`. Нет «а у меня на ноутбуке работало».
+2. **Production patterns** — каждая модель имеет API, тесты и Docker-образ. Ноутбук — это EDA, а не деливери.
+3. **Монорепо** — общий CI, линтинг, Makefile. Но зависимости проектов независимы (extras в pyproject.toml).
+4. **Прогрессивная сложность** — проекты 01→05 усложняются: табличный ML → RAG → NER → графы → real-time.
 
-### Python 3.12 + uv
-- `uv` for fast, deterministic dependency resolution
-- Each project has its own extras in root `pyproject.toml`
-- No virtualenv juggling — `uv run` handles everything
+## Выбор технологий / Technology Choices
 
-### MLflow for Experiment Tracking
-- Lightweight, self-hosted, no cloud dependency
-- Tracks parameters, metrics, artifacts, model versions
-- UI for comparing experiments
+### Python 3.12 + uv (не poetry, не pip)
 
-### DVC for Data Versioning
-- Git-like commands for large files
-- Reproducible data pipelines (`dvc.yaml`)
-- Remote storage agnostic (S3, GCS, local)
+**Почему uv?** В 10-50x быстрее pip при резолвинге зависимостей. Lock-файл детерминированный. `uv run` заменяет активацию виртуального окружения.
 
-### FastAPI for Model Serving
-- Async by default, automatic OpenAPI docs
-- Type validation with Pydantic
-- Easy to containerize and test
+**Почему не poetry?** Poetry медленный на больших dependency trees (torch + transformers). uv — это Rust-скорость + pip-совместимость.
 
-### Docker Compose for Full Stack
-- One command to start everything (app + DB + monitoring)
-- Matches production deployment patterns
-- Easy for reviewers to run locally
+### Polars (не pandas) в Project 01
 
-## Project Independence
+**Почему?** DataFrame API лаконичнее, lazy evaluation, нативная многопоточность. На 7K строк разница в скорости не критична, но API чище: `.with_columns()` вместо цепочки `df["col"] = ...`.
 
-Each project can be developed, tested, and deployed independently:
-- Own `pyproject.toml` dependencies (via extras)
-- Own `Dockerfile` and `docker-compose.yml`
-- Own CI job in GitHub Actions
-- Shared only: linting rules, Makefile targets, CI workflow structure
+**Когда pandas?** Для интеграции с sklearn (`.to_pandas()` на этапе model fitting).
+
+### CatBoost + LightGBM (не XGBoost) в Project 01
+
+**CatBoost:** Нативная обработка категориальных признаков без one-hot encoding. Auto class weights для дисбаланса. Из коробки — SHAP-совместимый feature importance.
+
+**LightGBM:** Быстрее CatBoost на обучение (~10x на этом датасете). Leaf-wise рост дерева лучше работает на малых данных.
+
+**Почему не XGBoost?** CatBoost и LightGBM доминируют в Kaggle-соревнованиях для табличных данных. XGBoost — стандарт 2017 года.
+
+### ChromaDB (не Pinecone, не Qdrant) в Project 02
+
+**Почему?** Встраиваемая, работает локально, persistence из коробки. Для портфолио — не нужен облачный сервис. Production-ready для малых коллекций (<100K документов).
+
+**Когда Qdrant?** Если нужен distributed search, фильтрация по метаданным, или >1M документов.
+
+### FastAPI (не Flask, не Django) для всех API
+
+**Почему?** Async по умолчанию, автогенерация OpenAPI docs, Pydantic валидация на входе. Type hints — не опциональны, а обязательны.
+
+**Когда Flask?** Для быстрого прототипа без валидации (но мы уже прошли этот этап).
+
+### Docker Compose для full stack
+
+**Почему?** Одна команда `docker compose up` поднимает всё: API + UI + MLflow / Grafana / Prometheus. Рекрутер или коллега может проверить проект за 30 секунд.
+
+**Почему не Kubernetes?** Это портфолио, не production-деплой. K8s — overkill для демо.
+
+### Pytest + ruff + mypy
+
+**ruff:** Линтер и форматтер в одном, написан на Rust. Заменяет flake8 + black + isort.
+
+**pytest:** Стандарт индустрии. Fixtures для переиспользования данных между тестами. Параметризация для edge cases.
+
+**mypy:** Статическая типизация ловит баги до runtime. Особенно полезно в ML-пайплайнах, где DataFrame schema меняется неявно.
+
+## Независимость проектов
+
+Каждый проект может быть разработан, протестирован и задеплоен отдельно:
+
+- Своя группа зависимостей (`--extra churn`, `--extra rag`, ...)
+- Свой `Dockerfile` и `docker-compose.yml`
+- Свой CI job в GitHub Actions
+- Общее только: правила линтинга, структура Makefile, pyproject.toml
+
+Это осознанный выбор: монорепо даёт единообразие, но не создаёт связанности между проектами.
