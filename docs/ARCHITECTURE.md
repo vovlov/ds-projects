@@ -87,3 +87,26 @@
 ### sklearn RandomForest (не CNN) в Project 06
 
 **Почему?** Baseline на синтетических фичах документов. Работает нативно на macOS x86_64. CNN (EfficientNet-V2) — для Docker-обучения с реальными изображениями. Показываем прогрессию: baseline → production.
+
+## Полная coverage matrix
+
+| Технология / Подход | Проект(ы) |
+|---|---|
+| Табличный ML (классификация) | 01, 04 |
+| Табличный ML (регрессия) | 07 |
+| NLP / Text Classification | 03, 08 |
+| RAG / LLM | 02, 08 |
+| Computer Vision / CNN | 06 |
+| Graph Neural Networks | 04 |
+| Рекомендательные системы | 09 |
+| Временные ряды | 05 |
+| Streaming / Real-time | 05 |
+| Data Engineering / SQL | 10 |
+| Feature Store | 09 |
+| Data Quality / Drift | 10 |
+| MLOps / Experiment Tracking | 01, 07 |
+| Explainability (SHAP) | 07 |
+| Docker / Containerization | все 10 |
+| FastAPI | все 10 |
+| CI/CD (GitHub Actions) | все 10 |
+| Тесты (pytest) | все 10 (185) |
