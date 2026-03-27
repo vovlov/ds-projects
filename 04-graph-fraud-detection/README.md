@@ -26,9 +26,9 @@ Fraud detection in transaction networks using Graph Neural Networks (GCN, GraphS
 
 | Model | F1 Score | ROC AUC | Notes |
 |-------|----------|---------|-------|
-| CatBoost (baseline) | Synthetic data | Synthetic data | Tabular features only |
-| GCN | Synthetic data | Synthetic data | Uses graph structure |
-| GraphSAGE | Synthetic data | Synthetic data | Inductive learning |
+| CatBoost (baseline) | — | — | Tabular features only |
+| **GCN** | **0.215** | **0.760** | 1000 nodes, 5000 edges, 6.8% fraud, trained in Docker |
+| GraphSAGE | — | — | Architecture ready, not yet trained |
 
 ## Quick Start
 

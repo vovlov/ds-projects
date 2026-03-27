@@ -60,3 +60,8 @@ grafana/data/
 # Models (too large for git)
 models/
 *.bin
+*.safetensors
+artifacts/ner/
+artifacts/gnn/
+artifacts/lstm_ae/
+artifacts/summary.json

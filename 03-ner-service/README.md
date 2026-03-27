@@ -58,8 +58,8 @@ Response:
 
 | Component | Tool |
 |-----------|------|
-| NER Model | Rule-based baseline (regex patterns) |
-| Future: Transformer | HuggingFace RuBERT fine-tuned on NER |
+| NER Model (baseline) | Rule-based (regex patterns) |
+| NER Model (transformer) | Fine-tuned `bert-base-multilingual-cased` on Russian NER (trained in Docker) |
 | API | FastAPI (single + batch endpoints) |
 | Demo | Streamlit with entity highlighting |
 | Entity Types | PER (persons), ORG (organizations), LOC (locations) |
