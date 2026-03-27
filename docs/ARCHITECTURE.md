@@ -67,3 +67,23 @@
 - Общее только: правила линтинга, структура Makefile, pyproject.toml
 
 Это осознанный выбор: монорепо даёт единообразие, но не создаёт связанности между проектами.
+
+## Новые проекты (06–10)
+
+### DuckDB (не PostgreSQL/Spark) в Project 10
+
+**Почему?** DuckDB — встраиваемая аналитическая СУБД. Один файл, zero dependencies. Для профилирования и drift-детекции не нужен сервер. В production — заменяется на Spark/Trino.
+
+### SVD + FAISS (не нейросеть) в Project 09
+
+**Почему SVD?** Работает без GPU, интерпретируем, быстрый baseline. На MovieLens-уровне данных SVD не уступает нейросетям. Two-tower модель (PyTorch) — следующий этап, для Docker-обучения.
+
+**Почему FAISS?** Facebook AI Similarity Search — sub-millisecond ANN для embeddings. Альтернатива: Annoy, ScaNN. FAISS — стандарт индустрии.
+
+### Claude API (не fine-tuned модель) в Project 08
+
+**Почему?** Для демо code review API-based подход быстрее и дешевле. Fine-tuning (LoRA/QLoRA) готов как Docker-скрипт для production. Показываем оба подхода: prompting для быстрого старта, fine-tuning для качества.
+
+### sklearn RandomForest (не CNN) в Project 06
+
+**Почему?** Baseline на синтетических фичах документов. Работает нативно на macOS x86_64. CNN (EfficientNet-V2) — для Docker-обучения с реальными изображениями. Показываем прогрессию: baseline → production.
