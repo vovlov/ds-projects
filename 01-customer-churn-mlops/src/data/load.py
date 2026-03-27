@@ -1,4 +1,10 @@
-"""Data loading and preprocessing for Telco Customer Churn."""
+"""
+Загрузка и предобработка данных Telco Customer Churn.
+
+Датасет IBM содержит 7043 клиента телеком-оператора с 21 признаком.
+Особенность: TotalCharges может прийти как строка с пробелом (для новых клиентов
+с tenure=0 поле пустое в исходном CSV). Обрабатываем это при загрузке.
+"""
 
 from pathlib import Path
 
@@ -7,6 +13,7 @@ import polars as pl
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 RAW_PATH = DATA_DIR / "raw.csv"
 
+# Признаки, которые кодируются как категории
 CATEGORICAL_FEATURES = [
     "gender",
     "Partner",
@@ -25,16 +32,21 @@ CATEGORICAL_FEATURES = [
     "PaymentMethod",
 ]
 
+# Числовые признаки из исходных данных
 NUMERICAL_FEATURES = ["SeniorCitizen", "tenure", "MonthlyCharges", "TotalCharges"]
 
 TARGET = "Churn"
 
 
 def load_raw(path: Path = RAW_PATH) -> pl.DataFrame:
-    """Load raw CSV and apply minimal cleaning."""
+    """Загрузить CSV и привести типы.
+
+    TotalCharges — коварное поле: в некоторых версиях CSV оно строковое,
+    потому что для клиентов с tenure=0 там пробел вместо числа.
+    Polars может распарсить его как float или как string — обрабатываем оба случая.
+    """
     df = pl.read_csv(path)
 
-    # TotalCharges may be string with " " for new customers, or already float
     tc = df["TotalCharges"]
     if tc.dtype == pl.String or tc.dtype == pl.Utf8:
         df = df.with_columns(
@@ -50,6 +62,7 @@ def load_raw(path: Path = RAW_PATH) -> pl.DataFrame:
             pl.col("TotalCharges").fill_null(0.0).alias("TotalCharges"),
         )
 
+    # Целевая переменная: "Yes"/"No" → 1/0
     df = df.with_columns(
         pl.when(pl.col("Churn") == "Yes").then(1).otherwise(0).cast(pl.Int8).alias("Churn"),
     )
@@ -57,7 +70,17 @@ def load_raw(path: Path = RAW_PATH) -> pl.DataFrame:
 
 
 def add_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Engineer features from raw data."""
+    """Инженерные признаки — то, чего нет в исходных данных.
+
+    Идеи:
+    - AvgMonthlySpend: сколько клиент платит в среднем в месяц (не то же самое,
+      что MonthlyCharges — тот показывает текущий тариф, а этот — факт)
+    - ExpectedTotalCharges: сколько бы клиент заплатил, если бы текущий тариф
+      не менялся с самого начала. Разница с TotalCharges показывает смену тарифа.
+    - TenureGroup: сегментация по «зрелости» клиента (новый / средний / долгий)
+    - NumServices: количество подключённых допуслуг (0–6). Гипотеза: чем больше
+      услуг — тем сложнее уйти (switching cost).
+    """
     return df.with_columns(
         (pl.col("TotalCharges") / (pl.col("tenure") + 1)).alias("AvgMonthlySpend"),
         (pl.col("MonthlyCharges") * pl.col("tenure")).alias("ExpectedTotalCharges"),
@@ -79,7 +102,7 @@ def add_features(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def prepare_dataset(path: Path = RAW_PATH) -> pl.DataFrame:
-    """Full pipeline: load → clean → engineer features."""
+    """Полный пайплайн: загрузка → очистка → feature engineering."""
     df = load_raw(path)
     df = add_features(df)
     return df
