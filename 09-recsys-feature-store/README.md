@@ -8,6 +8,8 @@
 Personalized product recommendations: collaborative filtering (SVD) for returning
 users, content-based fallback for cold-start users.
 
+> **Эволюция:** В Практикуме я [строил классификатор для рекомендации тарифов](https://github.com/vovlov/YandexPraktikum/tree/master/project_6_Intro_ML) — один sklearn-классификатор. Здесь — полноценная рекомендательная система: SVD-факторизация, feature store для консистентных фичей, content-based fallback для cold start.
+
 **Evolves from:** Project 6 (classification for recommendations), Projects 2, 9, 10
 (feature engineering).
 

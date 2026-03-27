@@ -65,3 +65,15 @@ artifacts/ner/
 artifacts/gnn/
 artifacts/lstm_ae/
 artifacts/summary.json
+
+# Project-specific data (generated, not tracked)
+*/data/*.csv
+*/data/*.parquet
+!*/data/documents/*.txt
+!*/data/documents/*.md
+
+# Sub-project locks (only root uv.lock tracked)
+*/uv.lock
+
+# DuckDB databases
+*.duckdb
