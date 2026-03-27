@@ -6,8 +6,11 @@ import logging
 import pickle
 from pathlib import Path
 
+import polars as pl
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+from ..data.load import CATEGORICAL_FEATURES, add_features
 
 logger = logging.getLogger(__name__)
 
@@ -69,46 +72,48 @@ def health():
 def predict(customer: CustomerInput):
     model = get_model()
 
-    total_charges = customer.TotalCharges
-    tenure = customer.tenure
-    monthly = customer.MonthlyCharges
+    # Reconstruct a single-row DataFrame matching the training pipeline
+    row = {
+        "customerID": "api-request",
+        "gender": customer.gender,
+        "SeniorCitizen": customer.SeniorCitizen,
+        "Partner": customer.Partner,
+        "Dependents": customer.Dependents,
+        "tenure": customer.tenure,
+        "PhoneService": customer.PhoneService,
+        "MultipleLines": customer.MultipleLines,
+        "InternetService": customer.InternetService,
+        "OnlineSecurity": customer.OnlineSecurity,
+        "OnlineBackup": customer.OnlineBackup,
+        "DeviceProtection": customer.DeviceProtection,
+        "TechSupport": customer.TechSupport,
+        "StreamingTV": customer.StreamingTV,
+        "StreamingMovies": customer.StreamingMovies,
+        "Contract": customer.Contract,
+        "PaperlessBilling": customer.PaperlessBilling,
+        "PaymentMethod": customer.PaymentMethod,
+        "MonthlyCharges": customer.MonthlyCharges,
+        "TotalCharges": customer.TotalCharges,
+        "Churn": 0,
+    }
+    df = pl.DataFrame([row])
+    df = add_features(df)
 
-    features = [
-        customer.gender,
-        customer.Partner,
-        customer.Dependents,
-        customer.PhoneService,
-        customer.MultipleLines,
-        customer.InternetService,
-        customer.OnlineSecurity,
-        customer.OnlineBackup,
-        customer.DeviceProtection,
-        customer.TechSupport,
-        customer.StreamingTV,
-        customer.StreamingMovies,
-        customer.Contract,
-        customer.PaperlessBilling,
-        customer.PaymentMethod,
-        customer.SeniorCitizen,
-        tenure,
-        monthly,
-        total_charges,
-        total_charges / (tenure + 1),  # AvgMonthlySpend
-        monthly * tenure,  # ExpectedTotalCharges
-        "new" if tenure <= 12 else "mid" if tenure <= 36 else "long",  # TenureGroup
-        sum(
-            [
-                customer.OnlineSecurity == "Yes",
-                customer.OnlineBackup == "Yes",
-                customer.DeviceProtection == "Yes",
-                customer.TechSupport == "Yes",
-                customer.StreamingTV == "Yes",
-                customer.StreamingMovies == "Yes",
-            ]
-        ),  # NumServices
-    ]
+    # One-hot encode categoricals (same as LightGBM training)
+    cat_cols = [c for c in CATEGORICAL_FEATURES if c in df.columns] + ["TenureGroup"]
+    df_enc = df.to_dummies(columns=cat_cols)
+    feature_cols = [c for c in df_enc.columns if c not in ("customerID", "Churn")]
+    X = df_enc.select(feature_cols).to_pandas()
 
-    proba = float(model.predict_proba([features])[0][1])
+    # Align columns with model (add missing, drop extra)
+    if hasattr(model, "feature_name_"):
+        model_cols = model.feature_name_
+        for col in model_cols:
+            if col not in X.columns:
+                X[col] = 0
+        X = X[model_cols]
+
+    proba = float(model.predict_proba(X)[0][1])
     prediction = proba >= 0.5
 
     if proba >= 0.7:

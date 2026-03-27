@@ -106,6 +106,46 @@ class TestAPI:
         from src.api.app import app
 
         client = TestClient(app)
-        # Missing required fields should fail
         resp = client.post("/predict", json={"gender": "Male"})
-        assert resp.status_code == 422  # Pydantic validation error
+        assert resp.status_code == 422
+
+    def test_predict_with_model(self):
+        """Integration test: predict with real trained model."""
+        from pathlib import Path
+
+        model_path = Path(__file__).resolve().parents[1] / "artifacts" / "model.pkl"
+        if not model_path.exists():
+            pytest.skip("Model artifact not available — run train.py first")
+
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/predict",
+            json={
+                "gender": "Female",
+                "SeniorCitizen": 0,
+                "Partner": "No",
+                "Dependents": "No",
+                "tenure": 1,
+                "PhoneService": "Yes",
+                "MultipleLines": "No",
+                "InternetService": "Fiber optic",
+                "OnlineSecurity": "No",
+                "OnlineBackup": "No",
+                "DeviceProtection": "No",
+                "TechSupport": "No",
+                "StreamingTV": "No",
+                "StreamingMovies": "No",
+                "Contract": "Month-to-month",
+                "PaperlessBilling": "Yes",
+                "PaymentMethod": "Electronic check",
+                "MonthlyCharges": 70.35,
+                "TotalCharges": 70.35,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert 0 <= data["churn_probability"] <= 1
+        assert data["risk_level"] in ("low", "medium", "high")
