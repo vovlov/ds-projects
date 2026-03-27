@@ -72,7 +72,7 @@ git clone https://github.com/vovlov/ds-projects.git
 cd ds-projects
 
 make setup              # Все зависимости
-make test               # 184 теста по всем 10 проектам
+make test               # 185 тестов по всем 10 проектам
 make lint               # ruff check + format
 
 # Запуск любого проекта
@@ -82,8 +82,16 @@ make run-recsys         # 09: Streamlit
 make run-quality        # 10: Streamlit
 ```
 
+## Документация / Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Почему выбраны именно эти инструменты
+- [docs/EVOLUTION.md](docs/EVOLUTION.md) — Путь от учебных проектов к production
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — Как запустить и разрабатывать
+
 ## Автор / Author
 
 **Владимир Ловцов** — Enterprise Architect & AI Practitioner
+
+8+ лет в IT. VTB (real-time, <0.3s) → T1 (enterprise architecture) → Digital Artel (AI cooperative).
 
 - [lovtsov.dev](https://lovtsov.dev) | [GitHub](https://github.com/vovlov) | [Telegram](https://t.me/it_underside)
