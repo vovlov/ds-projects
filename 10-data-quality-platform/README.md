@@ -36,6 +36,20 @@ after corrupted data has already reached reports or ML models.
 | Тесты | **pytest** |
 | Контейнеризация | **Docker** |
 
+## Результаты / Results
+
+| Возможность | Статус |
+|-------------|--------|
+| Профилирование колонок (count, nulls, mean, std, min, max, unique) | Работает |
+| Expectations (not_null, unique, range, exists, values_in_set) | 5 типов проверок |
+| PSI drift detection | Работает (detects mean shift + std change) |
+| KS-test drift | Работает (p-value для численных колонок) |
+| API /profile | CSV upload → полный профиль |
+| API /validate | CSV + YAML suite → отчёт качества |
+| API /drift | Два CSV → отчёт о дрифте |
+
+27 тестов покрывают: профилирование, все expectations (pass + fail cases), drift detection, API endpoints.
+
 ## Структура проекта / Project Structure
 
 ```

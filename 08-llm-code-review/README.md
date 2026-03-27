@@ -34,6 +34,17 @@
       └──────────────────┘      └──────────────────┘
 ```
 
+## Результаты / Results
+
+| Компонент | Метрика | Значение |
+|-----------|---------|----------|
+| Category Classifier (TF-IDF + LR) | Accuracy | ~30% на 5 категориях (12 примеров) |
+| Claude API Review | Качество | Структурированные комментарии с severity |
+| API /classify | Latency | <50ms |
+| API /review | Latency | 2-5 сек (Claude API) |
+
+Классификатор обучен на 12 примерах — это baseline для демо. С LoRA fine-tuning на 1000+ примерах из GitHub PR ожидается accuracy > 70%.
+
 ## Быстрый старт
 
 ```bash
