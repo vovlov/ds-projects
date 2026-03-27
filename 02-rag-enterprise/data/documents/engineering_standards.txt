@@ -1,0 +1,25 @@
+Engineering Standards and Best Practices
+
+Code Review Process
+All code changes must be reviewed by at least one team member before merging. Reviews should be completed within 24 hours of submission. The reviewer should check for correctness, readability, test coverage, and adherence to coding standards. Use "Approve", "Request Changes", or "Comment" — avoid ambiguous feedback.
+
+Branch Strategy
+We follow trunk-based development with short-lived feature branches. Branch naming: feature/TICKET-123-short-description, bugfix/TICKET-456-description, hotfix/TICKET-789-description. Feature branches should not live longer than 3 days. Rebase on main before merging.
+
+Testing Requirements
+Unit test coverage must be at least 80% for new code. Integration tests are required for all API endpoints. End-to-end tests must pass before deployment to staging. Performance tests are required for any change affecting response time.
+
+Deployment Process
+Deployments follow a blue-green strategy. All deployments go through staging first with a minimum 2-hour bake time. Production deployments require approval from the team lead. Rollback procedure must be documented for every deployment.
+
+Incident Response
+Severity levels: P1 (service down), P2 (degraded), P3 (minor impact), P4 (cosmetic). P1 incidents require immediate response and a post-mortem within 48 hours. On-call rotation is weekly, starting Monday at 10:00 AM. Use the #incidents Slack channel for all incident communication.
+
+API Design Guidelines
+All APIs must follow REST conventions. Use JSON for request and response bodies. API versioning: /api/v1/resource. Authentication: Bearer tokens via Authorization header. Rate limiting: 100 requests per minute per API key. All endpoints must return proper HTTP status codes.
+
+Database Standards
+PostgreSQL is the primary database. All schema changes must go through migration scripts. Never modify production data directly. Indexes are required for columns used in WHERE clauses with more than 10,000 rows. Connection pooling is mandatory for all services.
+
+Logging Standards
+Use structured logging (JSON format) for all services. Required fields: timestamp, level, service_name, request_id, message. Log levels: DEBUG (development only), INFO (normal operations), WARNING (potential issues), ERROR (failures requiring attention), CRITICAL (service-affecting failures). Never log sensitive data (passwords, tokens, PII).

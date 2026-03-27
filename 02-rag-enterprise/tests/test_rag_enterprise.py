@@ -82,6 +82,16 @@ class TestRetrieval:
         texts = " ".join(r["text"].lower() for r in results)
         assert "week" in texts or "onboarding" in texts or "day" in texts
 
+    def test_search_code_review(self, indexed_collection):
+        results = search("code review process", indexed_collection, n_results=3)
+        texts = " ".join(r["text"].lower() for r in results)
+        assert "review" in texts or "code" in texts
+
+    def test_search_data_governance(self, indexed_collection):
+        results = search("GDPR data retention policy", indexed_collection, n_results=3)
+        texts = " ".join(r["text"].lower() for r in results)
+        assert "gdpr" in texts or "retention" in texts or "data" in texts
+
 
 class TestGeneration:
     def test_build_prompt_includes_context(self):

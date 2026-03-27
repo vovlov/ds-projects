@@ -131,10 +131,13 @@ class TestAPI:
         from src.api.app import app
 
         client = TestClient(app)
-        resp = client.post("/predict/batch", json=[
-            {"text": "Яндекс в Санкт-Петербурге."},
-            {"text": "Обычный текст."},
-        ])
+        resp = client.post(
+            "/predict/batch",
+            json=[
+                {"text": "Яндекс в Санкт-Петербурге."},
+                {"text": "Обычный текст."},
+            ],
+        )
         assert resp.status_code == 200
         assert len(resp.json()) == 2
 

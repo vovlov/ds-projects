@@ -1,0 +1,23 @@
+Data Governance Policy
+
+Data Classification
+All company data must be classified into one of four categories:
+- PUBLIC: Information intended for public consumption (marketing materials, blog posts).
+- INTERNAL: General business information (meeting notes, internal wikis).
+- CONFIDENTIAL: Sensitive business data (financial reports, strategic plans, customer lists).
+- RESTRICTED: Highly sensitive data (PII, credentials, trade secrets).
+
+Data Retention
+Public data: No retention limit. Internal data: 3 years after last use. Confidential data: 7 years, then secure deletion. Restricted data: As required by regulation (GDPR: upon request; financial: 7 years).
+
+Access Control
+Access follows the principle of least privilege. Data access requests must be approved by the data owner. Access reviews are conducted quarterly. All access to CONFIDENTIAL and RESTRICTED data must be logged.
+
+Data Quality
+Each dataset must have a designated data owner responsible for quality. Data quality metrics: completeness, accuracy, consistency, timeliness. Automated quality checks run daily using Great Expectations framework. Quality issues must be reported to the data governance team within 24 hours.
+
+Personal Data (GDPR)
+Collection of personal data requires explicit consent. Data subjects have the right to access, rectify, and delete their data. Data Processing Agreements (DPAs) must be in place with all third-party processors. Privacy Impact Assessments are required for new data processing activities.
+
+Data Breach Response
+Any suspected data breach must be reported immediately to security@company.com. The incident response team will assess the breach within 1 hour. If personal data is affected, regulators must be notified within 72 hours per GDPR. Affected individuals must be notified without undue delay.

@@ -1,5 +1,10 @@
 # Data Science & ML Projects
 
+![CI](https://github.com/vovlov/ds-projects/actions/workflows/ci.yml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.12-blue)
+![Tests](https://img.shields.io/badge/tests-80-green)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
+
 Пять production-ready проектов машинного обучения — от классической предиктивной аналитики до real-time обнаружения аномалий. Каждый проект решает конкретную бизнес-задачу и доведён до стадии работающего API с тестами, Docker-контейнерами и CI/CD.
 
 *Five production-ready ML projects — from classical predictive analytics to real-time anomaly detection. Each project solves a concrete business problem and is delivered as a working API with tests, Docker containers, and CI/CD.*
@@ -16,7 +21,7 @@
 | 04 | [Graph Fraud Detection](04-graph-fraud-detection) | Обнаружение мошеннических транзакций через граф связей | PyTorch Geometric, CatBoost, NetworkX | 9 |
 | 05 | [Realtime Anomaly Detection](05-realtime-anomaly) | Real-time обнаружение аномалий в инфраструктурных метриках | Kafka, Grafana, Prometheus, FastAPI | 14 |
 
-**74 теста** | **5 API endpoints** | **5 Docker Compose stacks** | **GitHub Actions CI/CD**
+**80 тестов** | **5 API endpoints** | **5 Docker Compose stacks** | **GitHub Actions CI/CD**
 
 ## Связь между проектами / How Projects Connect
 
@@ -78,7 +83,7 @@ make run-fraud        # 04: API для скоринга
 make run-anomaly      # 05: docker-compose (Kafka + Grafana)
 
 # Тесты и линтинг
-make test             # Все проекты (74 теста)
+make test             # Все проекты (80 тестов)
 make lint             # ruff check + format
 ```
 
