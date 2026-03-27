@@ -1205,8 +1205,6 @@ fraud = [
     { name = "pyvis" },
     { name = "scikit-learn" },
     { name = "streamlit" },
-    { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "torch-geometric" },
     { name = "uvicorn" },
 ]
 ner = [
@@ -1271,9 +1269,7 @@ requires-dist = [
     { name = "streamlit", marker = "extra == 'fraud'", specifier = ">=1.40" },
     { name = "streamlit", marker = "extra == 'ner'", specifier = ">=1.40" },
     { name = "torch", marker = "extra == 'anomaly'", specifier = ">=2.4" },
-    { name = "torch", marker = "extra == 'fraud'", specifier = ">=2.4" },
     { name = "torch", marker = "extra == 'ner'", specifier = ">=2.4" },
-    { name = "torch-geometric", marker = "extra == 'fraud'", specifier = ">=2.6" },
     { name = "transformers", marker = "extra == 'ner'", specifier = ">=4.47" },
     { name = "uvicorn", marker = "extra == 'anomaly'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'churn'", specifier = ">=0.34" },
@@ -5412,26 +5408,6 @@ dependencies = [
     { name = "setuptools", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "sympy", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "typing-extensions", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-]
-
-[[package]]
-name = "torch-geometric"
-version = "2.7.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "fsspec" },
-    { name = "jinja2" },
-    { name = "numpy" },
-    { name = "psutil" },
-    { name = "pyparsing" },
-    { name = "requests" },
-    { name = "tqdm" },
-    { name = "xxhash" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/75/63/b210152635902da7fe79fcdd16517fae108f457a0ed22c737e702a9afbae/torch_geometric-2.7.0.tar.gz", hash = "sha256:f9099e4aece1a9f618c84dbaac33a77f43139736698c7e8bddf3301ef1f2e8d4", size = 876725, upload-time = "2025-10-15T20:48:03.443Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1e/d3/4dffd7300500465e0b4a2ae917dcb2ce771de0b9a772670365799a27c024/torch_geometric-2.7.0-py3-none-any.whl", hash = "sha256:6e0cd3ad824d484651ef5d308fc66c687bfcf5ba040d56d1e0fe0f81f365e292", size = 1275346, upload-time = "2025-10-15T20:48:01.949Z" },
 ]
 
 [[package]]

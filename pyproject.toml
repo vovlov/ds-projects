@@ -52,8 +52,6 @@ ner = [
     "seqeval>=1.2",
 ]
 fraud = [
-    "torch>=2.4",
-    "torch-geometric>=2.6",
     "networkx>=3.4",
     "catboost>=1.2",
     "scikit-learn>=1.5",
@@ -78,6 +76,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+ignore = ["N806"]  # Allow uppercase X, y (ML convention)
 
 [tool.mypy]
 python_version = "3.12"
