@@ -1,0 +1,22 @@
+Company Remote Work Policy
+
+1. Eligibility
+All full-time employees who have completed their probationary period (90 days) are eligible for remote work. Part-time employees may request remote work on a case-by-case basis with manager approval.
+
+2. Work Schedule
+Remote employees must maintain core working hours from 10:00 AM to 4:00 PM in their local time zone. Flexible hours outside of core hours are permitted with manager approval. All employees must be available for scheduled meetings during core hours.
+
+3. Equipment
+The company provides a laptop, monitor, and keyboard for remote workers. Employees are responsible for maintaining a reliable internet connection with minimum 50 Mbps download speed. IT support is available Monday through Friday, 9:00 AM to 6:00 PM.
+
+4. Communication
+Daily standups are required for all team members. Slack is the primary communication tool for quick messages. Email is used for formal communications and external correspondence. Video calls should be used for meetings longer than 15 minutes.
+
+5. Security
+All company data must be accessed through the VPN. Two-factor authentication is required for all company systems. Company devices must not be shared with non-employees. Sensitive documents must not be printed at home without approval.
+
+6. Performance
+Remote employees are evaluated on the same criteria as office-based employees. Regular one-on-one meetings with managers are required at least bi-weekly. Annual performance reviews include assessment of remote work effectiveness.
+
+7. Expenses
+The company reimburses up to $50/month for internet expenses. Home office setup allowance of $500 is provided once per year. Travel to the office for team events is fully covered by the company.

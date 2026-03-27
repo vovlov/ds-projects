@@ -1,0 +1,36 @@
+Employee Onboarding Guide
+
+Welcome to the team! This guide will help you get started.
+
+Week 1: Getting Started
+- Day 1: Meet your manager and team members. Complete HR paperwork and set up your company accounts.
+- Day 2: IT setup - receive your laptop, configure email, Slack, and development tools.
+- Day 3: Review company handbook and complete mandatory compliance training.
+- Day 4: Shadow a team member to understand daily workflows.
+- Day 5: First one-on-one with your manager to discuss goals and expectations.
+
+Week 2: Deep Dive
+- Attend architecture overview sessions with the engineering team.
+- Set up your development environment following the README in our main repository.
+- Complete security awareness training and obtain VPN access.
+- Join your first sprint planning meeting.
+
+Week 3-4: Ramp Up
+- Pick up your first ticket from the backlog (labeled "good-first-issue").
+- Submit your first pull request and get familiar with our code review process.
+- Attend product demo and provide feedback.
+- Schedule meetings with cross-functional team members (design, QA, product).
+
+Key Contacts
+- HR: hr@company.com
+- IT Support: it-help@company.com or #it-support on Slack
+- Your Manager: Check your welcome email
+- Office Admin: office@company.com
+
+Tools We Use
+- Jira for project management
+- GitHub for source code
+- Slack for communication
+- Confluence for documentation
+- Figma for design
+- Datadog for monitoring
