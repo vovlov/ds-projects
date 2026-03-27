@@ -60,7 +60,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra fraud
-      - run: cd 04-graph-fraud-detection && uv run env PYTHONPATH=. python -m pytest tests/ -v --tb=short
+      - run: cd 04-graph-fraud-detection && uv run python -m pytest tests/ -v --tb=short
 
   test-anomaly:
     runs-on: ubuntu-latest
@@ -71,7 +71,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra anomaly
-      - run: cd 05-realtime-anomaly && uv run env PYTHONPATH=. python -m pytest tests/ -v --tb=short
+      - run: cd 05-realtime-anomaly && uv run python -m pytest tests/ -v --tb=short
 
   test-cv:
     runs-on: ubuntu-latest
@@ -82,7 +82,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra cv
-      - run: cd 06-cv-document-scanner && uv run env PYTHONPATH=. python -m pytest tests/ -v --tb=short
+      - run: cd 06-cv-document-scanner && uv run python -m pytest tests/ -v --tb=short
 
   test-pricing:
     runs-on: ubuntu-latest
@@ -93,7 +93,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra pricing
-      - run: cd 07-realestate-pricing && uv run env PYTHONPATH=. python -m pytest tests/ -v --tb=short
+      - run: cd 07-realestate-pricing && uv run python -m pytest tests/ -v --tb=short
 
   test-review:
     runs-on: ubuntu-latest
@@ -104,7 +104,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra review
-      - run: cd 08-llm-code-review && uv run env PYTHONPATH=. python -m pytest tests/ -v --tb=short
+      - run: cd 08-llm-code-review && uv run python -m pytest tests/ -v --tb=short
 
   test-recsys:
     runs-on: ubuntu-latest
@@ -115,7 +115,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra recsys
-      - run: cd 09-recsys-feature-store && uv run env PYTHONPATH=. python -m pytest tests/ -v --tb=short
+      - run: cd 09-recsys-feature-store && uv run python -m pytest tests/ -v --tb=short
 
   test-quality:
     runs-on: ubuntu-latest
@@ -126,4 +126,4 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra quality
-      - run: cd 10-data-quality-platform && uv run env PYTHONPATH=. python -m pytest tests/ -v --tb=short
+      - run: cd 10-data-quality-platform && uv run python -m pytest tests/ -v --tb=short
