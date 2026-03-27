@@ -27,7 +27,10 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra churn
-      - run: cd 01-customer-churn-mlops && PYTHONPATH=. uv run pytest tests/ -v --tb=short --override-ini="rootdir=."
+      - run: uv run pytest tests/ -v --tb=short
+        working-directory: 01-customer-churn-mlops
+        env:
+          PYTHONPATH: "."
 
   test-rag:
     runs-on: ubuntu-latest
@@ -38,7 +41,10 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra rag
-      - run: cd 02-rag-enterprise && PYTHONPATH=. uv run pytest tests/ -v --tb=short --override-ini="rootdir=."
+      - run: uv run pytest tests/ -v --tb=short
+        working-directory: 02-rag-enterprise
+        env:
+          PYTHONPATH: "."
 
   test-ner:
     runs-on: ubuntu-latest
@@ -49,7 +55,10 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra ner
-      - run: cd 03-ner-service && PYTHONPATH=. uv run pytest tests/ -v --tb=short --override-ini="rootdir=."
+      - run: uv run pytest tests/ -v --tb=short
+        working-directory: 03-ner-service
+        env:
+          PYTHONPATH: "."
 
   test-fraud:
     runs-on: ubuntu-latest
@@ -60,7 +69,10 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra fraud
-      - run: cd 04-graph-fraud-detection && PYTHONPATH=. uv run pytest tests/ -v --tb=short --override-ini="rootdir=."
+      - run: uv run pytest tests/ -v --tb=short
+        working-directory: 04-graph-fraud-detection
+        env:
+          PYTHONPATH: "."
 
   test-anomaly:
     runs-on: ubuntu-latest
@@ -71,7 +83,10 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra anomaly
-      - run: cd 05-realtime-anomaly && PYTHONPATH=. uv run pytest tests/ -v --tb=short --override-ini="rootdir=."
+      - run: uv run pytest tests/ -v --tb=short
+        working-directory: 05-realtime-anomaly
+        env:
+          PYTHONPATH: "."
 
   test-cv:
     runs-on: ubuntu-latest
@@ -82,7 +97,10 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra cv
-      - run: cd 06-cv-document-scanner && PYTHONPATH=. uv run pytest tests/ -v --tb=short --override-ini="rootdir=."
+      - run: uv run pytest tests/ -v --tb=short
+        working-directory: 06-cv-document-scanner
+        env:
+          PYTHONPATH: "."
 
   test-pricing:
     runs-on: ubuntu-latest
@@ -93,7 +111,10 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra pricing
-      - run: cd 07-realestate-pricing && PYTHONPATH=. uv run pytest tests/ -v --tb=short --override-ini="rootdir=."
+      - run: uv run pytest tests/ -v --tb=short
+        working-directory: 07-realestate-pricing
+        env:
+          PYTHONPATH: "."
 
   test-review:
     runs-on: ubuntu-latest
@@ -104,7 +125,10 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra review
-      - run: cd 08-llm-code-review && PYTHONPATH=. uv run pytest tests/ -v --tb=short --override-ini="rootdir=."
+      - run: uv run pytest tests/ -v --tb=short
+        working-directory: 08-llm-code-review
+        env:
+          PYTHONPATH: "."
 
   test-recsys:
     runs-on: ubuntu-latest
@@ -115,7 +139,10 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra recsys
-      - run: cd 09-recsys-feature-store && PYTHONPATH=. uv run pytest tests/ -v --tb=short --override-ini="rootdir=."
+      - run: uv run pytest tests/ -v --tb=short
+        working-directory: 09-recsys-feature-store
+        env:
+          PYTHONPATH: "."
 
   test-quality:
     runs-on: ubuntu-latest
@@ -126,4 +153,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra quality
-      - run: cd 10-data-quality-platform && PYTHONPATH=. uv run pytest tests/ -v --tb=short --override-ini="rootdir=."
+      - run: uv run pytest tests/ -v --tb=short
+        working-directory: 10-data-quality-platform
+        env:
+          PYTHONPATH: "."
