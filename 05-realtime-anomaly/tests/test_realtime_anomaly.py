@@ -1,2 +1,102 @@
-def test_placeholder():
-    pass
+"""Tests for Realtime Anomaly Detection."""
+
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.data.generator import generate_timeseries, to_windows
+from src.models.detector import MultiMetricDetector, StatisticalDetector
+
+
+class TestDataGenerator:
+    def test_generate_shape(self):
+        data = generate_timeseries(n_points=1000)
+        assert len(data["timestamps"]) == 1000
+        assert len(data["cpu"]) == 1000
+        assert len(data["latency"]) == 1000
+        assert len(data["requests"]) == 1000
+        assert len(data["labels"]) == 1000
+
+    def test_anomaly_rate(self):
+        data = generate_timeseries(n_points=5000, anomaly_rate=0.05)
+        anomaly_ratio = data["labels"].mean()
+        assert 0.01 < anomaly_ratio < 0.15  # roughly around 5%
+
+    def test_cpu_range(self):
+        data = generate_timeseries(n_points=1000)
+        assert data["cpu"].min() >= 0
+        assert data["cpu"].max() <= 100
+
+    def test_latency_positive(self):
+        data = generate_timeseries(n_points=1000)
+        assert (data["latency"] > 0).all()
+
+    def test_requests_non_negative(self):
+        data = generate_timeseries(n_points=1000)
+        assert (data["requests"] >= 0).all()
+
+    def test_deterministic(self):
+        d1 = generate_timeseries(seed=42)
+        d2 = generate_timeseries(seed=42)
+        np.testing.assert_array_equal(d1["cpu"], d2["cpu"])
+
+    def test_labels_binary(self):
+        data = generate_timeseries(n_points=1000)
+        assert set(np.unique(data["labels"])).issubset({0, 1})
+
+
+class TestWindows:
+    def test_window_shape(self):
+        data = generate_timeseries(n_points=200)
+        X, y = to_windows(data, window_size=30, stride=1)
+        assert X.shape[1] == 30  # window size
+        assert X.shape[2] == 3  # features (cpu, latency, requests)
+        assert len(y) == X.shape[0]
+
+    def test_window_labels_binary(self):
+        data = generate_timeseries(n_points=200)
+        _, y = to_windows(data, window_size=30)
+        assert set(np.unique(y)).issubset({0, 1})
+
+
+class TestStatisticalDetector:
+    def test_detect_returns_result(self):
+        detector = StatisticalDetector(window_size=20, threshold_sigma=2.0)
+        series = np.random.randn(200)
+        result = detector.detect(series)
+        assert len(result.scores) == 200
+        assert len(result.predictions) == 200
+        assert result.threshold == 2.0
+
+    def test_detect_finds_spike(self):
+        detector = StatisticalDetector(window_size=20, threshold_sigma=3.0)
+        series = np.random.randn(200) * 0.5
+        series[150] = 50  # big spike
+        result = detector.detect(series)
+        assert result.predictions[150] == 1
+
+    def test_normal_data_few_anomalies(self):
+        detector = StatisticalDetector(window_size=50, threshold_sigma=3.0)
+        series = np.random.randn(1000)
+        result = detector.detect(series)
+        anomaly_rate = result.predictions.mean()
+        assert anomaly_rate < 0.05  # should be very few
+
+
+class TestMultiMetricDetector:
+    def test_detect_synthetic_data(self):
+        data = generate_timeseries(n_points=1000, anomaly_rate=0.05)
+        detector = MultiMetricDetector(window_size=50, threshold_sigma=3.0)
+        result = detector.detect(data)
+        assert len(result.scores) == 1000
+        assert len(result.predictions) == 1000
+
+    def test_detect_finds_some_anomalies(self):
+        data = generate_timeseries(n_points=2000, anomaly_rate=0.05)
+        detector = MultiMetricDetector(window_size=50, threshold_sigma=2.5)
+        result = detector.detect(data)
+        # Should find at least some anomalies
+        assert result.predictions.sum() > 0

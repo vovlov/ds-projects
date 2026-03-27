@@ -79,11 +79,11 @@ git push → GitHub Actions → lint + test → build Docker → [deploy]
 
 | Project | Code | Tests | Docker | CI/CD | Demo |
 |---------|------|-------|--------|-------|------|
-| 01 Churn MLOps | 🔨 | ⬜ | ⬜ | ⬜ | ⬜ |
-| 02 RAG Enterprise | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| 03 NER Service | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| 04 Graph Fraud | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| 05 Realtime Anomaly | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| 01 Churn MLOps | ✅ | ✅ 14 | ✅ | ✅ | Streamlit |
+| 02 RAG Enterprise | ✅ | ✅ 11 | ✅ | ✅ | Gradio |
+| 03 NER Service | ✅ | ✅ 14 | ✅ | ✅ | Streamlit |
+| 04 Graph Fraud | ✅ | ✅ 9 | ✅ | ✅ | Streamlit |
+| 05 Realtime Anomaly | ✅ | ✅ 14 | ✅ | ✅ | Grafana |
 
 ## Author
 

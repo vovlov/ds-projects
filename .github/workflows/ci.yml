@@ -27,7 +27,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra churn
-      - run: uv run pytest 01-customer-churn-mlops/tests/ -v --tb=short
+      - run: cd 01-customer-churn-mlops && uv run pytest tests/ -v --tb=short
 
   test-rag:
     runs-on: ubuntu-latest
@@ -38,7 +38,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra rag
-      - run: uv run pytest 02-rag-enterprise/tests/ -v --tb=short
+      - run: cd 02-rag-enterprise && uv run pytest tests/ -v --tb=short
 
   test-ner:
     runs-on: ubuntu-latest
@@ -49,7 +49,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra ner
-      - run: uv run pytest 03-ner-service/tests/ -v --tb=short
+      - run: cd 03-ner-service && uv run pytest tests/ -v --tb=short
 
   test-fraud:
     runs-on: ubuntu-latest
@@ -60,7 +60,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra fraud
-      - run: uv run pytest 04-graph-fraud-detection/tests/ -v --tb=short
+      - run: cd 04-graph-fraud-detection && uv run pytest tests/ -v --tb=short
 
   test-anomaly:
     runs-on: ubuntu-latest
@@ -71,4 +71,4 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra anomaly
-      - run: uv run pytest 05-realtime-anomaly/tests/ -v --tb=short
+      - run: cd 05-realtime-anomaly && uv run pytest tests/ -v --tb=short

@@ -85,14 +85,7 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
-testpaths = [
-    "01-customer-churn-mlops/tests",
-    "02-rag-enterprise/tests",
-    "03-ner-service/tests",
-    "04-graph-fraud-detection/tests",
-    "05-realtime-anomaly/tests",
-]
-addopts = "-v --tb=short --import-mode=importlib"
+addopts = "-v --tb=short"
 
 [tool.uv]
 override-dependencies = [

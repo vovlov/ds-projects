@@ -33,23 +33,22 @@ typecheck:
 	uv run mypy .
 
 # ── Test ───────────────────────────────────────────────────────────
-test:
-	uv run pytest
+test: test-churn test-rag test-ner test-fraud test-anomaly
 
 test-churn:
-	uv run pytest 01-customer-churn-mlops/tests/ -v
+	cd 01-customer-churn-mlops && uv run pytest tests/ -v
 
 test-rag:
-	uv run pytest 02-rag-enterprise/tests/ -v
+	cd 02-rag-enterprise && uv run pytest tests/ -v
 
 test-ner:
-	uv run pytest 03-ner-service/tests/ -v
+	cd 03-ner-service && uv run pytest tests/ -v
 
 test-fraud:
-	uv run pytest 04-graph-fraud-detection/tests/ -v
+	cd 04-graph-fraud-detection && uv run pytest tests/ -v
 
 test-anomaly:
-	uv run pytest 05-realtime-anomaly/tests/ -v
+	cd 05-realtime-anomaly && uv run pytest tests/ -v
 
 # ── Run demos ──────────────────────────────────────────────────────
 run-churn:

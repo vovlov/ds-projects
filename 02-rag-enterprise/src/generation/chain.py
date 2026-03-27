@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import os
 
-from anthropic import Anthropic
-
 SYSTEM_PROMPT = """You are a helpful assistant that answers questions based on the provided context.
 
 Rules:
@@ -47,6 +45,8 @@ def generate_answer(
             "model": model,
             "sources": [],
         }
+
+    from anthropic import Anthropic
 
     client = Anthropic(api_key=api_key)
     prompt = build_prompt(query, context_chunks)
