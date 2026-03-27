@@ -1,0 +1,42 @@
+# Training configuration for the document scanner project.
+# Used by both the sklearn baseline and the CNN training pipeline.
+
+data:
+  n_samples: 500
+  seed: 42
+  test_size: 0.2
+  doc_types:
+    - receipt
+    - id_card
+    - medical_report
+    - invoice
+    - contract
+
+baseline:
+  # sklearn RandomForestClassifier
+  n_estimators: 200
+  max_depth: 12
+  min_samples_leaf: 3
+
+cnn:
+  # EfficientNet-V2-S fine-tuning (runs in Docker)
+  backbone: efficientnet_v2_s
+  input_size: 224
+  batch_size: 32
+  epochs_frozen: 3       # train only the head
+  epochs_finetune: 7     # unfreeze backbone with lower LR
+  lr_head: 1.0e-3
+  lr_backbone: 1.0e-4
+  dropout: 0.3
+  augmentation:
+    random_resized_crop: 224
+    color_jitter:
+      brightness: 0.3
+      contrast: 0.3
+      saturation: 0.2
+    random_rotation: 15
+    random_perspective: 0.3
+
+export:
+  onnx_path: models/document_classifier.onnx
+  opset_version: 17

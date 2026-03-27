@@ -1,0 +1,76 @@
+# Конфигурация набора проверок качества данных
+# Data quality expectations suite configuration
+#
+# Этот файл описывает проверки, которые нужно запускать над данными
+# клиентских транзакций. Платформенная команда использует его
+# для автоматического мониторинга.
+#
+# This config defines checks for a customer transactions dataset.
+# The platform team uses it for automated quality monitoring.
+
+suite_name: "transactions_quality_suite"
+
+expectations:
+  # Обязательные поля не должны быть пустыми
+  # Mandatory fields must not be null
+  - check: expect_not_null
+    column: transaction_id
+
+  - check: expect_not_null
+    column: customer_id
+
+  - check: expect_not_null
+    column: amount
+
+  - check: expect_not_null
+    column: transaction_date
+
+  # ID транзакции должен быть уникальным
+  # Transaction ID must be unique
+  - check: expect_unique
+    column: transaction_id
+
+  # Сумма в разумном диапазоне (от 0 до 1 000 000)
+  # Amount should be in a reasonable range
+  - check: expect_values_in_range
+    column: amount
+    kwargs:
+      min_value: 0
+      max_value: 1000000
+
+  # Возраст клиента — от 18 до 120
+  # Customer age between 18 and 120
+  - check: expect_values_in_range
+    column: customer_age
+    kwargs:
+      min_value: 18
+      max_value: 120
+
+  # Схема — обязательные столбцы должны существовать
+  # Schema checks — required columns must exist
+  - check: expect_column_exists
+    column: transaction_id
+
+  - check: expect_column_exists
+    column: customer_id
+
+  - check: expect_column_exists
+    column: amount
+
+  - check: expect_column_exists
+    column: category
+
+  # Категория транзакции — только допустимые значения
+  # Transaction category must be from allowed list
+  - check: expect_values_in_set
+    column: category
+    kwargs:
+      allowed_values:
+        - electronics
+        - groceries
+        - clothing
+        - entertainment
+        - dining
+        - travel
+        - health
+        - other

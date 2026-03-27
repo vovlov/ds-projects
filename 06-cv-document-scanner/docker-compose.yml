@@ -1,0 +1,41 @@
+# docker-compose for local development.
+# The API service uses the sklearn baseline by default.
+# To train the CNN, run: docker compose run --rm trainer
+
+services:
+  api:
+    build:
+      context: .
+      target: server
+    ports:
+      - "8000:8000"
+    environment:
+      - LOG_LEVEL=info
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      target: server
+    command: ["streamlit", "run", "src/dashboard/app.py", "--server.port=8501"]
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+
+  trainer:
+    build:
+      context: .
+      target: trainer
+    volumes:
+      - ./data:/data       # mount your labelled images here
+      - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - train  # only starts with: docker compose --profile train up trainer

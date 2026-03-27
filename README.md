@@ -2,67 +2,66 @@
 
 ![CI](https://github.com/vovlov/ds-projects/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-81-green)
+![Tests](https://img.shields.io/badge/tests-184-green)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-Пять production-ready проектов машинного обучения — от классической предиктивной аналитики до real-time обнаружения аномалий. Каждый проект решает конкретную бизнес-задачу и доведён до стадии работающего API с тестами, Docker-контейнерами и CI/CD.
+Десять production-ready проектов машинного обучения — от классической предиктивной аналитики до LLM fine-tuning и real-time обнаружения аномалий. Каждый проект решает конкретную бизнес-задачу и доведён до стадии работающего API с тестами, Docker-контейнерами и CI/CD.
 
-*Five production-ready ML projects — from classical predictive analytics to real-time anomaly detection. Each project solves a concrete business problem and is delivered as a working API with tests, Docker containers, and CI/CD.*
+*Ten production-ready ML projects — from classical predictive analytics to LLM fine-tuning and real-time anomaly detection. Each project solves a concrete business problem and ships as a working API with tests, Docker, and CI/CD.*
 
-> Эти проекты — эволюция моего пути в Data Science: от [учебных проектов Яндекс.Практикума (2020)](https://github.com/vovlov/YandexPraktikum) к production-grade ML-системам с современным стеком. Подробнее об этом пути — в [docs/EVOLUTION.md](docs/EVOLUTION.md).
+> Эти проекты — эволюция моего пути в Data Science: от [учебных проектов Яндекс.Практикума (2020)](https://github.com/vovlov/YandexPraktikum) к production-grade ML-системам. Подробнее: [docs/EVOLUTION.md](docs/EVOLUTION.md).
 
 ## Проекты / Projects
 
-| # | Проект | Бизнес-задача | Стек | Тесты |
-|---|--------|---------------|------|-------|
-| 01 | [Customer Churn MLOps](01-customer-churn-mlops) | Предсказание оттока клиентов телеком-оператора | CatBoost, LightGBM, MLflow, Optuna, FastAPI, Streamlit | 14 |
-| 02 | [RAG Enterprise](02-rag-enterprise) | Q&A по корпоративным документам с помощью LLM | LangChain, ChromaDB, Claude API, Gradio | 11 |
-| 03 | [NER Service](03-ner-service) | Извлечение именованных сущностей из русскоязычных текстов | PyTorch, HuggingFace Transformers, FastAPI, Streamlit | 14 |
-| 04 | [Graph Fraud Detection](04-graph-fraud-detection) | Обнаружение мошеннических транзакций через граф связей | PyTorch Geometric, CatBoost, NetworkX | 9 |
-| 05 | [Realtime Anomaly Detection](05-realtime-anomaly) | Real-time обнаружение аномалий в инфраструктурных метриках | Kafka, Grafana, Prometheus, FastAPI | 14 |
+### Core ML & NLP (01–05)
 
-**81 тест** | **5 API endpoints** | **5 Docker Compose stacks** | **GitHub Actions CI/CD**
+| # | Проект | Бизнес-задача | Стек |
+|---|--------|---------------|------|
+| 01 | [Customer Churn MLOps](01-customer-churn-mlops) | Предсказание оттока клиентов | CatBoost, LightGBM, MLflow, Optuna, FastAPI |
+| 02 | [RAG Enterprise](02-rag-enterprise) | Q&A по документам через LLM | LangChain, ChromaDB, Claude API, Gradio |
+| 03 | [NER Service](03-ner-service) | Извлечение сущностей из текстов | BERT, FastAPI, Streamlit |
+| 04 | [Graph Fraud Detection](04-graph-fraud-detection) | Обнаружение мошенничества через граф | PyTorch Geometric, CatBoost, NetworkX |
+| 05 | [Realtime Anomaly](05-realtime-anomaly) | Real-time детекция аномалий | Kafka, Grafana, Prometheus, LSTM |
 
-## Связь между проектами / How Projects Connect
+### Computer Vision, Pricing, LLM, RecSys, Data Engineering (06–10)
 
-Проекты не изолированы — они отражают реальный ML-стек enterprise-компании:
+| # | Проект | Бизнес-задача | Стек |
+|---|--------|---------------|------|
+| 06 | [CV Document Scanner](06-cv-document-scanner) | Классификация документов по фото | EfficientNet, ONNX, Albumentations |
+| 07 | [Real Estate Pricing](07-realestate-pricing) | Оценка стоимости недвижимости | CatBoost, Optuna, SHAP, Polars |
+| 08 | [LLM Code Review](08-llm-code-review) | AI-ассистент для код-ревью | Claude API, LoRA fine-tuning, Gradio |
+| 09 | [RecSys Feature Store](09-recsys-feature-store) | Персонализированные рекомендации | SVD, FAISS, Feature Store, Redis |
+| 10 | [Data Quality Platform](10-data-quality-platform) | Мониторинг качества данных | DuckDB, PSI/KS drift detection, Polars |
 
-```
-                    ┌──────────────────────┐
-                    │  01 Customer Churn   │ ← Классический ML + полный MLOps
-                    │  (Predict & Retain)  │
-                    └──────────┬───────────┘
-                               │ Данные о клиентах
-                    ┌──────────▼───────────┐
-                    │  04 Graph Fraud      │ ← Графовый анализ транзакций
-                    │  (Protect Revenue)   │
-                    └──────────┬───────────┘
-                               │ Мониторинг систем
-                    ┌──────────▼───────────┐
-                    │  05 Realtime Anomaly │ ← Потоковая обработка метрик
-                    │  (Ops Reliability)   │
-                    └──────────────────────┘
+**184 теста** | **10 API endpoints** | **10 Docker Compose stacks** | **GitHub Actions CI/CD**
 
-┌──────────────────────┐     ┌──────────────────────┐
-│  02 RAG Enterprise   │     │  03 NER Service      │
-│  (Knowledge Access)  │────▶│  (Text Understanding)│
-│  Ответы на вопросы   │     │  Извлечение сущностей│
-└──────────────────────┘     └──────────────────────┘
-```
+## Покрытие направлений / Coverage
 
-- **01 → 04:** Табличные данные клиентов обогащаются графовыми признаками транзакций
-- **04 → 05:** Fraud-детекция генерирует метрики, за которыми следит система мониторинга
-- **02 → 03:** RAG-система может использовать NER для извлечения сущностей из документов
+| Направление | Проекты |
+|-------------|---------|
+| Табличный ML / MLOps | 01, 07 |
+| NLP / LLM / RAG | 02, 03, 08 |
+| Computer Vision | 06 |
+| Графы / GNN | 04 |
+| Временные ряды / Streaming | 05 |
+| Рекомендательные системы | 09 |
+| Data Engineering / Quality | 10 |
+| Feature Engineering | 01, 07, 09, 10 |
+| Explainability (SHAP) | 07 |
+| Drift Detection | 10 |
 
 ## Стек / Tech Stack
 
 ```
-ML/DL           CatBoost · LightGBM · PyTorch · PyTorch Geometric · scikit-learn
-NLP             LangChain · HuggingFace Transformers · ChromaDB · Claude API
-Data            Polars · NumPy · DVC (data versioning)
-MLOps           MLflow · GitHub Actions · Docker · Optuna (HPO) · Makefile
+ML/DL           CatBoost · LightGBM · PyTorch · PyTorch Geometric · scikit-learn · Optuna
+NLP/LLM         LangChain · HuggingFace · ChromaDB · Claude API · LoRA/QLoRA
+CV              EfficientNet · ONNX Runtime · Albumentations
+RecSys          SVD · FAISS · Feature Store · Redis
+Data            Polars · DuckDB · DVC · Great Expectations
+MLOps           MLflow · GitHub Actions · Docker · Makefile
 API             FastAPI · Streamlit · Gradio
 Streaming       Apache Kafka · Prometheus · Grafana
+Quality         PSI · KS-test · Distribution profiling
 Infra           Docker Compose · uv · ruff · mypy · pytest
 ```
 
@@ -72,52 +71,19 @@ Infra           Docker Compose · uv · ruff · mypy · pytest
 git clone https://github.com/vovlov/ds-projects.git
 cd ds-projects
 
-# Установка окружения
-make setup
+make setup              # Все зависимости
+make test               # 184 теста по всем 10 проектам
+make lint               # ruff check + format
 
 # Запуск любого проекта
-make run-churn        # 01: Streamlit dashboard
-make run-rag          # 02: Gradio чат
-make run-ner          # 03: NER демо
-make run-fraud        # 04: API для скоринга
-make run-anomaly      # 05: docker-compose (Kafka + Grafana)
-
-# Тесты и линтинг
-make test             # Все проекты (80 тестов)
-make lint             # ruff check + format
-```
-
-## Структура проекта / Project Structure
-
-Каждый проект следует единой архитектуре:
-
-```
-project/
-├── README.md             # Бизнес-контекст, результаты, архитектура
-├── Dockerfile            # Production-ready образ
-├── docker-compose.yml    # Полный стек с зависимостями
-├── configs/              # YAML-конфигурация (без хардкода)
-├── src/
-│   ├── data/             # Загрузка, валидация, feature engineering
-│   ├── models/           # Обучение, evaluation
-│   ├── api/              # FastAPI endpoints
-│   └── dashboard/        # Streamlit / Gradio UI
-├── tests/                # pytest (unit + integration)
-└── notebooks/            # EDA и эксперименты (Plotly)
-```
-
-**CI/CD pipeline:**
-```
-git push → GitHub Actions → ruff lint → pytest (per project) → Docker build
+make run-churn          # 01: Streamlit
+make run-pricing        # 07: Streamlit
+make run-recsys         # 09: Streamlit
+make run-quality        # 10: Streamlit
 ```
 
 ## Автор / Author
 
 **Владимир Ловцов** — Enterprise Architect & AI Practitioner
 
-8+ лет в IT: системный аналитик → техлид → директор разработки → архитектор.
-VTB (real-time системы, <0.3s latency) → T1 (enterprise architecture) → Digital Artel (IT-кооператив).
-
-- [lovtsov.dev](https://lovtsov.dev) — персональный сайт
-- [GitHub](https://github.com/vovlov) — все проекты
-- [Telegram](https://t.me/it_underside) — канал об архитектуре и AI
+- [lovtsov.dev](https://lovtsov.dev) | [GitHub](https://github.com/vovlov) | [Telegram](https://t.me/it_underside)

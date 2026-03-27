@@ -1,0 +1,30 @@
+review:
+  model: "claude-sonnet-4-20250514"
+  max_tokens: 2048
+  temperature: 0.0
+
+classifier:
+  max_features: 500
+  ngram_range: [1, 2]
+  max_iter: 500
+
+categories:
+  - bug
+  - security
+  - style
+  - performance
+  - documentation
+
+severity_levels:
+  - critical
+  - major
+  - minor
+  - suggestion
+
+api:
+  host: "0.0.0.0"
+  port: 7868
+
+dashboard:
+  host: "0.0.0.0"
+  port: 7868

@@ -1,0 +1,36 @@
+# Конфигурация обучения рекомендательной модели
+# Training configuration for the recommendation engine
+
+data:
+  n_users: 500
+  n_products: 200
+  n_interactions: 10000
+  seed: 42
+  test_size: 0.2
+
+collaborative:
+  n_components: 50
+  random_state: 42
+
+evaluation:
+  top_k_values: [5, 10, 20]
+  relevance_threshold: 4.0
+
+feature_store:
+  output_dir: "data/features"
+  user_features:
+    - avg_rating
+    - n_purchases
+    - favorite_category
+    - recency_days
+  item_features:
+    - avg_rating
+    - n_ratings
+    - popularity_rank
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+
+dashboard:
+  port: 8501

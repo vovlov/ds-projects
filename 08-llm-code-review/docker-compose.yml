@@ -1,0 +1,9 @@
+services:
+  review:
+    build: .
+    ports:
+      - "7868:7868"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - ./configs:/app/configs

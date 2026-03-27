@@ -1,0 +1,45 @@
+data:
+  n_rows: 1000
+  seed: 42
+  test_size: 0.2
+
+features:
+  numerical:
+    - sqft
+    - bedrooms
+    - bathrooms
+    - year_built
+    - lot_size
+    - age
+    - price_per_sqft
+  categorical:
+    - neighborhood
+    - condition
+    - has_garage
+  target: price
+
+catboost:
+  n_trials: 20
+  cv_folds: 5
+  iterations: [200, 800]
+  depth: [4, 8]
+  learning_rate: [0.01, 0.3]
+  l2_leaf_reg: [0.001, 10.0]
+  loss_function: RMSE
+
+lightgbm:
+  n_trials: 20
+  cv_folds: 5
+  n_estimators: [200, 800]
+  max_depth: [3, 8]
+  learning_rate: [0.01, 0.3]
+  num_leaves: [15, 63]
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  model_path: "artifacts/model.pkl"
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8501
