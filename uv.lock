@@ -1172,9 +1172,9 @@ source = { editable = "." }
 anomaly = [
     { name = "fastapi" },
     { name = "kafka-python" },
+    { name = "numpy" },
     { name = "prometheus-client" },
     { name = "redis" },
-    { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "uvicorn" },
 ]
 churn = [
@@ -1191,7 +1191,17 @@ churn = [
     { name = "streamlit" },
     { name = "uvicorn" },
 ]
+cv = [
+    { name = "fastapi" },
+    { name = "numpy" },
+    { name = "plotly" },
+    { name = "polars" },
+    { name = "scikit-learn" },
+    { name = "streamlit" },
+    { name = "uvicorn" },
+]
 dev = [
+    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -1231,8 +1241,10 @@ pricing = [
 quality = [
     { name = "duckdb" },
     { name = "fastapi" },
+    { name = "numpy" },
     { name = "plotly" },
     { name = "polars" },
+    { name = "pyyaml" },
     { name = "scipy" },
     { name = "streamlit" },
     { name = "uvicorn" },
@@ -1246,10 +1258,12 @@ rag = [
     { name = "langchain-anthropic" },
     { name = "langchain-community" },
     { name = "langchain-text-splitters" },
+    { name = "onnxruntime", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "uvicorn" },
 ]
 recsys = [
     { name = "fastapi" },
+    { name = "numpy" },
     { name = "plotly" },
     { name = "polars" },
     { name = "scikit-learn" },
@@ -1277,6 +1291,7 @@ requires-dist = [
     { name = "dvc", marker = "extra == 'churn'", specifier = ">=3.56" },
     { name = "fastapi", marker = "extra == 'anomaly'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'churn'", specifier = ">=0.115" },
+    { name = "fastapi", marker = "extra == 'cv'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'fraud'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'ner'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'pricing'", specifier = ">=0.115" },
@@ -1287,6 +1302,7 @@ requires-dist = [
     { name = "gradio", marker = "extra == 'rag'", specifier = ">=5.0" },
     { name = "gradio", marker = "extra == 'review'", specifier = ">=5.0" },
     { name = "great-expectations", marker = "extra == 'churn'", specifier = ">=1.3" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "kafka-python", marker = "extra == 'anomaly'", specifier = ">=2.0" },
     { name = "langchain", marker = "extra == 'rag'", specifier = ">=0.3" },
     { name = "langchain-anthropic", marker = "extra == 'rag'", specifier = ">=0.3" },
@@ -1298,14 +1314,21 @@ requires-dist = [
     { name = "mlflow", marker = "extra == 'pricing'", specifier = ">=2.18" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14" },
     { name = "networkx", marker = "extra == 'fraud'", specifier = ">=3.4" },
+    { name = "numpy", marker = "extra == 'anomaly'", specifier = ">=1.26" },
+    { name = "numpy", marker = "extra == 'cv'", specifier = ">=1.26" },
+    { name = "numpy", marker = "extra == 'quality'", specifier = ">=1.26" },
+    { name = "numpy", marker = "extra == 'recsys'", specifier = ">=1.26" },
+    { name = "onnxruntime", marker = "extra == 'rag'", specifier = ">=1.19" },
     { name = "optuna", marker = "extra == 'churn'", specifier = ">=4.0" },
     { name = "optuna", marker = "extra == 'pricing'", specifier = ">=4.0" },
     { name = "plotly", marker = "extra == 'churn'", specifier = ">=5.24" },
+    { name = "plotly", marker = "extra == 'cv'", specifier = ">=5.24" },
     { name = "plotly", marker = "extra == 'fraud'", specifier = ">=5.24" },
     { name = "plotly", marker = "extra == 'pricing'", specifier = ">=5.24" },
     { name = "plotly", marker = "extra == 'quality'", specifier = ">=5.24" },
     { name = "plotly", marker = "extra == 'recsys'", specifier = ">=5.24" },
     { name = "polars", marker = "extra == 'churn'", specifier = ">=1.0" },
+    { name = "polars", marker = "extra == 'cv'", specifier = ">=1.0" },
     { name = "polars", marker = "extra == 'pricing'", specifier = ">=1.0" },
     { name = "polars", marker = "extra == 'quality'", specifier = ">=1.0" },
     { name = "polars", marker = "extra == 'recsys'", specifier = ">=1.0" },
@@ -1313,9 +1336,11 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "pyvis", marker = "extra == 'fraud'", specifier = ">=0.3" },
+    { name = "pyyaml", marker = "extra == 'quality'", specifier = ">=6.0" },
     { name = "redis", marker = "extra == 'anomaly'", specifier = ">=5.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
     { name = "scikit-learn", marker = "extra == 'churn'", specifier = ">=1.5" },
+    { name = "scikit-learn", marker = "extra == 'cv'", specifier = ">=1.5" },
     { name = "scikit-learn", marker = "extra == 'fraud'", specifier = ">=1.5" },
     { name = "scikit-learn", marker = "extra == 'pricing'", specifier = ">=1.5" },
     { name = "scikit-learn", marker = "extra == 'recsys'", specifier = ">=1.5" },
@@ -1323,16 +1348,17 @@ requires-dist = [
     { name = "scipy", marker = "extra == 'quality'", specifier = ">=1.14" },
     { name = "seqeval", marker = "extra == 'ner'", specifier = ">=1.2" },
     { name = "streamlit", marker = "extra == 'churn'", specifier = ">=1.40" },
+    { name = "streamlit", marker = "extra == 'cv'", specifier = ">=1.40" },
     { name = "streamlit", marker = "extra == 'fraud'", specifier = ">=1.40" },
     { name = "streamlit", marker = "extra == 'ner'", specifier = ">=1.40" },
     { name = "streamlit", marker = "extra == 'pricing'", specifier = ">=1.40" },
     { name = "streamlit", marker = "extra == 'quality'", specifier = ">=1.40" },
     { name = "streamlit", marker = "extra == 'recsys'", specifier = ">=1.40" },
-    { name = "torch", marker = "extra == 'anomaly'", specifier = ">=2.4" },
     { name = "torch", marker = "extra == 'ner'", specifier = ">=2.4" },
     { name = "transformers", marker = "extra == 'ner'", specifier = ">=4.47" },
     { name = "uvicorn", marker = "extra == 'anomaly'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'churn'", specifier = ">=0.34" },
+    { name = "uvicorn", marker = "extra == 'cv'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'fraud'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'ner'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'pricing'", specifier = ">=0.34" },
@@ -1341,7 +1367,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'recsys'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'review'", specifier = ">=0.34" },
 ]
-provides-extras = ["dev", "churn", "rag", "ner", "fraud", "anomaly", "pricing", "recsys", "quality", "review"]
+provides-extras = ["dev", "churn", "rag", "ner", "fraud", "anomaly", "pricing", "cv", "recsys", "quality", "review"]
 
 [[package]]
 name = "duckdb"

@@ -81,7 +81,7 @@ jobs:
       - uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
-      - run: uv sync --extra dev --extra fraud
+      - run: uv sync --extra dev --extra cv
       - run: cd 06-cv-document-scanner && uv run pytest tests/ -v --tb=short
 
   test-pricing:
