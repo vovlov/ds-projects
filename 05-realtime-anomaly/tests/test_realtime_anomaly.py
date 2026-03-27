@@ -100,3 +100,77 @@ class TestMultiMetricDetector:
         result = detector.detect(data)
         # Should find at least some anomalies
         assert result.predictions.sum() > 0
+
+
+class TestAPI:
+    def test_health_endpoint(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "healthy"
+
+    def test_detect_endpoint(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        points = [
+            {"timestamp": i, "cpu": 45.0, "latency": 50.0, "requests": 1000.0} for i in range(60)
+        ]
+        # Inject anomaly
+        points[55]["cpu"] = 99.0
+        points[55]["latency"] = 500.0
+
+        resp = client.post("/detect", json=points)
+        assert resp.status_code == 200
+        assert len(resp.json()) == 60
+
+
+class TestAlerting:
+    def test_create_alert(self):
+        from src.alerting.webhook import create_alert
+
+        alert = create_alert(
+            timestamp=1000.0,
+            cpu=95.0,
+            latency=500.0,
+            requests=50.0,
+            score=5.0,
+            threshold=3.0,
+        )
+        assert alert.severity in ("warning", "critical")
+        assert alert.metric_name in ("cpu", "latency", "requests")
+
+    def test_format_alert_payload(self):
+        from src.alerting.webhook import Alert, format_alert_payload
+
+        alert = Alert(
+            timestamp=1000.0,
+            metric_name="cpu",
+            value=95.0,
+            score=5.0,
+            threshold=3.0,
+            severity="warning",
+        )
+        payload = format_alert_payload(alert)
+        assert "message" in payload
+        assert "severity" in payload
+        assert payload["severity"] == "warning"
+
+    def test_send_alert_logs(self):
+        from src.alerting.webhook import Alert, send_alert
+
+        alert = Alert(
+            timestamp=1000.0,
+            metric_name="latency",
+            value=500.0,
+            score=8.0,
+            threshold=3.0,
+            severity="critical",
+        )
+        # Without webhook URL, should just log
+        result = send_alert(alert, webhook_url=None)
+        assert result is True

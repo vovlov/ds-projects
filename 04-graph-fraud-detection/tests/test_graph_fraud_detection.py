@@ -74,3 +74,48 @@ class TestBaseline:
         result = train_baseline(X, y, test_size=0.2)
         assert len(result["y_pred"]) == int(200 * 0.2)
         assert len(result["y_proba"]) == int(200 * 0.2)
+
+
+class TestAPI:
+    def test_health_endpoint(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "healthy"
+
+    def test_score_endpoint(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/score",
+            json={
+                "avg_amount": 150.0,
+                "n_transactions": 5,
+                "account_age_days": 180.0,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "fraud_probability" in data
+        assert "risk_level" in data
+        assert 0 <= data["fraud_probability"] <= 1
+
+    def test_score_batch_endpoint(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/score/batch",
+            json=[
+                {"avg_amount": 150.0, "n_transactions": 5, "account_age_days": 180.0},
+                {"avg_amount": 5000.0, "n_transactions": 20, "account_age_days": 5.0},
+            ],
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()) == 2

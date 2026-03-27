@@ -1,68 +1,85 @@
 # 02 — RAG Enterprise: Document Q&A System
 
-> **Evolution from:** [Yandex.Praktikum Project 13 (ML for Text)](https://github.com/vovlov/YandexPraktikum/tree/master/project_13_ML_for_text) — from TF-IDF classification to Retrieval-Augmented Generation
+**Система вопросов-ответов по корпоративным документам** на базе Retrieval-Augmented Generation. Загружаешь документы — задаёшь вопросы на естественном языке — получаешь ответы с указанием источника.
 
-Production-ready RAG pipeline for enterprise document Q&A — ingest documents, chunk and embed them, retrieve relevant context, and generate accurate answers using Claude API.
+*Enterprise document Q&A system powered by RAG. Upload documents, ask questions in natural language, get answers with source attribution.*
 
-## Architecture
+> **Эволюция:** В Практикуме я работал с [TF-IDF и классификацией текстов](https://github.com/vovlov/YandexPraktikum/tree/master/project_13_ML_for_text). Здесь — полноценный RAG-пайплайн: семантический поиск по векторной базе + генерация через Claude API.
+
+## Бизнес-задача
+
+В любой компании — сотни внутренних документов: политики, регламенты, онбординг. Сотрудники тратят часы на поиск нужной информации. RAG-система позволяет задать вопрос и получить точный ответ за секунды.
+
+## Архитектура
 
 ```
-┌──────────────┐     ┌────────────────┐     ┌──────────────┐
-│  Documents   │────▶│  Chunking      │────▶│  ChromaDB    │
-│  (.txt, .md) │     │  (Recursive)   │     │  (Embeddings)│
-└──────────────┘     └────────────────┘     └──────┬───────┘
-                                                    │
-                                              Query │ Retrieve
-                                                    ▼
-┌──────────────┐     ┌────────────────┐     ┌──────────────┐
-│  Gradio UI   │◀────│  Claude API    │◀────│  Context     │
-│  :7860       │     │  (Generation)  │     │  Assembly    │
-└──────────────┘     └────────────────┘     └──────────────┘
+  Документы (.txt, .md)
+        │
+        ▼
+  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+  │  Chunking   │────▶│  ChromaDB   │────▶│  Retrieval  │
+  │  512 chars  │     │  Embeddings │     │  Top-K      │
+  │  64 overlap │     │  Cosine     │     │  Semantic   │
+  └─────────────┘     └─────────────┘     └──────┬──────┘
+                                                  │
+                                           Вопрос │ Контекст
+                                                  ▼
+                                        ┌──────────────────┐
+                                        │  Claude API      │
+                                        │  + Guardrails    │
+                                        │  + Source citing  │
+                                        └────────┬─────────┘
+                                                 │
+                                        ┌────────▼─────────┐
+                                        │  Gradio Chat UI  │
+                                        │  :7860           │
+                                        └──────────────────┘
 ```
 
-## Quick Start
+## Быстрый старт
 
 ```bash
-# From repo root
 make setup-rag
 
-# Set API key
-export ANTHROPIC_API_KEY="your-key-here"
+# Установить API-ключ
+export ANTHROPIC_API_KEY="sk-ant-..."
 
-# Add documents to data/documents/ (txt, md files)
+# Добавить документы в data/documents/ (.txt или .md)
 
-# Run
+# Запуск
 cd 02-rag-enterprise
 uv run python -m src.api.app
 
-# Open http://localhost:7860
+# Открыть http://localhost:7860
 ```
 
 ## API
 
 ```bash
-# Index documents
+# Индексация документов
 curl -X POST http://localhost:7860/index
+# → {"indexed_chunks": 12, "documents": 2}
 
 # Health check
 curl http://localhost:7860/health
 ```
 
-## Stack
+## Как это работает
 
-| Component | Tool |
-|-----------|------|
-| Chunking | LangChain RecursiveCharacterTextSplitter |
-| Vector store | ChromaDB (default embeddings) |
-| LLM | Claude API (Anthropic) |
-| UI | Gradio |
-| API | FastAPI |
-| Containerization | Docker |
+1. **Ingestion:** Документы из `data/documents/` разбиваются на чанки (512 символов, 64 overlap) с помощью LangChain RecursiveCharacterTextSplitter
+2. **Embedding:** ChromaDB индексирует чанки, используя встроенную модель эмбеддингов
+3. **Retrieval:** Вопрос пользователя эмбеддится и ищется по cosine similarity среди чанков
+4. **Generation:** Top-K чанков собираются в промпт и отправляются в Claude API с системным промптом (используй только контекст, цитируй источники)
+5. **Response:** Ответ с указанием документов-источников
 
-## How It Works
+## Стек
 
-1. **Ingestion**: Documents are loaded from `data/documents/`, split into chunks (512 chars, 64 overlap)
-2. **Embedding**: ChromaDB embeds chunks using its default embedding function
-3. **Retrieval**: User query is embedded and matched against stored chunks via cosine similarity
-4. **Generation**: Top-k chunks are assembled into a prompt and sent to Claude API
-5. **Response**: Answer is generated with source attribution
+| Компонент | Инструмент | Зачем |
+|-----------|-----------|-------|
+| Chunking | LangChain Text Splitters | Рекурсивное разбиение с учётом структуры текста |
+| Векторная БД | ChromaDB | Лёгкая, встраиваемая, persistence из коробки |
+| LLM | Claude API (Anthropic) | Качество генерации, длинный контекст |
+| UI | Gradio | Быстрый чат-интерфейс без фронтенда |
+| API | FastAPI | REST endpoints для индексации и health check |
+| Конфиг | YAML | chunk_size, n_results, модель — не захардкожены |
+| Тесты | pytest (11 тестов) | Ingestion, retrieval relevance, prompt building |

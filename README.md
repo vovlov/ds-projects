@@ -1,91 +1,118 @@
 # Data Science & ML Projects
 
-Production-grade machine learning projects demonstrating end-to-end MLOps, deep learning, NLP, graph neural networks, and real-time inference.
+Пять production-ready проектов машинного обучения — от классической предиктивной аналитики до real-time обнаружения аномалий. Каждый проект решает конкретную бизнес-задачу и доведён до стадии работающего API с тестами, Docker-контейнерами и CI/CD.
 
-> **Evolution:** These projects build upon foundational work from my [Data Science training (2020)](https://github.com/vovlov/YandexPraktikum), modernized with current industry stack and production practices.
+*Five production-ready ML projects — from classical predictive analytics to real-time anomaly detection. Each project solves a concrete business problem and is delivered as a working API with tests, Docker containers, and CI/CD.*
 
-## Projects
+> Эти проекты — эволюция моего пути в Data Science: от [учебных проектов Яндекс.Практикума (2020)](https://github.com/vovlov/YandexPraktikum) к production-grade ML-системам с современным стеком. Подробнее об этом пути — в [docs/EVOLUTION.md](docs/EVOLUTION.md).
 
-| # | Project | Domain | Stack | Demo |
-|---|---------|--------|-------|------|
-| 01 | [Customer Churn MLOps](01-customer-churn-mlops) | Tabular ML, MLOps | CatBoost, MLflow, DVC, FastAPI | Streamlit |
-| 02 | [RAG Enterprise](02-rag-enterprise) | NLP, LLM, RAG | LangChain, ChromaDB, Claude API | Gradio |
-| 03 | [NER Service](03-ner-service) | NLP, Token Classification | PyTorch, HuggingFace, ONNX | Streamlit |
-| 04 | [Graph Fraud Detection](04-graph-fraud-detection) | GNN, Fraud Detection | PyTorch Geometric, NetworkX | Streamlit |
-| 05 | [Realtime Anomaly Detection](05-realtime-anomaly) | Time Series, Streaming | PyTorch, Kafka, Grafana | Grafana |
+## Проекты / Projects
 
-## Tech Stack
+| # | Проект | Бизнес-задача | Стек | Тесты |
+|---|--------|---------------|------|-------|
+| 01 | [Customer Churn MLOps](01-customer-churn-mlops) | Предсказание оттока клиентов телеком-оператора | CatBoost, LightGBM, MLflow, Optuna, FastAPI, Streamlit | 14 |
+| 02 | [RAG Enterprise](02-rag-enterprise) | Q&A по корпоративным документам с помощью LLM | LangChain, ChromaDB, Claude API, Gradio | 11 |
+| 03 | [NER Service](03-ner-service) | Извлечение именованных сущностей из русскоязычных текстов | PyTorch, HuggingFace Transformers, FastAPI, Streamlit | 14 |
+| 04 | [Graph Fraud Detection](04-graph-fraud-detection) | Обнаружение мошеннических транзакций через граф связей | PyTorch Geometric, CatBoost, NetworkX | 9 |
+| 05 | [Realtime Anomaly Detection](05-realtime-anomaly) | Real-time обнаружение аномалий в инфраструктурных метриках | Kafka, Grafana, Prometheus, FastAPI | 14 |
+
+**62 теста** | **5 API endpoints** | **5 Docker Compose stacks** | **GitHub Actions CI/CD**
+
+## Связь между проектами / How Projects Connect
+
+Проекты не изолированы — они отражают реальный ML-стек enterprise-компании:
 
 ```
-ML/DL:        PyTorch, scikit-learn, CatBoost, LightGBM, PyTorch Geometric
-NLP:          HuggingFace Transformers, LangChain, sentence-transformers
-Data:         Polars, pandas, DVC, Great Expectations
-MLOps:        MLflow, GitHub Actions, Docker, Makefile
-API:          FastAPI, Streamlit, Gradio
-Streaming:    Kafka, Redis
-Monitoring:   Grafana, Prometheus
-Infra:        Docker Compose, uv, ruff, mypy, pytest
+                    ┌──────────────────────┐
+                    │  01 Customer Churn   │ ← Классический ML + полный MLOps
+                    │  (Predict & Retain)  │
+                    └──────────┬───────────┘
+                               │ Данные о клиентах
+                    ┌──────────▼───────────┐
+                    │  04 Graph Fraud      │ ← Графовый анализ транзакций
+                    │  (Protect Revenue)   │
+                    └──────────┬───────────┘
+                               │ Мониторинг систем
+                    ┌──────────▼───────────┐
+                    │  05 Realtime Anomaly │ ← Потоковая обработка метрик
+                    │  (Ops Reliability)   │
+                    └──────────────────────┘
+
+┌──────────────────────┐     ┌──────────────────────┐
+│  02 RAG Enterprise   │     │  03 NER Service      │
+│  (Knowledge Access)  │────▶│  (Text Understanding)│
+│  Ответы на вопросы   │     │  Извлечение сущностей│
+└──────────────────────┘     └──────────────────────┘
 ```
 
-## Quick Start
+- **01 → 04:** Табличные данные клиентов обогащаются графовыми признаками транзакций
+- **04 → 05:** Fraud-детекция генерирует метрики, за которыми следит система мониторинга
+- **02 → 03:** RAG-система может использовать NER для извлечения сущностей из документов
+
+## Стек / Tech Stack
+
+```
+ML/DL           CatBoost · LightGBM · PyTorch · PyTorch Geometric · scikit-learn
+NLP             LangChain · HuggingFace Transformers · ChromaDB · Claude API
+Data            Polars · NumPy · DVC (data versioning)
+MLOps           MLflow · GitHub Actions · Docker · Optuna (HPO) · Makefile
+API             FastAPI · Streamlit · Gradio
+Streaming       Apache Kafka · Prometheus · Grafana
+Infra           Docker Compose · uv · ruff · mypy · pytest
+```
+
+## Быстрый старт / Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/vovlov/ds-projects.git
 cd ds-projects
 
-# Setup environment
+# Установка окружения
 make setup
 
-# Run any project
-make run-churn        # Project 01: Streamlit dashboard
-make run-rag          # Project 02: Gradio chat
-make run-ner          # Project 03: NER demo
-make run-fraud        # Project 04: Graph visualization
-make run-anomaly      # Project 05: Grafana dashboard
+# Запуск любого проекта
+make run-churn        # 01: Streamlit dashboard
+make run-rag          # 02: Gradio чат
+make run-ner          # 03: NER демо
+make run-fraud        # 04: API для скоринга
+make run-anomaly      # 05: docker-compose (Kafka + Grafana)
 
-# Run tests
-make test             # All projects
-make test-churn       # Single project
-
-# Lint
-make lint
+# Тесты и линтинг
+make test             # Все проекты (62 теста)
+make lint             # ruff check + format
 ```
 
-## Architecture
+## Структура проекта / Project Structure
 
-Each project follows the same structure:
+Каждый проект следует единой архитектуре:
 
 ```
 project/
-├── README.md           # Business context, results, architecture diagram
-├── Dockerfile          # Multi-stage production build
-├── docker-compose.yml  # Full stack with dependencies
-├── pyproject.toml      # Project-specific dependencies
-├── src/                # Production code (API, models, data pipelines)
-├── tests/              # Unit + integration tests
-├── notebooks/          # Experiments and EDA
-└── configs/            # Hydra/YAML configuration
+├── README.md             # Бизнес-контекст, результаты, архитектура
+├── Dockerfile            # Production-ready образ
+├── docker-compose.yml    # Полный стек с зависимостями
+├── configs/              # YAML-конфигурация (без хардкода)
+├── src/
+│   ├── data/             # Загрузка, валидация, feature engineering
+│   ├── models/           # Обучение, evaluation
+│   ├── api/              # FastAPI endpoints
+│   └── dashboard/        # Streamlit / Gradio UI
+├── tests/                # pytest (unit + integration)
+└── notebooks/            # EDA и эксперименты (Plotly)
 ```
 
-**MLOps Pipeline:**
+**CI/CD pipeline:**
 ```
-git push → GitHub Actions → lint + test → build Docker → [deploy]
-                ↓
-         MLflow tracking ← model training ← DVC data pipeline
+git push → GitHub Actions → ruff lint → pytest (per project) → Docker build
 ```
 
-## Project Status
+## Автор / Author
 
-| Project | Code | Tests | Docker | CI/CD | Demo |
-|---------|------|-------|--------|-------|------|
-| 01 Churn MLOps | ✅ | ✅ 14 | ✅ | ✅ | Streamlit |
-| 02 RAG Enterprise | ✅ | ✅ 11 | ✅ | ✅ | Gradio |
-| 03 NER Service | ✅ | ✅ 14 | ✅ | ✅ | Streamlit |
-| 04 Graph Fraud | ✅ | ✅ 9 | ✅ | ✅ | Streamlit |
-| 05 Realtime Anomaly | ✅ | ✅ 14 | ✅ | ✅ | Grafana |
+**Владимир Ловцов** — Enterprise Architect & AI Practitioner
 
-## Author
+8+ лет в IT: системный аналитик → техлид → директор разработки → архитектор.
+VTB (real-time системы, <0.3s latency) → T1 (enterprise architecture) → Digital Artel (IT-кооператив).
 
-**Vladimir Lovtsov** — Enterprise Architect & AI Practitioner
-- [lovtsov.dev](https://lovtsov.dev) | [GitHub](https://github.com/vovlov) | [Telegram](https://t.me/it_underside)
+- [lovtsov.dev](https://lovtsov.dev) — персональный сайт
+- [GitHub](https://github.com/vovlov) — все проекты
+- [Telegram](https://t.me/it_underside) — канал об архитектуре и AI

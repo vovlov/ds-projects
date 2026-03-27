@@ -1,108 +1,108 @@
 # 01 — Customer Churn Prediction with MLOps
 
-> **Evolution from:** [Yandex.Praktikum Project 7 (Churn)](https://github.com/vovlov/YandexPraktikum/tree/master/project_7_Training_teacher) + [Project 17 (Graduation)](https://github.com/vovlov/YandexPraktikum/tree/master/project_17_Graduation%20project)
+**Полный цикл предсказания оттока клиентов** — от сырых данных до работающего API и дашборда. Это мой подход к тому, как должен выглядеть production ML-проект: воспроизводимый, тестируемый, задеплоенный.
 
-End-to-end customer churn prediction system for a telecom operator — from data pipeline through model training to production-ready API and dashboard.
+*End-to-end customer churn prediction — from raw data to a working API and dashboard. This is how I think a production ML project should look: reproducible, tested, deployed.*
 
-## Architecture
+> **Эволюция:** В 2020 году я решал похожую задачу в [Яндекс.Практикуме](https://github.com/vovlov/YandexPraktikum/tree/master/project_7_Training_teacher) — тогда это был один Jupyter-ноутбук с pandas и sklearn. Здесь та же задача, но с Polars, Optuna, MLflow, FastAPI и Docker.
+
+## Бизнес-задача / Business Problem
+
+Телеком-оператор теряет клиентов. Маркетинг хочет знать **кто уйдёт в следующем месяце**, чтобы предложить промокод или специальные условия. Удержать текущего клиента в 5-7 раз дешевле, чем привлечь нового.
+
+**Задача:** Построить модель, которая по 18 признакам клиента (тариф, срок, услуги, способ оплаты) выдаёт вероятность оттока.
+
+## Архитектура / Architecture
 
 ```
-┌──────────────┐     ┌────────────────┐     ┌──────────────┐
-│  Raw CSV     │────▶│  Feature Eng.  │────▶│   Training   │
-│  (DVC)       │     │  (Polars)      │     │  (Optuna +   │
-│              │     │                │     │   MLflow)    │
-└──────────────┘     └────────────────┘     └──────┬───────┘
-                                                    │
-                           ┌────────────────────────┤
-                           ▼                        ▼
-                    ┌──────────────┐     ┌──────────────────┐
-                    │  FastAPI     │     │  Streamlit       │
-                    │  /predict    │     │  Dashboard       │
-                    │  :8000       │     │  :8501           │
-                    └──────────────┘     └──────────────────┘
+  CSV (7043 клиента)
+        │
+        ▼
+  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+  │  Polars     │────▶│  Optuna     │────▶│  MLflow     │
+  │  Feature    │     │  30 trials  │     │  Tracking   │
+  │  Engineering│     │  5-fold CV  │     │             │
+  └─────────────┘     └─────────────┘     └──────┬──────┘
+                                                  │
+                         ┌────────────────────────┤
+                         ▼                        ▼
+                  ┌─────────────┐     ┌──────────────────┐
+                  │  FastAPI    │     │  Streamlit       │
+                  │  /predict   │     │  Dashboard       │
+                  │  :8000      │     │  EDA + Predict   │
+                  └─────────────┘     └──────────────────┘
 ```
 
-## Results
+## Результаты / Results
 
-| Model | F1 Score | ROC AUC | Training |
-|-------|----------|---------|----------|
-| CatBoost | 0.6232 | 0.8401 | Optuna 30 trials |
-| **LightGBM** | **0.6372** | **0.8471** | Optuna 30 trials |
+| Модель | F1 Score | ROC AUC | Время обучения |
+|--------|----------|---------|----------------|
+| CatBoost | 0.6232 | 0.8401 | ~6 мин (30 trials) |
+| **LightGBM** | **0.6372** | **0.8471** | ~30 сек (30 trials) |
 
-> LightGBM selected as the best model based on F1 score.
+LightGBM выбран как лучшая модель по F1.
 
-## Quick Start
+**Инженерные признаки** (добавлены мной, не из исходных данных):
+- `AvgMonthlySpend` — средний месячный расход (TotalCharges / tenure)
+- `ExpectedTotalCharges` — ожидаемая сумма (MonthlyCharges × tenure)
+- `TenureGroup` — сегмент по сроку: new (≤12м), mid (≤36м), long (>36м)
+- `NumServices` — количество подключённых сервисов (0–6)
+
+## Быстрый старт
 
 ```bash
-# From repo root
+# Из корня репо
 make setup-churn
 
-# Download data + train
+# Обучение (загрузит данные, обучит модели, сохранит артефакты)
 cd 01-customer-churn-mlops
 uv run python train.py
 
-# Run dashboard
+# Дашборд
 uv run streamlit run src/dashboard/app.py
 
-# Run API
+# API
 uv run uvicorn src.api.app:app --reload
 
-# Docker
+# Docker (API + Dashboard + MLflow)
 docker compose up
 ```
 
-## API Usage
+## API
 
 ```bash
 curl -X POST http://localhost:8000/predict \
   -H "Content-Type: application/json" \
   -d '{
-    "gender": "Female",
-    "SeniorCitizen": 0,
-    "Partner": "Yes",
-    "Dependents": "No",
-    "tenure": 12,
-    "PhoneService": "Yes",
-    "MultipleLines": "No",
-    "InternetService": "Fiber optic",
-    "OnlineSecurity": "No",
-    "OnlineBackup": "Yes",
-    "DeviceProtection": "No",
-    "TechSupport": "No",
-    "StreamingTV": "No",
-    "StreamingMovies": "No",
-    "Contract": "Month-to-month",
-    "PaperlessBilling": "Yes",
+    "gender": "Female", "SeniorCitizen": 0,
+    "Partner": "Yes", "Dependents": "No",
+    "tenure": 12, "PhoneService": "Yes",
+    "MultipleLines": "No", "InternetService": "Fiber optic",
+    "OnlineSecurity": "No", "OnlineBackup": "Yes",
+    "DeviceProtection": "No", "TechSupport": "No",
+    "StreamingTV": "No", "StreamingMovies": "No",
+    "Contract": "Month-to-month", "PaperlessBilling": "Yes",
     "PaymentMethod": "Electronic check",
-    "MonthlyCharges": 70.35,
-    "TotalCharges": 844.2
+    "MonthlyCharges": 70.35, "TotalCharges": 844.2
   }'
+
+# → {"churn_probability": 0.73, "churn_prediction": true, "risk_level": "high"}
 ```
 
-## Stack
+## Стек
 
-| Component | Tool |
-|-----------|------|
-| Data processing | Polars |
-| Feature store | Engineered features (tenure groups, service counts, spend ratios) |
-| ML models | CatBoost, LightGBM |
-| Hyperparameter tuning | Optuna (30 trials, 5-fold CV) |
-| Experiment tracking | MLflow |
-| Data versioning | DVC |
-| API | FastAPI |
-| Dashboard | Streamlit + Plotly |
-| Containerization | Docker multi-stage build |
-| CI/CD | GitHub Actions |
-| Data quality | Great Expectations |
-| Explainability | Feature importances, CatBoost built-in |
+| Компонент | Инструмент | Зачем |
+|-----------|-----------|-------|
+| Данные | Polars | Быстрее pandas, лаконичнее API |
+| Модели | CatBoost, LightGBM | Лучшие для табличных данных |
+| Оптимизация | Optuna (30 trials, 5-fold CV) | Автоматический подбор гиперпараметров |
+| Трекинг | MLflow | Воспроизводимость экспериментов |
+| API | FastAPI | Async, авто-документация, Pydantic |
+| UI | Streamlit + Plotly | Интерактивный дашборд с EDA |
+| Контейнеры | Docker multi-stage | API и Dashboard в отдельных контейнерах |
+| Тесты | pytest (14 тестов) | Data quality, feature engineering, загрузка |
+| Конфиг | YAML | Гиперпараметры не захардкожены |
 
-## Dataset
+## Датасет
 
-**Telco Customer Churn** (IBM, Kaggle) — 7,043 customers, 21 features.
-Binary classification: will the customer churn (leave) in the next period?
-
-**Features engineered:**
-- `AvgMonthlySpend` — total charges / tenure
-- `ExpectedTotalCharges` — monthly × tenure
-- `TenureGroup` — new (≤12m), mid (≤36m), long (>36m)
-- `NumServices` — count of subscribed services (0–6)
+**Telco Customer Churn** (IBM, [Kaggle](https://www.kaggle.com/datasets/blastchar/telco-customer-churn)) — 7 043 клиента, 21 признак. Бинарная классификация: уйдёт клиент или нет.
