@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/vovlov/ds-projects/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-184-green)
+![Tests](https://img.shields.io/badge/tests-185-green)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Десять production-ready проектов машинного обучения — от классической предиктивной аналитики до LLM fine-tuning и real-time обнаружения аномалий. Каждый проект решает конкретную бизнес-задачу и доведён до стадии работающего API с тестами, Docker-контейнерами и CI/CD.
@@ -33,7 +33,7 @@
 | 09 | [RecSys Feature Store](09-recsys-feature-store) | Персонализированные рекомендации | SVD, FAISS, Feature Store, Redis |
 | 10 | [Data Quality Platform](10-data-quality-platform) | Мониторинг качества данных | DuckDB, PSI/KS drift detection, Polars |
 
-**184 теста** | **10 API endpoints** | **10 Docker Compose stacks** | **GitHub Actions CI/CD**
+**185 тестов** | **10 API endpoints** | **10 Docker Compose stacks** | **GitHub Actions CI/CD**
 
 ## Покрытие направлений / Coverage
 
