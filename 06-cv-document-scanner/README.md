@@ -41,6 +41,15 @@ Praktikum project 15 (age detection with CNN).  Here we go further: custom fine-
   docker-compose.yml
 ```
 
+## Результаты / Results
+
+| Модель | Accuracy | Подход |
+|--------|----------|--------|
+| **RandomForest (baseline)** | **0.920** | sklearn, 5 синтетических фичей |
+| EfficientNet-V2 (CNN) | — | Docker training, реальные изображения |
+
+Baseline достигает 92% accuracy на 5 типах документов (receipt, id_card, medical_report, invoice, contract). CNN-модель — следующий этап для реальных изображений.
+
 ## Quick start / Быстрый старт
 
 ```bash
