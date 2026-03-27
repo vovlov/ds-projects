@@ -105,3 +105,43 @@ class TestRuleBasedNER:
         for entity in entities:
             assert entity.start >= 0
             assert entity.end > entity.start
+
+
+class TestAPI:
+    def test_health(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        assert client.get("/health").status_code == 200
+
+    def test_predict_endpoint(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict", json={"text": "Газпром находится в Москве."})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "entities" in data
+        assert "text" in data
+
+    def test_predict_batch(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/batch", json=[
+            {"text": "Яндекс в Санкт-Петербурге."},
+            {"text": "Обычный текст."},
+        ])
+        assert resp.status_code == 200
+        assert len(resp.json()) == 2
+
+    def test_predict_empty_rejects(self):
+        from fastapi.testclient import TestClient
+        from src.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict", json={"text": ""})
+        assert resp.status_code == 422  # min_length=1 validation

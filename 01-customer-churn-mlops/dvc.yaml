@@ -1,0 +1,25 @@
+stages:
+  download:
+    cmd: >
+      python -c "
+      import urllib.request;
+      urllib.request.urlretrieve(
+        'https://raw.githubusercontent.com/IBM/telco-customer-churn-on-icp4d/master/data/Telco-Customer-Churn.csv',
+        'data/raw.csv'
+      )"
+    outs:
+      - data/raw.csv
+
+  train:
+    cmd: uv run python train.py
+    deps:
+      - data/raw.csv
+      - src/data/load.py
+      - src/models/train.py
+      - train.py
+    outs:
+      - artifacts/model.pkl
+      - artifacts/results.pkl
+    metrics:
+      - artifacts/results.pkl:
+          cache: false

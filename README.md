@@ -16,7 +16,7 @@
 | 04 | [Graph Fraud Detection](04-graph-fraud-detection) | Обнаружение мошеннических транзакций через граф связей | PyTorch Geometric, CatBoost, NetworkX | 9 |
 | 05 | [Realtime Anomaly Detection](05-realtime-anomaly) | Real-time обнаружение аномалий в инфраструктурных метриках | Kafka, Grafana, Prometheus, FastAPI | 14 |
 
-**62 теста** | **5 API endpoints** | **5 Docker Compose stacks** | **GitHub Actions CI/CD**
+**74 теста** | **5 API endpoints** | **5 Docker Compose stacks** | **GitHub Actions CI/CD**
 
 ## Связь между проектами / How Projects Connect
 
@@ -78,7 +78,7 @@ make run-fraud        # 04: API для скоринга
 make run-anomaly      # 05: docker-compose (Kafka + Grafana)
 
 # Тесты и линтинг
-make test             # Все проекты (62 теста)
+make test             # Все проекты (74 теста)
 make lint             # ruff check + format
 ```
 
