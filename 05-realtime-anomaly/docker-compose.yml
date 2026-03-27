@@ -11,7 +11,8 @@ services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
-      - ./grafana:/etc/grafana/provisioning
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/etc/grafana/dashboards
 
   prometheus:
     image: prom/prometheus:latest
