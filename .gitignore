@@ -29,6 +29,10 @@ venv/
 # MLflow
 mlruns/
 mlartifacts/
+mlflow.db
+
+# CatBoost
+catboost_info/
 
 # DVC
 /dvc.lock
