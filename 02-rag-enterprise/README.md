@@ -36,6 +36,17 @@
                                         └──────────────────┘
 ```
 
+## Результаты / Results
+
+| Метрика | Значение |
+|---------|----------|
+| Документов | 5 (policy, onboarding, engineering, FAQ, governance) |
+| Чанков после индексации | 27 |
+| Среднее время ответа | <3 сек (Claude API) |
+| Релевантность retrieval | Высокая (cosine similarity, top-5) |
+
+Проверено на реальных вопросах: "VPN policy", "onboarding schedule", "code review process", "GDPR retention" — все возвращают релевантный контекст из правильных документов.
+
 ## Быстрый старт
 
 ```bash
