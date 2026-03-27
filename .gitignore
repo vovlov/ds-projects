@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+.python-version
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (managed by DVC)
+*.csv
+*.parquet
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.onnx
+!configs/*.yaml
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# DVC
+/dvc.lock
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+*.log
+
+# Grafana
+grafana/data/
+
+# Models (too large for git)
+models/
+*.bin
