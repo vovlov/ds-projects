@@ -35,7 +35,7 @@ NN-project-name/
 ├── docker-compose.yml
 ├── configs/
 │   └── *.yaml            # Конфигурация (не хардкод!)
-├── src/
+├── {pkg}/
 │   ├── data/             # Загрузка, генерация, feature engineering
 │   ├── models/           # Обучение, evaluation
 │   ├── api/

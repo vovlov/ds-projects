@@ -54,7 +54,7 @@ after corrupted data has already reached reports or ML models.
 
 ```
 10-data-quality-platform/
-├── src/
+├── quality/
 │   ├── data/
 │   │   ├── connectors.py    # CSV + DuckDB коннекторы
 │   │   └── profiler.py      # Профилирование данных
@@ -94,10 +94,10 @@ python scripts/seed_demo_data.py
 pytest tests/ -v
 
 # Запустить API / Start API
-uvicorn src.api.app:app --reload --port 8000
+uvicorn quality.api.app:app --reload --port 8000
 
 # Запустить дашборд / Start dashboard
-streamlit run src/dashboard/app.py
+streamlit run quality/dashboard/app.py
 ```
 
 ### Docker

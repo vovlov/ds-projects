@@ -29,7 +29,7 @@ Praktikum project 15 (age detection with CNN).  Here we go further: custom fine-
 06-cv-document-scanner/
   configs/training.yaml       # hyperparameters
   notebooks/eda.py            # exploratory analysis (VS Code / Jupyter cells)
-  src/
+  scanner/
     data/dataset.py           # synthetic document features
     models/classifier.py      # sklearn baseline
     models/cnn.py             # EfficientNet CNN (torch optional)
@@ -60,10 +60,10 @@ pip install scikit-learn polars numpy fastapi uvicorn streamlit plotly pydantic 
 pytest tests/ -v
 
 # start the API
-uvicorn src.api.app:app --reload
+uvicorn scanner.api.app:app --reload
 
 # start the dashboard
-streamlit run src/dashboard/app.py
+streamlit run scanner/dashboard/app.py
 ```
 
 ## Docker (CNN training) / Docker (обучение CNN)

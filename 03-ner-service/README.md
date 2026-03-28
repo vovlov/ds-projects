@@ -72,10 +72,10 @@ make setup-ner
 cd 03-ner-service
 
 # Демо с подсветкой сущностей
-uv run streamlit run src/demo/app.py
+uv run streamlit run ner/demo/app.py
 
 # API
-uv run uvicorn src.api.app:app --reload
+uv run uvicorn ner.api.app:app --reload
 ```
 
 ## Стек

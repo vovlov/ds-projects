@@ -1,14 +1,9 @@
 """Tests for Graph Fraud Detection."""
 
-import os
 import sys
+from pathlib import Path
 
-# CRITICAL: Must happen before any from fraud... import
-_here = os.path.dirname(os.path.abspath(__file__))
-_project = os.path.dirname(_here)
-print(f"TEST: src exists={os.path.isdir(os.path.join(_project, 'src'))}")
-sys.path.insert(0, _project)
-
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 from fraud.data.dataset import (

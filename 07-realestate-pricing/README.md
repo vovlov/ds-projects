@@ -77,10 +77,10 @@ cd 07-realestate-pricing
 uv run python train.py
 
 # Дашборд
-uv run streamlit run src/dashboard/app.py
+uv run streamlit run pricing/dashboard/app.py
 
 # API
-uv run uvicorn src.api.app:app --reload
+uv run uvicorn pricing.api.app:app --reload
 
 # Docker (API + Dashboard + MLflow)
 docker compose up

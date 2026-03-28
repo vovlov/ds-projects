@@ -57,7 +57,7 @@ E-commerce платформа нуждается в персонализиров
 
 ```
 09-recsys-feature-store/
-├── src/
+├── recsys/
 │   ├── data/load.py              # Synthetic data generation (Polars)
 │   ├── models/
 │   │   ├── collaborative.py      # SVD-based collaborative filtering
@@ -86,10 +86,10 @@ pip install -r requirements.txt
 PYTHONPATH=. pytest tests/ -v
 
 # Start API / Запуск API
-PYTHONPATH=. uvicorn src.api.app:app --reload
+PYTHONPATH=. uvicorn recsys.api.app:app --reload
 
 # Start dashboard / Запуск дашборда
-PYTHONPATH=. streamlit run src/dashboard/app.py
+PYTHONPATH=. streamlit run recsys/dashboard/app.py
 
 # Run EDA / Запуск EDA
 PYTHONPATH=. python notebooks/eda.py
