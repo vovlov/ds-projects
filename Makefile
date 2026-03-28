@@ -64,25 +64,25 @@ test-quality:
 
 # ── Run demos ──────────────────────────────────────────────────────
 run-churn:
-	cd 01-customer-churn-mlops && uv run streamlit run src/dashboard/app.py
+	cd 01-customer-churn-mlops && uv run streamlit run churn/dashboard/app.py
 run-rag:
-	cd 02-rag-enterprise && uv run python -m src.api.app
+	cd 02-rag-enterprise && uv run python -m rag.api.app
 run-ner:
-	cd 03-ner-service && uv run streamlit run src/demo/app.py
+	cd 03-ner-service && uv run streamlit run ner/demo/app.py
 run-fraud:
-	cd 04-graph-fraud-detection && uv run streamlit run src/demo/app.py
+	cd 04-graph-fraud-detection && uv run streamlit run fraud/demo/app.py
 run-anomaly:
 	cd 05-realtime-anomaly && docker compose up
 run-cv:
-	cd 06-cv-document-scanner && uv run streamlit run src/dashboard/app.py
+	cd 06-cv-document-scanner && uv run streamlit run scanner/dashboard/app.py
 run-pricing:
-	cd 07-realestate-pricing && uv run streamlit run src/dashboard/app.py
+	cd 07-realestate-pricing && uv run streamlit run pricing/dashboard/app.py
 run-review:
-	cd 08-llm-code-review && uv run python -m src.api.app
+	cd 08-llm-code-review && uv run python -m review.api.app
 run-recsys:
-	cd 09-recsys-feature-store && uv run streamlit run src/dashboard/app.py
+	cd 09-recsys-feature-store && uv run streamlit run recsys/dashboard/app.py
 run-quality:
-	cd 10-data-quality-platform && uv run streamlit run src/dashboard/app.py
+	cd 10-data-quality-platform && uv run streamlit run quality/dashboard/app.py
 
 # ── Docker ─────────────────────────────────────────────────────────
 docker-churn:

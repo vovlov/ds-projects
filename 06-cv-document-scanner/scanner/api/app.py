@@ -15,8 +15,8 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from src.data.dataset import generate_synthetic_documents, get_feature_matrix
-from src.models.classifier import predict, train_classifier
+from scanner.data.dataset import generate_synthetic_documents, get_feature_matrix
+from scanner.models.classifier import predict, train_classifier
 
 logger = logging.getLogger(__name__)
 

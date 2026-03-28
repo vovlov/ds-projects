@@ -16,9 +16,9 @@ import io
 import polars as pl
 import streamlit as st
 
-from src.data.profiler import profile_dataframe
-from src.quality.drift import detect_drift
-from src.quality.expectations import run_suite
+from quality.data.profiler import profile_dataframe
+from quality.quality.drift import detect_drift
+from quality.quality.expectations import run_suite
 
 st.set_page_config(
     page_title="Data Quality Platform",

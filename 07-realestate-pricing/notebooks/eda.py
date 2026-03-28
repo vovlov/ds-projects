@@ -16,7 +16,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
-from src.data.load import TARGET, load_dataset
+from pricing.data.load import TARGET, load_dataset
 
 # %%
 df = load_dataset()

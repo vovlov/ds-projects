@@ -14,11 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import polars as pl
 import pytest
 from fastapi.testclient import TestClient
-from src.data.load import generate_interactions, generate_products, generate_users
-from src.feature_store.offline import compute_item_features, compute_user_features
-from src.feature_store.registry import FeatureRegistry
-from src.models.collaborative import CollaborativeRecommender
-from src.models.content_based import ContentBasedRecommender, get_popular_items
+from recsys.data.load import generate_interactions, generate_products, generate_users
+from recsys.feature_store.offline import compute_item_features, compute_user_features
+from recsys.feature_store.registry import FeatureRegistry
+from recsys.models.collaborative import CollaborativeRecommender
+from recsys.models.content_based import ContentBasedRecommender, get_popular_items
 
 # ========== Фикстуры / Fixtures ==========
 
@@ -233,7 +233,7 @@ class TestAPI:
 
     @pytest.fixture(scope="class")
     def client(self) -> TestClient:
-        from src.api.app import app
+        from recsys.api.app import app
 
         return TestClient(app)
 

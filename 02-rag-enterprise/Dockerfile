@@ -9,8 +9,8 @@ RUN uv pip install --system --no-cache \
     langchain langchain-community langchain-text-splitters langchain-anthropic \
     chromadb anthropic fastapi uvicorn gradio
 
-COPY src/ src/
+COPY rag/ rag/
 COPY data/ data/
 
 EXPOSE 7860
-CMD ["python", "-m", "src.api.app"]
+CMD ["python", "-m", "rag.api.app"]

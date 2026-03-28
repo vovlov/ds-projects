@@ -7,8 +7,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data.generator import generate_timeseries, to_windows
-from src.models.detector import MultiMetricDetector, StatisticalDetector
+from anomaly.data.generator import generate_timeseries, to_windows
+from anomaly.models.detector import MultiMetricDetector, StatisticalDetector
 
 
 class TestDataGenerator:
@@ -104,8 +104,8 @@ class TestMultiMetricDetector:
 
 class TestAPI:
     def test_health_endpoint(self):
+        from anomaly.api.app import app
         from fastapi.testclient import TestClient
-        from src.api.app import app
 
         client = TestClient(app)
         resp = client.get("/health")
@@ -113,8 +113,8 @@ class TestAPI:
         assert resp.json()["status"] == "healthy"
 
     def test_detect_endpoint(self):
+        from anomaly.api.app import app
         from fastapi.testclient import TestClient
-        from src.api.app import app
 
         client = TestClient(app)
         points = [
@@ -131,7 +131,7 @@ class TestAPI:
 
 class TestAlerting:
     def test_create_alert(self):
-        from src.alerting.webhook import create_alert
+        from anomaly.alerting.webhook import create_alert
 
         alert = create_alert(
             timestamp=1000.0,
@@ -145,7 +145,7 @@ class TestAlerting:
         assert alert.metric_name in ("cpu", "latency", "requests")
 
     def test_format_alert_payload(self):
-        from src.alerting.webhook import Alert, format_alert_payload
+        from anomaly.alerting.webhook import Alert, format_alert_payload
 
         alert = Alert(
             timestamp=1000.0,
@@ -161,7 +161,7 @@ class TestAlerting:
         assert payload["severity"] == "warning"
 
     def test_send_alert_logs(self):
-        from src.alerting.webhook import Alert, send_alert
+        from anomaly.alerting.webhook import Alert, send_alert
 
         alert = Alert(
             timestamp=1000.0,

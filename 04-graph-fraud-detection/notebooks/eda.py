@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path.cwd().parent))
 import networkx as nx
 import numpy as np
 import plotly.express as px
-from src.data.dataset import generate_synthetic_transactions, get_edge_index, get_feature_matrix
+from fraud.data.dataset import generate_synthetic_transactions, get_edge_index, get_feature_matrix
 
 # %%
 data = generate_synthetic_transactions(n_nodes=500, n_transactions=2000, fraud_rate=0.08)

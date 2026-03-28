@@ -5,13 +5,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data.dataset import (
+from ner.data.dataset import (
     ID2LABEL,
     LABEL2ID,
     NER_LABELS,
     get_sample_data,
 )
-from src.model.ner import extract_entities_from_bio, predict, predict_rule_based
+from ner.model.ner import extract_entities_from_bio, predict, predict_rule_based
 
 
 class TestDataset:
@@ -110,14 +110,14 @@ class TestRuleBasedNER:
 class TestAPI:
     def test_health(self):
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from ner.api.app import app
 
         client = TestClient(app)
         assert client.get("/health").status_code == 200
 
     def test_predict_endpoint(self):
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from ner.api.app import app
 
         client = TestClient(app)
         resp = client.post("/predict", json={"text": "Газпром находится в Москве."})
@@ -128,7 +128,7 @@ class TestAPI:
 
     def test_predict_batch(self):
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from ner.api.app import app
 
         client = TestClient(app)
         resp = client.post(
@@ -143,7 +143,7 @@ class TestAPI:
 
     def test_predict_empty_rejects(self):
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from ner.api.app import app
 
         client = TestClient(app)
         resp = client.post("/predict", json={"text": ""})

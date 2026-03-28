@@ -8,7 +8,7 @@ COPY pyproject.toml .
 RUN uv pip install --system --no-cache \
     numpy fastapi uvicorn
 
-COPY src/ src/
+COPY anomaly/ anomaly/
 
 EXPOSE 8000
-CMD ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "anomaly.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

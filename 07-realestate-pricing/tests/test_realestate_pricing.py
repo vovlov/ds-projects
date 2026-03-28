@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data.load import (
+from pricing.data.load import (
     CATEGORICAL_FEATURES,
     CURRENT_YEAR,
     NUMERICAL_FEATURES,
@@ -91,8 +91,8 @@ class TestModel:
 
     def test_catboost_training(self, full_df: pl.DataFrame) -> None:
         """Быстрый тест: 3 trial, чтобы не ждать долго в CI."""
+        from pricing.models.train import train_catboost
         from sklearn.model_selection import train_test_split
-        from src.models.train import train_catboost
 
         indices = list(range(len(full_df)))
         train_idx, test_idx = train_test_split(indices, test_size=0.2, random_state=42)
@@ -110,7 +110,7 @@ class TestAPI:
 
     def test_health_endpoint(self) -> None:
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from pricing.api.app import app
 
         client = TestClient(app)
         resp = client.get("/health")
@@ -120,7 +120,7 @@ class TestAPI:
     def test_estimate_validation(self) -> None:
         """Неполный запрос должен вернуть 422."""
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from pricing.api.app import app
 
         client = TestClient(app)
         resp = client.post("/estimate", json={"sqft": 65})
@@ -133,7 +133,7 @@ class TestAPI:
             pytest.skip("Model artifact not available — run train.py first")
 
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from pricing.api.app import app
 
         client = TestClient(app)
         resp = client.post(

@@ -12,8 +12,8 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data.dataset import generate_synthetic_transactions, get_edge_index, get_feature_matrix
-from src.models.baseline.tabular import train_baseline
+from fraud.data.dataset import generate_synthetic_transactions, get_edge_index, get_feature_matrix
+from fraud.models.baseline.tabular import train_baseline
 
 st.set_page_config(page_title="Graph Fraud Detection", layout="wide")
 

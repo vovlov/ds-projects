@@ -12,7 +12,7 @@ from pathlib import Path
 
 import polars as pl
 
-from src.feature_store.registry import FeatureRegistry
+from recsys.feature_store.registry import FeatureRegistry
 
 
 def compute_user_features(
@@ -171,7 +171,7 @@ def populate_registry(
 
 
 if __name__ == "__main__":
-    from src.data.load import load_all_data
+    from recsys.data.load import load_all_data
 
     users, products, interactions = load_all_data()
 

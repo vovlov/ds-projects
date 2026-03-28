@@ -17,10 +17,10 @@ import numpy as np
 import polars as pl
 import pytest
 from fastapi.testclient import TestClient
-from src.api.app import app
-from src.data.profiler import detect_distribution_type, profile_column, profile_dataframe
-from src.quality.drift import detect_drift, ks_test, psi
-from src.quality.expectations import (
+from quality.api.app import app
+from quality.data.profiler import detect_distribution_type, profile_column, profile_dataframe
+from quality.quality.drift import detect_drift, ks_test, psi
+from quality.quality.expectations import (
     expect_column_exists,
     expect_not_null,
     expect_unique,

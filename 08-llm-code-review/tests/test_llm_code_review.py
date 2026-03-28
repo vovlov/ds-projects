@@ -8,9 +8,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data.samples import CATEGORIES, get_sample_reviews
-from src.models.classifier import build_classifier, classify_batch, classify_comment, get_categories
-from src.models.reviewer import review_code
+from review.data.samples import CATEGORIES, get_sample_reviews
+from review.models.classifier import (
+    build_classifier,
+    classify_batch,
+    classify_comment,
+    get_categories,
+)
+from review.models.reviewer import review_code
 
 # ── TestData ─────────────────────────────────────────────────────────────────
 
@@ -114,7 +119,7 @@ class TestReviewer:
 class TestAPI:
     def test_health_endpoint(self):
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from review.api.app import app
 
         client = TestClient(app)
         resp = client.get("/health")
@@ -125,7 +130,7 @@ class TestAPI:
 
     def test_classify_endpoint(self):
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from review.api.app import app
 
         client = TestClient(app)
         resp = client.post("/classify", json={"text": "SQL injection vulnerability found"})
@@ -137,7 +142,7 @@ class TestAPI:
     def test_review_endpoint_no_key(self):
         """Without API key the /review endpoint should still return 200 with an error comment."""
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from review.api.app import app
 
         old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
         try:

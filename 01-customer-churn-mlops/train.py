@@ -5,9 +5,9 @@ from __future__ import annotations
 import pickle
 from pathlib import Path
 
+from churn.data.load import TARGET, prepare_dataset
+from churn.models.train import train_catboost, train_lightgbm
 from sklearn.model_selection import train_test_split
-from src.data.load import TARGET, prepare_dataset
-from src.models.train import train_catboost, train_lightgbm
 
 DATA_DIR = Path(__file__).parent / "data"
 ARTIFACTS_DIR = Path(__file__).parent / "artifacts"

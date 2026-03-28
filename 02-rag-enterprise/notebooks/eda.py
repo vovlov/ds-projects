@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path.cwd().parent))
 
 import contextlib
 
-from src.ingestion.loader import chunk_documents, load_documents
-from src.retrieval.store import get_client, get_or_create_collection, index_chunks, search
+from rag.ingestion.loader import chunk_documents, load_documents
+from rag.retrieval.store import get_client, get_or_create_collection, index_chunks, search
 
 DATA_DIR = Path.cwd().parent / "data" / "documents"
 

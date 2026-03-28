@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd().parent))
 
-from src.data.samples import CATEGORIES, get_sample_reviews
-from src.models.classifier import build_classifier, classify_comment
+from review.data.samples import CATEGORIES, get_sample_reviews
+from review.models.classifier import build_classifier, classify_comment
 
 # %% [markdown]
 # ## 1. Dataset Overview

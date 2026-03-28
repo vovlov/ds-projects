@@ -9,9 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import contextlib
 
-from src.generation.chain import build_prompt
-from src.ingestion.loader import chunk_documents, load_documents
-from src.retrieval.store import get_client, get_or_create_collection, index_chunks, search
+from rag.generation.chain import build_prompt
+from rag.ingestion.loader import chunk_documents, load_documents
+from rag.retrieval.store import get_client, get_or_create_collection, index_chunks, search
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "documents"
 
@@ -115,7 +115,7 @@ class TestGeneration:
 
         old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
         try:
-            from src.generation.chain import generate_answer
+            from rag.generation.chain import generate_answer
 
             result = generate_answer("Test?", [{"text": "ctx", "metadata": {"source": "t"}}])
             assert "Error" in result["answer"] or "ANTHROPIC_API_KEY" in result["answer"]
@@ -127,7 +127,7 @@ class TestGeneration:
 class TestAPI:
     def test_health_endpoint(self):
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from rag.api.app import app
 
         client = TestClient(app)
         resp = client.get("/health")

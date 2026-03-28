@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data.load import (
+from churn.data.load import (
     CATEGORICAL_FEATURES,
     NUMERICAL_FEATURES,
     TARGET,
@@ -93,8 +93,8 @@ class TestDataQuality:
 
 class TestAPI:
     def test_health_endpoint(self):
+        from churn.api.app import app
         from fastapi.testclient import TestClient
-        from src.api.app import app
 
         client = TestClient(app)
         resp = client.get("/health")
@@ -102,8 +102,8 @@ class TestAPI:
         assert "status" in resp.json()
 
     def test_predict_validation(self):
+        from churn.api.app import app
         from fastapi.testclient import TestClient
-        from src.api.app import app
 
         client = TestClient(app)
         resp = client.post("/predict", json={"gender": "Male"})
@@ -117,8 +117,8 @@ class TestAPI:
         if not model_path.exists():
             pytest.skip("Model artifact not available — run train.py first")
 
+        from churn.api.app import app
         from fastapi.testclient import TestClient
-        from src.api.app import app
 
         client = TestClient(app)
         resp = client.post(

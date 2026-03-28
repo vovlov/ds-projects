@@ -8,7 +8,7 @@ COPY pyproject.toml .
 RUN uv pip install --system --no-cache \
     anthropic scikit-learn fastapi uvicorn gradio
 
-COPY src/ src/
+COPY review/ src/
 COPY configs/ configs/
 
 EXPOSE 7868

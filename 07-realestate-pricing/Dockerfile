@@ -9,7 +9,7 @@ RUN uv pip install --system --no-cache \
     polars catboost lightgbm scikit-learn optuna mlflow \
     fastapi uvicorn streamlit plotly
 
-COPY src/ src/
+COPY pricing/ src/
 COPY artifacts/ artifacts/
 
 # -- API ------------------------------------------------

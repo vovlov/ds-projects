@@ -9,13 +9,13 @@ import numpy as np
 import plotly.express as px
 import plotly.figure_factory as ff
 import polars as pl
-from src.data.dataset import (
+from scanner.data.dataset import (
     DOC_TYPES,
     FEATURE_COLS,
     generate_synthetic_documents,
     get_feature_matrix,
 )
-from src.models.classifier import train_classifier
+from scanner.models.classifier import train_classifier
 
 # %%  generate data
 data = generate_synthetic_documents(n=500)

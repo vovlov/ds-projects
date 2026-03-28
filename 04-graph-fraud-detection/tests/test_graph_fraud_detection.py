@@ -3,7 +3,7 @@
 import os
 import sys
 
-# CRITICAL: Must happen before any from src... import
+# CRITICAL: Must happen before any from fraud... import
 _here = os.path.dirname(os.path.abspath(__file__))
 _project = os.path.dirname(_here)
 print(f"TEST: src exists={os.path.isdir(os.path.join(_project, 'src'))}")
@@ -11,12 +11,12 @@ sys.path.insert(0, _project)
 
 
 import numpy as np
-from src.data.dataset import (
+from fraud.data.dataset import (
     generate_synthetic_transactions,
     get_edge_index,
     get_feature_matrix,
 )
-from src.models.baseline.tabular import train_baseline
+from fraud.models.baseline.tabular import train_baseline
 
 
 class TestDataGeneration:
@@ -83,7 +83,7 @@ class TestBaseline:
 class TestAPI:
     def test_health_endpoint(self):
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from fraud.api.app import app
 
         client = TestClient(app)
         resp = client.get("/health")
@@ -92,7 +92,7 @@ class TestAPI:
 
     def test_score_endpoint(self):
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from fraud.api.app import app
 
         client = TestClient(app)
         resp = client.post(
@@ -111,7 +111,7 @@ class TestAPI:
 
     def test_score_batch_endpoint(self):
         from fastapi.testclient import TestClient
-        from src.api.app import app
+        from fraud.api.app import app
 
         client = TestClient(app)
         resp = client.post(

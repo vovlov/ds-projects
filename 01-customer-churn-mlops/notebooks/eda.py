@@ -15,7 +15,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
-from src.data.load import TARGET, prepare_dataset
+from churn.data.load import TARGET, prepare_dataset
 
 # %%
 df = prepare_dataset(Path.cwd().parent / "data" / "raw.csv")

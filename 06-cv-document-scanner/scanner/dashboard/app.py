@@ -11,12 +11,12 @@ import plotly.express as px
 import plotly.figure_factory as ff
 import streamlit as st
 
-from src.data.dataset import (
+from scanner.data.dataset import (
     FEATURE_COLS,
     generate_synthetic_documents,
     get_feature_matrix,
 )
-from src.models.classifier import predict, train_classifier
+from scanner.models.classifier import predict, train_classifier
 
 st.set_page_config(page_title="Document Scanner", layout="wide")
 st.title("Insurance Document Classification")

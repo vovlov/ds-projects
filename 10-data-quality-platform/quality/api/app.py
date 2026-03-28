@@ -19,9 +19,9 @@ import yaml
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
-from src.data.profiler import profile_dataframe
-from src.quality.drift import detect_drift
-from src.quality.expectations import run_suite
+from quality.data.profiler import profile_dataframe
+from quality.quality.drift import detect_drift
+from quality.quality.expectations import run_suite
 
 app = FastAPI(
     title="Data Quality Platform",

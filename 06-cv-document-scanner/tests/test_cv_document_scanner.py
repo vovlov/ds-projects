@@ -16,14 +16,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from src.data.dataset import (
+from scanner.data.dataset import (
     DOC_TYPES,
     FEATURE_COLS,
     generate_synthetic_documents,
     get_feature_matrix,
 )
-from src.models.classifier import predict, train_classifier
-from src.models.cnn import is_available as cnn_is_available
+from scanner.models.classifier import predict, train_classifier
+from scanner.models.cnn import is_available as cnn_is_available
 
 # ---- fixtures ----
 
@@ -47,7 +47,7 @@ def trained(feature_matrix):
 @pytest.fixture(scope="module")
 def api_client():
     # import here so module-level state doesn't leak across fixtures
-    from src.api.app import app
+    from scanner.api.app import app
 
     return TestClient(app)
 
@@ -194,6 +194,6 @@ class TestCNN:
 
     def test_import_does_not_crash(self):
         """Even without torch the module should import cleanly."""
-        import src.models.cnn as cnn_mod  # noqa: F811
+        import scanner.models.cnn as cnn_mod  # noqa: F811
 
         assert hasattr(cnn_mod, "TORCH_AVAILABLE")

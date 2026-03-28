@@ -24,10 +24,10 @@ if str(PROJECT_ROOT) not in sys.path:
 # %%
 import polars as pl
 
-from src.data.connectors import CSVConnector
-from src.data.profiler import profile_dataframe
-from src.quality.drift import detect_drift
-from src.quality.expectations import run_suite
+from quality.data.connectors import CSVConnector
+from quality.data.profiler import profile_dataframe
+from quality.quality.drift import detect_drift
+from quality.quality.expectations import run_suite
 
 # %% [markdown]
 # ## 1. Загрузка данных / Load data

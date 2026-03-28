@@ -5,8 +5,8 @@ from __future__ import annotations
 import pickle
 from pathlib import Path
 
-from src.data.dataset import generate_synthetic_documents, get_feature_matrix
-from src.models.classifier import train_classifier
+from scanner.data.dataset import generate_synthetic_documents, get_feature_matrix
+from scanner.models.classifier import train_classifier
 
 ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
 

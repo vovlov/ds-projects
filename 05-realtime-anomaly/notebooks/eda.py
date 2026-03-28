@@ -13,8 +13,8 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from src.data.generator import generate_timeseries, to_windows
-from src.models.detector import MultiMetricDetector
+from anomaly.data.generator import generate_timeseries, to_windows
+from anomaly.models.detector import MultiMetricDetector
 
 # %%
 data = generate_timeseries(n_points=2000, anomaly_rate=0.03, seed=42)

@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd().parent))
 
-from src.data.dataset import NER_LABELS, get_sample_data
-from src.model.ner import extract_entities_from_bio, predict
+from ner.data.dataset import NER_LABELS, get_sample_data
+from ner.model.ner import extract_entities_from_bio, predict
 
 # %% [markdown]
 # ## 1. Sample Data Statistics

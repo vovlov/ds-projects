@@ -27,7 +27,7 @@ import numpy as np
 import polars as pl
 import seaborn as sns
 
-from src.data.load import load_all_data
+from recsys.data.load import load_all_data
 
 # Загружаем данные / Load data
 users, products, interactions = load_all_data()

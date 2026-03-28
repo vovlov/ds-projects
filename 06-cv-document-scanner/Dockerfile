@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements-train.txt .
 RUN pip install --no-cache-dir -r requirements-train.txt
 
-COPY src/ src/
+COPY scanner/ src/
 COPY configs/ configs/
 
 # train and export ONNX -- expects a mounted volume at /data with images
@@ -22,7 +22,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY src/ src/
+COPY scanner/ src/
 # copy the ONNX artifact from the training stage (if it was produced)
 COPY --from=trainer /app/models/*.onnx models/ 2>/dev/null || true
 

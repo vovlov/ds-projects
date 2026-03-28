@@ -6,9 +6,9 @@ import pickle
 from pathlib import Path
 
 import polars as pl
-from src.data.load import load_all_data
-from src.models.collaborative import CollaborativeRecommender
-from src.models.content_based import ContentBasedRecommender
+from recsys.data.load import load_all_data
+from recsys.models.collaborative import CollaborativeRecommender
+from recsys.models.content_based import ContentBasedRecommender
 
 ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
 

@@ -8,9 +8,9 @@ from __future__ import annotations
 import polars as pl
 import streamlit as st
 
-from src.data.load import load_all_data
-from src.models.collaborative import CollaborativeRecommender
-from src.models.content_based import ContentBasedRecommender, get_popular_items
+from recsys.data.load import load_all_data
+from recsys.models.collaborative import CollaborativeRecommender
+from recsys.models.content_based import ContentBasedRecommender, get_popular_items
 
 
 @st.cache_resource
