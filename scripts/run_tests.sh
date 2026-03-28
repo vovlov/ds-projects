@@ -1,6 +1,9 @@
 #!/bin/bash
-# Run tests for a specific project.
-# Usage: ./scripts/run_tests.sh 04-graph-fraud-detection
 set -euo pipefail
-PROJECT="$1"
-exec uv run python -m pytest "$PROJECT/tests/" -v --tb=short --rootdir="$PROJECT"
+exec uv run python -c "
+import sys, os
+sys.path.insert(0, os.path.abspath('$1'))
+os.chdir('$1')
+import pytest
+raise SystemExit(pytest.main(['tests/', '-v', '--tb=short']))
+"
