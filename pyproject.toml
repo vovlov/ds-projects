@@ -106,6 +106,7 @@ quality = [
     "duckdb>=1.1",
     "scipy>=1.14",
     "pyyaml>=6.0",
+    "python-multipart>=0.0.18",
     "fastapi>=0.115",
     "uvicorn>=0.34",
     "streamlit>=1.40",
