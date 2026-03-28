@@ -1,0 +1,113 @@
+# Roadmap: От портфолио к продуктам
+
+## Текущий уровень зрелости (MLOps Level 1-2)
+
+По [Microsoft MLOps Maturity Model](https://learn.microsoft.com/en-us/azure/architecture/ai-ml/guide/mlops-maturity-model):
+- Level 0: No MLOps — **ПРОЙДЕН** (был в 2020 с Практикумом)
+- Level 1: DevOps but no MLOps — **ПРОЙДЕН** (CI/CD, Docker, тесты)
+- Level 2: Training pipeline automation — **ТЕКУЩИЙ** (MLflow, Optuna, DVC)
+- Level 3: Automated model deployment — **ЦЕЛЬ**
+- Level 4: Full MLOps — **ГОРИЗОНТ**
+
+## Бенчмарки: лучшие портфолио на GitHub
+
+Изучены:
+- [Made With ML](https://github.com/GokuMohandas/Made-With-ML) (40K+ stars) — полный MLOps-курс
+- [mlops-course](https://github.com/GokuMohandas/mlops-course) — CI/CD, serving, monitoring
+- [Microsoft MLOps](https://github.com/microsoft/MLOps) — enterprise patterns
+- [awesome-mlops](https://github.com/visenger/awesome-mlops) — кураторский список
+
+### Что у них есть, а у нас нет
+
+| Фича | Made With ML | Наш ds-projects |
+|------|-------------|-----------------|
+| Pre-commit hooks | ✅ | ❌ |
+| Model serving (Ray/BentoML) | ✅ | ❌ (только FastAPI) |
+| Automated retraining (CT) | ✅ | ❌ |
+| Data versioning (DVC pipeline) | ✅ | Частично (Project 01) |
+| Model registry | ✅ | ❌ |
+| A/B testing | ✅ | ❌ |
+| Monitoring/drift in production | ✅ | Частично (Project 10) |
+| Documentation site | ✅ (mkdocs) | ❌ |
+| Deployment to cloud | ✅ | ❌ |
+
+---
+
+## Фаза 1: Production Polish (1-2 недели)
+
+### Приоритет: каждый проект должен решать РЕАЛЬНУЮ проблему
+
+| # | Проект | Реальное применение | Что доработать |
+|---|--------|-------------------|----------------|
+| 01 | Churn MLOps | Телеком-оператор: retention кампании | Pre-commit hooks, model registry (MLflow), SHAP waterfall API |
+| 02 | RAG Enterprise | HR-отдел: ответы на вопросы по политикам | RAGAS evaluation, hybrid search (BM25+vector), streaming ответов |
+| 03 | NER Service | Юридический отдел: извлечение сущностей из договоров | Fine-tune на Collection5, batch processing pipeline |
+| 04 | Graph Fraud | Финтех: anti-fraud для P2P-платформы | Реальный датасет (Elliptic), temporal GNN |
+| 05 | Anomaly | SRE-команда: мониторинг инфраструктуры | Prometheus metrics exporter, LSTM serving |
+| 06 | CV Scanner | Страховая: обработка документов клиентов | Реальные изображения (RVL-CDIP), GradCAM |
+| 07 | Pricing | Маркетплейс: оценка для листинга | Геопризнаки (H3), сравнение с рынком |
+| 08 | Code Review | DevTools: PR assistant | LoRA fine-tuning на реальных PR |
+| 09 | RecSys | E-commerce: персонализация | MovieLens-25M, two-tower neural |
+| 10 | Quality | Data Platform: observability | Schema registry, lineage tracking |
+
+### Конкретные задачи (итерации)
+
+**Iteration 1-5: Pre-commit + Model Registry**
+- [ ] Добавить pre-commit hooks (ruff, mypy, pytest)
+- [ ] MLflow Model Registry для Project 01 и 07
+- [ ] SHAP waterfall в API Response (Project 07)
+
+**Iteration 6-10: Evaluation & Metrics**
+- [ ] RAGAS evaluation для RAG (Project 02)
+- [ ] Collection5 датасет для NER (Project 03)
+- [ ] Elliptic Bitcoin датасет для Fraud (Project 04)
+
+**Iteration 11-15: Real Data + Deployment**
+- [ ] Streamlit Cloud деплой для 3 проектов
+- [ ] MovieLens-25M для RecSys (Project 09)
+- [ ] RVL-CDIP для CV Scanner (Project 06)
+
+**Iteration 16-20: Monitoring & CT**
+- [ ] Prometheus metrics exporter (Project 05)
+- [ ] Automated retraining trigger (Project 01)
+- [ ] Data drift alerting (Project 10 → 01)
+
+---
+
+## Фаза 2: Product-Level (2-4 недели)
+
+- [ ] mkdocs documentation site
+- [ ] Model serving via BentoML (not just FastAPI)
+- [ ] A/B testing framework
+- [ ] Feature store integration (Feast)
+- [ ] Kubernetes deployment manifests
+- [ ] Automated model comparison reports
+
+---
+
+## Фаза 3: Enterprise (1-2 месяца)
+
+- [ ] Multi-model orchestration (Project 01 → 04 → 05 pipeline)
+- [ ] Schema registry for data contracts
+- [ ] Data lineage visualization
+- [ ] Cost optimization (model quantization, batching)
+- [ ] Security audit (OWASP for ML)
+- [ ] SLA monitoring
+
+---
+
+## Ежедневный цикл улучшений
+
+Каждый день:
+1. **Исследование** (30 мин): что нового в ML/MLOps? новые репо? новые подходы?
+2. **Выбор проекта**: по roadmap или по приоритету
+3. **Улучшение** (2-3 часа): код, тесты, документация
+4. **Отладка**: запуск тестов, e2e проверка API
+5. **Коммит + push**: маленькие инкрементальные улучшения
+
+Sources:
+- [Made With ML](https://github.com/GokuMohandas/Made-With-ML)
+- [mlops-course](https://github.com/GokuMohandas/mlops-course)
+- [Microsoft MLOps Maturity Model](https://learn.microsoft.com/en-us/azure/architecture/ai-ml/guide/mlops-maturity-model)
+- [awesome-mlops](https://github.com/visenger/awesome-mlops)
+- [ML Model Production Checklist](https://microsoft.github.io/code-with-engineering-playbook/machine-learning/ml-model-checklist/)
