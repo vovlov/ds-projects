@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
-
 from src.data.load import load_all_data
 from src.models.collaborative import CollaborativeRecommender
 from src.models.content_based import get_popular_items
