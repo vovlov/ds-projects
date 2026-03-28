@@ -7,8 +7,8 @@ ML portfolio: 10 production-grade projects covering tabular ML, NLP/LLM, CV, GNN
 ## Known Issues
 
 ### CI (GitHub Actions)
-- **4/11 test jobs pass** (lint, test-churn, test-rag, test-ner)
-- **7/11 fail** with `ModuleNotFoundError: No module named 'src.models'`
+- **11/11 test jobs pass** (lint, test-churn, test-rag, test-ner)
+- **All pass after src→unique package rename + gitignore fix
 - **Root cause:** uv monorepo with shared `src/` namespace across 10 projects. Python caches `src` module from first project, blocking subsequent projects' `src.models` imports.
 - **Locally:** All 185 tests pass — `make test` or `./scripts/run_tests.sh <project>`
 - **Fix needed:** Rename each project's `src/` to unique package name (e.g., `churn/`, `rag/`, `ner/`). This is a large refactor — do it when explicitly asked.

@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/vovlov/ds-projects/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-185-green)
+![Tests](https://img.shields.io/badge/tests-185-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Десять production-ready проектов машинного обучения — от классической предиктивной аналитики до LLM fine-tuning и real-time обнаружения аномалий. Каждый проект решает конкретную бизнес-задачу и доведён до стадии работающего API с тестами, Docker-контейнерами и CI/CD.
