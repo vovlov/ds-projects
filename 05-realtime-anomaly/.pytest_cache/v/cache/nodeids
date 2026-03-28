@@ -1,0 +1,21 @@
+[
+  "tests/test_realtime_anomaly.py::TestAPI::test_detect_endpoint",
+  "tests/test_realtime_anomaly.py::TestAPI::test_health_endpoint",
+  "tests/test_realtime_anomaly.py::TestAlerting::test_create_alert",
+  "tests/test_realtime_anomaly.py::TestAlerting::test_format_alert_payload",
+  "tests/test_realtime_anomaly.py::TestAlerting::test_send_alert_logs",
+  "tests/test_realtime_anomaly.py::TestDataGenerator::test_anomaly_rate",
+  "tests/test_realtime_anomaly.py::TestDataGenerator::test_cpu_range",
+  "tests/test_realtime_anomaly.py::TestDataGenerator::test_deterministic",
+  "tests/test_realtime_anomaly.py::TestDataGenerator::test_generate_shape",
+  "tests/test_realtime_anomaly.py::TestDataGenerator::test_labels_binary",
+  "tests/test_realtime_anomaly.py::TestDataGenerator::test_latency_positive",
+  "tests/test_realtime_anomaly.py::TestDataGenerator::test_requests_non_negative",
+  "tests/test_realtime_anomaly.py::TestMultiMetricDetector::test_detect_finds_some_anomalies",
+  "tests/test_realtime_anomaly.py::TestMultiMetricDetector::test_detect_synthetic_data",
+  "tests/test_realtime_anomaly.py::TestStatisticalDetector::test_detect_finds_spike",
+  "tests/test_realtime_anomaly.py::TestStatisticalDetector::test_detect_returns_result",
+  "tests/test_realtime_anomaly.py::TestStatisticalDetector::test_normal_data_few_anomalies",
+  "tests/test_realtime_anomaly.py::TestWindows::test_window_labels_binary",
+  "tests/test_realtime_anomaly.py::TestWindows::test_window_shape"
+]

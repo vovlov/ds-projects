@@ -1,0 +1,18 @@
+[
+  "tests/test_llm_code_review.py::TestAPI::test_classify_endpoint",
+  "tests/test_llm_code_review.py::TestAPI::test_health_endpoint",
+  "tests/test_llm_code_review.py::TestAPI::test_review_endpoint_no_key",
+  "tests/test_llm_code_review.py::TestClassifier::test_all_probabilities_sum",
+  "tests/test_llm_code_review.py::TestClassifier::test_batch_classify",
+  "tests/test_llm_code_review.py::TestClassifier::test_confidence_range",
+  "tests/test_llm_code_review.py::TestClassifier::test_get_categories",
+  "tests/test_llm_code_review.py::TestClassifier::test_pipeline_trains",
+  "tests/test_llm_code_review.py::TestClassifier::test_predict_returns_valid_category",
+  "tests/test_llm_code_review.py::TestData::test_all_categories_represented",
+  "tests/test_llm_code_review.py::TestData::test_categories_valid",
+  "tests/test_llm_code_review.py::TestData::test_diffs_look_real",
+  "tests/test_llm_code_review.py::TestData::test_sample_count",
+  "tests/test_llm_code_review.py::TestData::test_sample_keys",
+  "tests/test_llm_code_review.py::TestReviewer::test_missing_api_key_graceful",
+  "tests/test_llm_code_review.py::TestReviewer::test_missing_api_key_returns_valid_structure"
+]

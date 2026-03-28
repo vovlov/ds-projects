@@ -1,0 +1,18 @@
+[
+  "tests/test_realestate_pricing.py::TestAPI::test_estimate_validation",
+  "tests/test_realestate_pricing.py::TestAPI::test_estimate_with_model",
+  "tests/test_realestate_pricing.py::TestAPI::test_health_endpoint",
+  "tests/test_realestate_pricing.py::TestData::test_bedrooms_positive",
+  "tests/test_realestate_pricing.py::TestData::test_condition_types",
+  "tests/test_realestate_pricing.py::TestData::test_neighborhood_types",
+  "tests/test_realestate_pricing.py::TestData::test_no_nulls",
+  "tests/test_realestate_pricing.py::TestData::test_price_range",
+  "tests/test_realestate_pricing.py::TestData::test_shape",
+  "tests/test_realestate_pricing.py::TestData::test_sqft_range",
+  "tests/test_realestate_pricing.py::TestData::test_year_built_range",
+  "tests/test_realestate_pricing.py::TestFeatureEngineering::test_age_computed",
+  "tests/test_realestate_pricing.py::TestFeatureEngineering::test_full_df_has_all_features",
+  "tests/test_realestate_pricing.py::TestFeatureEngineering::test_has_garage_values",
+  "tests/test_realestate_pricing.py::TestFeatureEngineering::test_price_per_sqft",
+  "tests/test_realestate_pricing.py::TestModel::test_catboost_training"
+]

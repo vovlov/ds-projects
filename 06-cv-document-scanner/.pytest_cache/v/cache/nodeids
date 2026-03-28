@@ -1,0 +1,21 @@
+[
+  "tests/test_cv_document_scanner.py::TestAPI::test_classify_invalid_input",
+  "tests/test_cv_document_scanner.py::TestAPI::test_classify_returns_probabilities",
+  "tests/test_cv_document_scanner.py::TestAPI::test_classify_valid",
+  "tests/test_cv_document_scanner.py::TestAPI::test_health",
+  "tests/test_cv_document_scanner.py::TestCNN::test_import_does_not_crash",
+  "tests/test_cv_document_scanner.py::TestCNN::test_is_available_returns_bool",
+  "tests/test_cv_document_scanner.py::TestClassifier::test_accuracy_above_threshold",
+  "tests/test_cv_document_scanner.py::TestClassifier::test_confusion_matrix_shape",
+  "tests/test_cv_document_scanner.py::TestClassifier::test_f1_macro_reasonable",
+  "tests/test_cv_document_scanner.py::TestClassifier::test_predict_batch",
+  "tests/test_cv_document_scanner.py::TestClassifier::test_predict_single",
+  "tests/test_cv_document_scanner.py::TestClassifier::test_train_runs",
+  "tests/test_cv_document_scanner.py::TestData::test_class_balance",
+  "tests/test_cv_document_scanner.py::TestData::test_columns_present",
+  "tests/test_cv_document_scanner.py::TestData::test_doc_types",
+  "tests/test_cv_document_scanner.py::TestData::test_feature_matrix_shape",
+  "tests/test_cv_document_scanner.py::TestData::test_feature_ranges",
+  "tests/test_cv_document_scanner.py::TestData::test_label_encoder_classes",
+  "tests/test_cv_document_scanner.py::TestData::test_row_count"
+]

@@ -1,0 +1,22 @@
+artifact_path: /Users/vlovtsov/Documents/GitHub/ds-projects/07-realestate-pricing/mlruns/1/models/m-8f4a87afbf0f49efb9099313312c9040/artifacts
+flavors:
+  catboost:
+    catboost_version: 1.2.10
+    code: null
+    data: model.cb
+    model_type: CatBoostRegressor
+    save_format: cbm
+  python_function:
+    data: model.cb
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.catboost
+    python_version: 3.12.2
+mlflow_version: 3.10.1
+model_id: m-8f4a87afbf0f49efb9099313312c9040
+model_size_bytes: 943124
+model_uuid: m-8f4a87afbf0f49efb9099313312c9040
+prompts: null
+run_id: dc9b25d2f16647939fb5155b44b2a46e
+utc_time_created: '2026-03-27 21:54:48.209881'

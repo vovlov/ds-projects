@@ -1,0 +1,14 @@
+[
+  "tests/test_graph_fraud_detection.py::TestAPI::test_health_endpoint",
+  "tests/test_graph_fraud_detection.py::TestAPI::test_score_batch_endpoint",
+  "tests/test_graph_fraud_detection.py::TestAPI::test_score_endpoint",
+  "tests/test_graph_fraud_detection.py::TestBaseline::test_baseline_predictions_shape",
+  "tests/test_graph_fraud_detection.py::TestBaseline::test_train_baseline_runs",
+  "tests/test_graph_fraud_detection.py::TestDataGeneration::test_deterministic",
+  "tests/test_graph_fraud_detection.py::TestDataGeneration::test_edge_index",
+  "tests/test_graph_fraud_detection.py::TestDataGeneration::test_feature_matrix",
+  "tests/test_graph_fraud_detection.py::TestDataGeneration::test_generate_data_fraud_rate",
+  "tests/test_graph_fraud_detection.py::TestDataGeneration::test_generate_data_shape",
+  "tests/test_graph_fraud_detection.py::TestDataGeneration::test_no_self_loops",
+  "tests/test_graph_fraud_detection.py::TestDataGeneration::test_node_features_positive"
+]
