@@ -15,6 +15,7 @@ import io
 
 import polars as pl
 import streamlit as st
+
 from src.data.profiler import profile_dataframe
 from src.quality.drift import detect_drift
 from src.quality.expectations import run_suite

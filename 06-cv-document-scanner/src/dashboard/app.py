@@ -10,6 +10,7 @@ import numpy as np
 import plotly.express as px
 import plotly.figure_factory as ff
 import streamlit as st
+
 from src.data.dataset import (
     FEATURE_COLS,
     generate_synthetic_documents,

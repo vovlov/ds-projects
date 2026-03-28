@@ -18,6 +18,7 @@ import polars as pl
 import yaml
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
+
 from src.data.profiler import profile_dataframe
 from src.quality.drift import detect_drift
 from src.quality.expectations import run_suite

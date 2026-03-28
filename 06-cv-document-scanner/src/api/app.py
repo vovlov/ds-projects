@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
 from src.data.dataset import generate_synthetic_documents, get_feature_matrix
 from src.models.classifier import predict, train_classifier
 
