@@ -142,9 +142,5 @@ override-dependencies = [
     "torch<=2.5.0; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["_nonexistent"]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+# No build-system — this is a virtual project for dependency management only.
+# Each sub-project has its own package namespace (churn/, rag/, etc.).

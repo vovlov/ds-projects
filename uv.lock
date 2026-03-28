@@ -1163,7 +1163,7 @@ wheels = [
 [[package]]
 name = "ds-projects"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 
 [package.optional-dependencies]
 anomaly = [
