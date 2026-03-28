@@ -27,7 +27,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra churn
-      - run: ./scripts/run_tests.sh 01-customer-churn-mlops
+      - run: uv run python -c "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest', 'tests/', '-v', '--tb=short'], cwd='01-customer-churn-mlops'))"
 
   test-rag:
     runs-on: ubuntu-latest
@@ -38,7 +38,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra rag
-      - run: ./scripts/run_tests.sh 02-rag-enterprise
+      - run: uv run python -c "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest', 'tests/', '-v', '--tb=short'], cwd='02-rag-enterprise'))"
 
   test-ner:
     runs-on: ubuntu-latest
@@ -49,7 +49,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra ner
-      - run: ./scripts/run_tests.sh 03-ner-service
+      - run: uv run python -c "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest', 'tests/', '-v', '--tb=short'], cwd='03-ner-service'))"
 
   test-fraud:
     runs-on: ubuntu-latest
@@ -60,7 +60,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra fraud
-      - run: ./scripts/run_tests.sh 04-graph-fraud-detection
+      - run: uv run python -c "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest', 'tests/', '-v', '--tb=short'], cwd='04-graph-fraud-detection'))"
 
   test-anomaly:
     runs-on: ubuntu-latest
@@ -71,7 +71,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra anomaly
-      - run: ./scripts/run_tests.sh 05-realtime-anomaly
+      - run: uv run python -c "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest', 'tests/', '-v', '--tb=short'], cwd='05-realtime-anomaly'))"
 
   test-cv:
     runs-on: ubuntu-latest
@@ -82,7 +82,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra cv
-      - run: ./scripts/run_tests.sh 06-cv-document-scanner
+      - run: uv run python -c "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest', 'tests/', '-v', '--tb=short'], cwd='06-cv-document-scanner'))"
 
   test-pricing:
     runs-on: ubuntu-latest
@@ -93,7 +93,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra pricing
-      - run: ./scripts/run_tests.sh 07-realestate-pricing
+      - run: uv run python -c "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest', 'tests/', '-v', '--tb=short'], cwd='07-realestate-pricing'))"
 
   test-review:
     runs-on: ubuntu-latest
@@ -104,7 +104,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra review
-      - run: ./scripts/run_tests.sh 08-llm-code-review
+      - run: uv run python -c "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest', 'tests/', '-v', '--tb=short'], cwd='08-llm-code-review'))"
 
   test-recsys:
     runs-on: ubuntu-latest
@@ -115,7 +115,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra recsys
-      - run: ./scripts/run_tests.sh 09-recsys-feature-store
+      - run: uv run python -c "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest', 'tests/', '-v', '--tb=short'], cwd='09-recsys-feature-store'))"
 
   test-quality:
     runs-on: ubuntu-latest
@@ -126,4 +126,4 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra quality
-      - run: ./scripts/run_tests.sh 10-data-quality-platform
+      - run: uv run python -c "import subprocess,sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest', 'tests/', '-v', '--tb=short'], cwd='10-data-quality-platform'))"
