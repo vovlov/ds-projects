@@ -2,40 +2,39 @@
 
 ## Project
 
-ML portfolio: 10 production-grade projects covering tabular ML, NLP/LLM, CV, GNN, time series, recommender systems, and data engineering.
+ML portfolio: 10 production-grade projects. Unique package names per project (churn/, rag/, ner/, etc.).
 
-## Known Issues
+## CI Status: 11/11 GREEN
 
-### CI (GitHub Actions)
-- **11/11 test jobs pass** (lint, test-churn, test-rag, test-ner)
-- **All pass after src→unique package rename + gitignore fix
-- **Root cause:** uv monorepo with shared `src/` namespace across 10 projects. Python caches `src` module from first project, blocking subsequent projects' `src.models` imports.
-- **Locally:** All 185 tests pass — `make test` or `./scripts/run_tests.sh <project>`
-- **Fix needed:** Rename each project's `src/` to unique package name (e.g., `churn/`, `rag/`, `ner/`). This is a large refactor — do it when explicitly asked.
+All test jobs pass in GitHub Actions.
 
-### Platform
+## Package Layout
+
+Each project uses a unique package name instead of generic `src/`:
+- `01-customer-churn-mlops/churn/`
+- `02-rag-enterprise/rag/`
+- `03-ner-service/ner/`
+- `04-graph-fraud-detection/fraud/`
+- `05-realtime-anomaly/anomaly/`
+- `06-cv-document-scanner/scanner/`
+- `07-realestate-pricing/pricing/`
+- `08-llm-code-review/review/`
+- `09-recsys-feature-store/recsys/`
+- `10-data-quality-platform/quality/`
+
+## Platform
 - **macOS x86_64** — PyTorch doesn't install natively
 - **Workaround:** Docker training via `scripts/train_all.Dockerfile`
-- **Colima** required: `colima start --cpu 4 --memory 8`
 
 ## Development
 
 ```bash
-# Setup
-uv sync --extra dev --extra churn --extra rag --extra fraud --extra pricing --extra recsys --extra quality --extra review --extra cv
-
-# Test single project
-./scripts/run_tests.sh 01-customer-churn-mlops
-
-# Test all (locally)
-make test
-
-# Lint
-make lint && make lint-fix
+uv sync --all-extras          # install everything
+make test                     # all 185 tests
+make lint                     # ruff check + format
+./scripts/run_tests.sh 04-graph-fraud-detection  # single project
 ```
 
-## Project Structure
+## CI
 
-Each of 10 projects follows: `NN-name/{src/,tests/,notebooks/,configs/,Dockerfile,docker-compose.yml,README.md}`
-
-Dependencies managed via extras in root `pyproject.toml`.
+CI runs `cd project && ../.venv/bin/python -m pytest tests/` which adds CWD to sys.path via `-m` flag.
