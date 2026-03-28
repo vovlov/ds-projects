@@ -23,6 +23,9 @@ for mod in list(sys.modules):
 sys.path.insert(0, os.path.abspath('${PROJECT}'))
 # Run pytest
 import pytest
+print(f'sys.path[0] = {sys.path[0]}')
+print(f'Project dir exists: {os.path.isdir(os.path.abspath(\"${PROJECT}\"))}')
+print(f'src dir exists: {os.path.isdir(os.path.join(os.path.abspath(\"${PROJECT}\"), \"src\"))}')
 sys.exit(pytest.main([
     '${PROJECT}/tests/',
     '-v', '--tb=short',
