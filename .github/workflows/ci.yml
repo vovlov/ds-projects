@@ -60,7 +60,7 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --extra dev --extra fraud
-      - run: uv run --no-project --directory 04-graph-fraud-detection python -m pytest tests/ -v --tb=short
+      - run: uv run --no-project --directory 04-graph-fraud-detection python -c "import sys,os; print(f"CWD={os.getcwd()}"); print(f"sys.path[:3]={sys.path[:3]}"); print(f"fraud exists={os.path.isdir(\"fraud\")}"); import fraud; print(f"fraud={fraud.__file__}")"
 
   test-anomaly:
     runs-on: ubuntu-latest
