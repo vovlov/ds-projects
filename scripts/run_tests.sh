@@ -23,9 +23,22 @@ for mod in list(sys.modules):
 sys.path.insert(0, os.path.abspath('${PROJECT}'))
 # Run pytest
 import pytest
-print(f'sys.path[0] = {sys.path[0]}')
-print(f'Project dir exists: {os.path.isdir(os.path.abspath(\"${PROJECT}\"))}')
-print(f'src dir exists: {os.path.isdir(os.path.join(os.path.abspath(\"${PROJECT}\"), \"src\"))}')
+# Debug: check for src namespace collision
+import importlib
+try:
+    import src
+    print(f'DEBUG: src.__path__={src.__path__}')
+    print(f'DEBUG: src.__file__={getattr(src, \"__file__\", \"N/A\")}')
+except Exception as e:
+    print(f'DEBUG: src import failed: {e}')
+# Check for stale .pth files
+import site
+for sp in site.getsitepackages():
+    pth_files = [f for f in os.listdir(sp) if f.endswith('.pth')] if os.path.isdir(sp) else []
+    for pf in pth_files:
+        content = open(os.path.join(sp, pf)).read().strip()
+        if content:
+            print(f'DEBUG: .pth file {pf}: {content[:100]}')
 sys.exit(pytest.main([
     '${PROJECT}/tests/',
     '-v', '--tb=short',
