@@ -126,7 +126,7 @@ exclude = ["scripts/", "**/notebooks/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
-ignore = ["N806", "B008"]  # N806: uppercase X,y (ML). B008: FastAPI File() in defaults
+ignore = ["N806", "B008", "E402"]  # N806: uppercase X,y. B008: FastAPI File(). E402: imports after sys.path
 
 [tool.mypy]
 python_version = "3.12"

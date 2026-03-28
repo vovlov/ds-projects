@@ -1,12 +1,18 @@
 """Tests for Graph Fraud Detection."""
 
+import os
 import sys
-from pathlib import Path
+
+# CRITICAL: Must happen before any from src... import
+_here = os.path.dirname(os.path.abspath(__file__))
+_project = os.path.dirname(_here)
+print(f"TEST: __file__={__file__}")
+print(f"TEST: _project={_project}")
+print(f"TEST: src exists={os.path.isdir(os.path.join(_project, 'src'))}")
+sys.path.insert(0, _project)
+
 
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from src.data.dataset import (
     generate_synthetic_transactions,
     get_edge_index,
