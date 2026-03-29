@@ -21,7 +21,7 @@
 
 | Фича | Made With ML | Наш ds-projects |
 |------|-------------|-----------------|
-| Pre-commit hooks | ✅ | ❌ |
+| Pre-commit hooks | ✅ | ✅ (2026-03-29) |
 | Model serving (Ray/BentoML) | ✅ | ❌ (только FastAPI) |
 | Automated retraining (CT) | ✅ | ❌ |
 | Data versioning (DVC pipeline) | ✅ | Частично (Project 01) |
@@ -53,7 +53,10 @@
 ### Конкретные задачи (итерации)
 
 **Iteration 1-5: Pre-commit + Model Registry**
-- [ ] Добавить pre-commit hooks (ruff, mypy, pytest)
+- [x] Добавить pre-commit hooks (ruff, mypy, pytest) — 2026-03-29
+      `.pre-commit-config.yaml`: ruff lint+format, mypy (lenient), pre-push pytest
+      `scripts/pre_push_tests.sh`: умный запуск только затронутых проектов
+      `make pre-commit-install` — установка hooks одной командой
 - [ ] MLflow Model Registry для Project 01 и 07
 - [ ] SHAP waterfall в API Response (Project 07)
 
