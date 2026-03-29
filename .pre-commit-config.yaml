@@ -1,0 +1,80 @@
+# Pre-commit hooks для ds-projects
+# Запуск: pre-commit run --all-files
+# Установка: uv run pre-commit install
+#
+# Философия: три уровня защиты —
+#   1. Гигиена файлов (всегда, мгновенно)
+#   2. Lint + format (всегда, быстро)
+#   3. Typecheck (всегда, умеренно)
+#   4. Тесты (только pre-push, медленно но важно)
+
+default_language_version:
+  python: python3.12
+
+# Запускать lint/typecheck при коммите, тесты — только при пуше
+default_stages: [pre-commit]
+
+repos:
+  # ── Гигиена файлов ────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace       # убираем хвостовые пробелы
+      - id: end-of-file-fixer         # один newline в конце файла
+      - id: check-yaml                # валидация YAML-синтаксиса
+      - id: check-toml                # валидация TOML-синтаксиса
+      - id: check-merge-conflict      # блокируем незакрытые merge-конфликты
+      - id: debug-statements          # предупреждаем о забытых breakpoint/pdb
+      - id: check-added-large-files   # не коммитим файлы > 1 MB
+        args: ["--maxkb=1024"]
+
+  # ── Ruff: lint + autoformat ───────────────────────────────────────────
+  # Используем ruff-pre-commit (встроенный бинарь, не зависит от venv).
+  # Конфиг берётся из pyproject.toml [tool.ruff].
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.1
+    hooks:
+      - id: ruff
+        name: ruff lint
+        args: [--fix, --exit-non-zero-on-fix]
+        # --exit-non-zero-on-fix: если ruff что-то исправил, хук падает,
+        # чтобы разработчик увидел изменения и пере-stage'ил файлы.
+      - id: ruff-format
+        name: ruff format
+
+  # ── Mypy: статический typecheck ──────────────────────────────────────
+  # Запускаем через `uv run` чтобы использовать project-dependencies
+  # (polars, catboost, etc. иначе mypy не видит их стабы).
+  # Конфиг из pyproject.toml [tool.mypy], но override:
+  #   --allow-untyped-defs — для постепенного внедрения аннотаций
+  #   --ignore-missing-imports — часть библиотек без стабов (catboost, etc.)
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy typecheck
+        entry: uv run mypy
+        language: system
+        types: [python]
+        args:
+          - --ignore-missing-imports
+          - --allow-untyped-defs
+          - --no-error-summary
+        exclude: |
+          (?x)^(
+            scripts/|
+            .*/notebooks/|
+            .*/migrations/
+          )$
+
+  # ── Pytest: юнит-тесты изменённого проекта ───────────────────────────
+  # Запускается только при `git push` (pre-push stage).
+  # Скрипт определяет, какой проект затронут, и гоняет только его тесты.
+  # Это предотвращает прогон всех 185 тестов на каждый коммит.
+  - repo: local
+    hooks:
+      - id: pytest-changed-project
+        name: pytest (changed project)
+        entry: scripts/pre_push_tests.sh
+        language: script
+        pass_filenames: false
+        stages: [pre-push]

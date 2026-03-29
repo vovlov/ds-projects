@@ -1,4 +1,4 @@
-.PHONY: setup lint test clean
+.PHONY: setup lint test clean pre-commit-install pre-commit-run
 
 # ── Setup ──────────────────────────────────────────────────────────
 setup:
@@ -25,6 +25,16 @@ setup-recsys:
 	uv sync --extra dev --extra recsys
 setup-quality:
 	uv sync --extra dev --extra quality
+
+# ── Pre-commit ─────────────────────────────────────────────────────
+pre-commit-install:
+	uv sync --extra dev
+	uv run pre-commit install
+	uv run pre-commit install --hook-type pre-push
+	@echo "Pre-commit hooks installed (commit + push)"
+
+pre-commit-run:
+	uv run pre-commit run --all-files
 
 # ── Lint ───────────────────────────────────────────────────────────
 lint:
