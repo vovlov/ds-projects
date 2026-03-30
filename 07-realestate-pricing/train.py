@@ -5,15 +5,22 @@ from __future__ import annotations
 import pickle
 from pathlib import Path
 
+import mlflow
 from pricing.data.load import TARGET, load_dataset
+from pricing.models.registry import register_best_model
 from pricing.models.train import train_catboost, train_lightgbm
 from sklearn.model_selection import train_test_split
 
 ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
 
+# SQLite tracking URI нужен для Model Registry (file store его не поддерживает)
+MLFLOW_TRACKING_URI = f"sqlite:///{ARTIFACTS_DIR}/mlruns.db"
+
 
 def main() -> None:
     ARTIFACTS_DIR.mkdir(exist_ok=True)
+
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
     print("Generating dataset...")
     df = load_dataset(n_rows=1000, seed=42)
@@ -42,13 +49,15 @@ def main() -> None:
     if cb_results["rmse"] <= lgb_results["rmse"]:
         best = cb_results
         best["model_type"] = "CatBoost"
+        best_name = "realestate-catboost"
         print("\nBest model: CatBoost")
     else:
         best = lgb_results
         best["model_type"] = "LightGBM"
+        best_name = "realestate-lightgbm"
         print("\nBest model: LightGBM")
 
-    # Save artifacts
+    # Save pickle artifacts (для FastAPI — быстрая загрузка без MLflow сервера)
     with open(ARTIFACTS_DIR / "model.pkl", "wb") as f:
         pickle.dump(best["model"], f)
 
@@ -66,6 +75,19 @@ def main() -> None:
             },
             f,
         )
+
+    # Регистрируем лучшую модель в Model Registry
+    print(f"\nRegistering {best['model_type']} in MLflow Model Registry...")
+    version = register_best_model(
+        run_id=best["run_id"],
+        artifact_path="model",
+        model_name=best_name,
+        metrics={"rmse": best["rmse"], "mae": best["mae"], "r2": best["r2"]},
+    )
+    if version:
+        print(f"  ✅ Registered as {best_name} v{version}")
+    else:
+        print("  ⚠️  Registry unavailable — model saved to pickle only")
 
     print(f"\nArtifacts saved to {ARTIFACTS_DIR}")
     print(f"  model.pkl   — trained {best['model_type']} model")

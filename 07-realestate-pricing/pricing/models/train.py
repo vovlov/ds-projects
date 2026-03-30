@@ -141,7 +141,7 @@ def train_catboost(
     best_params["random_seed"] = 42
     best_params["loss_function"] = "RMSE"
 
-    with mlflow.start_run(run_name="catboost-best"):
+    with mlflow.start_run(run_name="catboost-best") as run:
         model = CatBoostRegressor(**best_params, cat_features=cat_indices)
         model.fit(X_train, y_train)
 
@@ -155,11 +155,14 @@ def train_catboost(
         importances = dict(zip(feature_names, model.feature_importances_))
         mlflow.catboost.log_model(model, artifact_path="model")
 
+        run_id = run.info.run_id
+
     return {
         "model": model,
         "params": best_params,
         "feature_names": feature_names,
         "feature_importances": importances,
+        "run_id": run_id,
         **metrics,
     }
 
@@ -207,7 +210,7 @@ def train_lightgbm(
     best_params["verbose"] = -1
     best_params["random_state"] = 42
 
-    with mlflow.start_run(run_name="lightgbm-best"):
+    with mlflow.start_run(run_name="lightgbm-best") as run:
         model = LGBMRegressor(**best_params)
         model.fit(X_train, y_train)
 
@@ -221,10 +224,13 @@ def train_lightgbm(
         importances = dict(zip(feature_names, model.feature_importances_))
         mlflow.sklearn.log_model(model, artifact_path="model")
 
+        run_id = run.info.run_id
+
     return {
         "model": model,
         "params": best_params,
         "feature_names": feature_names,
         "feature_importances": importances,
+        "run_id": run_id,
         **metrics,
     }

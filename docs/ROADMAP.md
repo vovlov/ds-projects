@@ -57,7 +57,7 @@
       `.pre-commit-config.yaml`: ruff lint+format, mypy (lenient), pre-push pytest
       `scripts/pre_push_tests.sh`: умный запуск только затронутых проектов
       `make pre-commit-install` — установка hooks одной командой
-- [ ] MLflow Model Registry для Project 01 и 07
+- [x] MLflow Model Registry для Project 01 и 07 — 2026-03-30
 - [ ] SHAP waterfall в API Response (Project 07)
 
 **Iteration 6-10: Evaluation & Metrics**
