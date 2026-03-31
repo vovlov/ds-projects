@@ -66,8 +66,14 @@
 
 **Iteration 6-10: Evaluation & Metrics**
 - [ ] RAGAS evaluation для RAG (Project 02)
+- [ ] Agentic RAG: faithfulness gate + confidence_score в ответе (Project 02)
+      Второй LLM-вызов проверяет поддержку ответа retrieved chunks'ами.
+      Источник: RAGFlow year-end review 2025, DEV.to RAG Blueprint 2026.
 - [ ] Collection5 датасет для NER (Project 03)
 - [ ] Elliptic Bitcoin датасет для Fraud (Project 04)
+- [ ] VAE baseline для fraud detection (Project 04)
+      Генеративная модель нормального поведения; отклонение = anomaly score.
+      Даёт синтетические fraud-сэмплы без SMOTE. Источник: arxiv 2503.13195.
 
 **Iteration 11-15: Real Data + Deployment**
 - [ ] Streamlit Cloud деплой для 3 проектов
@@ -78,6 +84,9 @@
 - [ ] Prometheus metrics exporter (Project 05)
 - [ ] Automated retraining trigger (Project 01)
 - [ ] Data drift alerting (Project 10 → 01)
+- [ ] Write-Audit-Publish drift gates в feature store (Projects 09/10)
+      PSI-проверка при записи фичи через Evidently AI, CI-gate с порогом дрейфа.
+      Источник: Medium "Data Quality Assurance in MLOps" Mar 2026.
 
 ---
 
