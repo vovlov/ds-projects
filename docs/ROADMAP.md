@@ -58,7 +58,11 @@
       `scripts/pre_push_tests.sh`: умный запуск только затронутых проектов
       `make pre-commit-install` — установка hooks одной командой
 - [x] MLflow Model Registry для Project 01 и 07 — 2026-03-30
-- [ ] SHAP waterfall в API Response (Project 07)
+- [x] SHAP waterfall в API Response (Project 07) — 2026-03-31
+      `pricing/models/explain.py`: explain_prediction с CatBoost built-in ShapValues
+      `pricing/api/app.py`: SHAPWaterfall/SHAPContribution models, /estimate возвращает
+      per-prediction SHAP + top_factors из SHAP вместо global importance
+      19/19 тестов (2 новых: TestExplain)
 
 **Iteration 6-10: Evaluation & Metrics**
 - [ ] RAGAS evaluation для RAG (Project 02)

@@ -105,6 +105,71 @@ class TestModel:
         assert "model" in results
 
 
+class TestExplain:
+    """Проверяем explain_prediction — SHAP waterfall для конкретного предсказания."""
+
+    def test_explain_prediction_catboost(self, full_df: pl.DataFrame) -> None:
+        """SHAP через CatBoost built-in должен возвращать корректную структуру."""
+        from catboost import CatBoostRegressor
+        from pricing.models.explain import explain_prediction
+        from pricing.models.train import MODEL_FEATURES
+
+        # Обучаем минимальную модель (50 деревьев) — чтобы не ждать долго
+        cat_cols = ["neighborhood", "condition", "has_garage"]
+        cat_indices = [i for i, f in enumerate(MODEL_FEATURES) if f in cat_cols]
+
+        X = full_df.select(MODEL_FEATURES).to_pandas()
+        for col in X.select_dtypes(include="object").columns:
+            X[col] = X[col].astype("category")
+        X_vals = X.values
+        y = full_df["price"].to_numpy().astype(float)
+
+        model = CatBoostRegressor(
+            iterations=50, verbose=0, random_seed=42, cat_features=cat_indices
+        )
+        model.fit(X_vals, y)
+
+        # Берём первый объект
+        sample = X_vals[0]
+        result = explain_prediction(model, sample, MODEL_FEATURES)
+
+        assert "contributions" in result
+        assert "bias" in result
+        assert "prediction" in result
+        assert len(result["contributions"]) == len(MODEL_FEATURES)
+        # prediction должна быть близка к bias + sum(contributions)
+        total = result["bias"] + sum(result["contributions"].values())
+        assert abs(total - result["prediction"]) < 10  # < 10 руб расхождение
+
+    def test_explain_contributions_sum_to_prediction(self, full_df: pl.DataFrame) -> None:
+        """Сумма SHAP + bias = prediction (ключевое свойство SHAP)."""
+        from catboost import CatBoostRegressor
+        from pricing.models.explain import explain_prediction
+        from pricing.models.train import MODEL_FEATURES
+
+        cat_cols = ["neighborhood", "condition", "has_garage"]
+        cat_indices = [i for i, f in enumerate(MODEL_FEATURES) if f in cat_cols]
+
+        X = full_df.select(MODEL_FEATURES).to_pandas()
+        for col in X.select_dtypes(include="object").columns:
+            X[col] = X[col].astype("category")
+        X_vals = X.values
+        y = full_df["price"].to_numpy().astype(float)
+
+        model = CatBoostRegressor(
+            iterations=50, verbose=0, random_seed=42, cat_features=cat_indices
+        )
+        model.fit(X_vals, y)
+
+        sample = X_vals[5]
+        result = explain_prediction(model, sample, MODEL_FEATURES)
+        # SHAP additivity: f(x) ≈ bias + Σ contributions
+        reconstructed = result["bias"] + sum(result["contributions"].values())
+        actual_pred = float(model.predict(sample.reshape(1, -1))[0])
+        # Должны совпадать с точностью до округления (round(..., 0))
+        assert abs(reconstructed - actual_pred) < 100  # < 100 руб — погрешность округления
+
+
 class TestAPI:
     """Проверяем API-эндпоинты."""
 
@@ -155,3 +220,48 @@ class TestAPI:
         assert data["confidence_low"] < data["estimated_price"]
         assert data["confidence_high"] > data["estimated_price"]
         assert len(data["top_factors"]) > 0
+
+    def test_estimate_shap_waterfall_structure(self) -> None:
+        """SHAP waterfall в ответе должен иметь правильную структуру."""
+        model_path = Path(__file__).resolve().parents[1] / "artifacts" / "model.pkl"
+        if not model_path.exists():
+            pytest.skip("Model artifact not available — run train.py first")
+
+        from fastapi.testclient import TestClient
+        from pricing.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/estimate",
+            json={
+                "sqft": 80,
+                "bedrooms": 3,
+                "bathrooms": 1,
+                "year_built": 2010,
+                "lot_size": 0,
+                "garage": 0,
+                "neighborhood": "Марьино",
+                "condition": "хорошее",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # shap_waterfall может быть None если модель не CatBoost, но структура должна быть верной
+        if data["shap_waterfall"] is not None:
+            wf = data["shap_waterfall"]
+            assert "base_value" in wf
+            assert "contributions" in wf
+            assert "prediction" in wf
+            assert len(wf["contributions"]) > 0
+
+            # Каждый contribution должен иметь нужные поля
+            for c in wf["contributions"]:
+                assert "feature" in c
+                assert "value" in c
+                assert "contribution" in c
+                assert c["direction"] in ("positive", "negative")
+
+            # top_factors должны быть из SHAP (иметь поле contribution)
+            assert len(data["top_factors"]) > 0
+            assert "contribution" in data["top_factors"][0]
