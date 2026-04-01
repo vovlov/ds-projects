@@ -65,7 +65,10 @@
       19/19 тестов (2 новых: TestExplain)
 
 **Iteration 6-10: Evaluation & Metrics**
-- [ ] RAGAS evaluation для RAG (Project 02)
+- [x] RAGAS evaluation для RAG (Project 02) — 2026-04-01
+      `rag/evaluation/ragas_eval.py`: 4 метрики (context_precision, context_recall,
+      answer_relevance, faithfulness) + RAGASResult dataclass + evaluate_dataset().
+      Лексические приближения без LLM — работают в CI без API-ключей. 14 новых тестов (29/29).
 - [ ] Agentic RAG: faithfulness gate + confidence_score в ответе (Project 02)
       Второй LLM-вызов проверяет поддержку ответа retrieved chunks'ами.
       Источник: RAGFlow year-end review 2025, DEV.to RAG Blueprint 2026.

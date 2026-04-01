@@ -133,3 +133,152 @@ class TestAPI:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "healthy"
+
+
+class TestEvaluation:
+    """Тесты RAGAS-метрик для оценки качества RAG-ответов.
+
+    Все тесты работают без внешних API — используются лексические метрики.
+    """
+
+    # Тестовый сэмпл: вопрос о VPN-политике
+    QUESTION = "What are the VPN requirements for remote work?"
+    CONTEXTS = [
+        "All employees must use company VPN when working remotely."
+        " VPN is required for accessing internal systems.",
+        "Remote work policy: employees may work from home up to 3 days"
+        " per week with manager approval.",
+        "Security requirements include two-factor authentication"
+        " and VPN usage for all remote connections.",
+    ]
+    ANSWER = (
+        "According to the policy, all employees must use VPN when working remotely. "
+        "VPN is required for accessing internal systems and remote connections."
+    )
+    IRRELEVANT_ANSWER = "The sky is blue and water is wet."
+
+    def test_context_precision_high_for_relevant_query(self):
+        from rag.evaluation.ragas_eval import context_precision
+
+        score = context_precision(self.QUESTION, self.CONTEXTS)
+        # Все 3 чанка содержат слова VPN/remote — ожидаем высокую точность
+        assert score >= 0.8, f"Expected precision ≥ 0.8, got {score}"
+
+    def test_context_precision_zero_for_empty_contexts(self):
+        from rag.evaluation.ragas_eval import context_precision
+
+        assert context_precision(self.QUESTION, []) == 0.0
+
+    def test_context_precision_partial(self):
+        from rag.evaluation.ragas_eval import context_precision
+
+        mixed_contexts = [
+            "VPN is required for remote work.",  # relevant
+            "The cafeteria serves lunch at noon.",  # irrelevant
+        ]
+        score = context_precision("VPN requirements", mixed_contexts)
+        # 1 из 2 релевантен → 0.5
+        assert 0.3 <= score <= 0.7
+
+    def test_context_recall_high_when_answer_matches_context(self):
+        from rag.evaluation.ragas_eval import context_recall
+
+        score = context_recall(self.ANSWER, self.CONTEXTS)
+        # Ответ написан на основе контекста → recall должен быть высоким
+        assert score >= 0.7, f"Expected recall ≥ 0.7, got {score}"
+
+    def test_context_recall_zero_for_empty_inputs(self):
+        from rag.evaluation.ragas_eval import context_recall
+
+        assert context_recall("", self.CONTEXTS) == 0.0
+        assert context_recall(self.ANSWER, []) == 0.0
+
+    def test_answer_relevance_high_for_on_topic_answer(self):
+        from rag.evaluation.ragas_eval import answer_relevance
+
+        score = answer_relevance(self.QUESTION, self.ANSWER)
+        assert score > 0.0, "On-topic answer should have positive relevance"
+
+    def test_answer_relevance_lower_for_off_topic(self):
+        from rag.evaluation.ragas_eval import answer_relevance
+
+        on_topic = answer_relevance(self.QUESTION, self.ANSWER)
+        off_topic = answer_relevance(self.QUESTION, self.IRRELEVANT_ANSWER)
+        assert on_topic > off_topic, "On-topic answer should score higher than irrelevant one"
+
+    def test_faithfulness_high_for_grounded_answer(self):
+        from rag.evaluation.ragas_eval import faithfulness
+
+        score = faithfulness(self.ANSWER, self.CONTEXTS)
+        assert score >= 0.5, f"Expected faithfulness ≥ 0.5, got {score}"
+
+    def test_evaluate_sample_returns_ragas_result(self):
+        from rag.evaluation.ragas_eval import RAGASResult, evaluate_sample
+
+        result = evaluate_sample(self.QUESTION, self.ANSWER, self.CONTEXTS)
+        assert isinstance(result, RAGASResult)
+        assert 0.0 <= result.context_precision <= 1.0
+        assert 0.0 <= result.context_recall <= 1.0
+        assert 0.0 <= result.answer_relevance <= 1.0
+        assert 0.0 <= result.faithfulness <= 1.0
+        assert 0.0 <= result.overall <= 1.0
+
+    def test_evaluate_sample_as_dict(self):
+        from rag.evaluation.ragas_eval import evaluate_sample
+
+        result = evaluate_sample(self.QUESTION, self.ANSWER, self.CONTEXTS)
+        d = result.as_dict()
+        assert set(d.keys()) == {
+            "context_precision",
+            "context_recall",
+            "answer_relevance",
+            "faithfulness",
+            "overall",
+        }
+        assert all(isinstance(v, float) for v in d.values())
+
+    def test_evaluate_sample_with_metadata(self):
+        from rag.evaluation.ragas_eval import evaluate_sample
+
+        result = evaluate_sample(
+            self.QUESTION,
+            self.ANSWER,
+            self.CONTEXTS,
+            metadata={"sample_id": "test-001", "model": "claude"},
+        )
+        assert result.metadata["sample_id"] == "test-001"
+
+    def test_evaluate_dataset_returns_averages(self):
+        from rag.evaluation.ragas_eval import evaluate_dataset
+
+        samples = [
+            {"question": self.QUESTION, "answer": self.ANSWER, "contexts": self.CONTEXTS},
+            {
+                "question": "What is the remote work policy?",
+                "answer": "Employees may work from home up to 3 days per week.",
+                "contexts": self.CONTEXTS,
+            },
+        ]
+        metrics = evaluate_dataset(samples)
+        assert metrics["num_samples"] == 2
+        assert 0.0 <= metrics["overall"] <= 1.0
+        required_keys = ["context_precision", "context_recall", "answer_relevance", "faithfulness"]
+        assert all(k in metrics for k in required_keys)
+
+    def test_evaluate_dataset_empty(self):
+        from rag.evaluation.ragas_eval import evaluate_dataset
+
+        metrics = evaluate_dataset([])
+        assert metrics["num_samples"] == 0
+        assert metrics["overall"] == 0.0
+
+    def test_overall_score_is_mean_of_four_metrics(self):
+        from rag.evaluation.ragas_eval import RAGASResult
+
+        r = RAGASResult(
+            context_precision=0.8,
+            context_recall=0.6,
+            answer_relevance=0.4,
+            faithfulness=0.6,
+        )
+        assert abs(r.overall - 0.6) < 1e-9
