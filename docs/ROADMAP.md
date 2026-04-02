@@ -85,6 +85,14 @@
 - [ ] Streamlit Cloud деплой для 3 проектов
 - [ ] MovieLens-25M для RecSys (Project 09)
 - [ ] RVL-CDIP для CV Scanner (Project 06)
+- [ ] Two-tower + LLM re-ranking для RecSys (Project 09)
+      sentence-transformers для two-tower embeddings в Feast feature store +
+      лёгкий re-ranker через Anthropic API для top-K кандидатов.
+      Источник: RecSys 2025, Snap Robusta platform, Shopify NeurIPS 2025.
+- [ ] Multi-model cross-check для LLM Code Review (Project 08)
+      Два прохода: correctness pass + security pass (semgrep + LLM).
+      Self-consistency scoring: второй LLM оценивает качество ревью первого.
+      Источник: Ericsson 2025 study (arxiv 2507.19115), codedog (MIT).
 
 **Iteration 16-20: Monitoring & CT**
 - [ ] Prometheus metrics exporter (Project 05)
@@ -92,6 +100,10 @@
 - [ ] Data drift alerting (Project 10 → 01)
 - [ ] Write-Audit-Publish drift gates в feature store (Projects 09/10)
       PSI-проверка при записи фичи через Evidently AI, CI-gate с порогом дрейфа.
+- [ ] MMD drift detection + retraining trigger (Project 05 или 01)
+      alibi-detect MMD-тест → Prometheus endpoint → MLflow retraining run.
+      EU AI Act compliance: audit log для drift-событий.
+      Источник: Evidently AI v0.5+, Gartner MLOps 2025.
       Источник: Medium "Data Quality Assurance in MLOps" Mar 2026.
 
 ---
