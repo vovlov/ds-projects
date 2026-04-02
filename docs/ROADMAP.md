@@ -69,9 +69,12 @@
       `rag/evaluation/ragas_eval.py`: 4 метрики (context_precision, context_recall,
       answer_relevance, faithfulness) + RAGASResult dataclass + evaluate_dataset().
       Лексические приближения без LLM — работают в CI без API-ключей. 14 новых тестов (29/29).
-- [ ] Agentic RAG: faithfulness gate + confidence_score в ответе (Project 02)
-      Второй LLM-вызов проверяет поддержку ответа retrieved chunks'ами.
-      Источник: RAGFlow year-end review 2025, DEV.to RAG Blueprint 2026.
+- [x] Agentic RAG: faithfulness gate + confidence_score в ответе (Project 02) — 2026-04-02
+      rag/generation/faithfulness_gate.py: FaithfulnessResult, check_faithfulness()
+      (LLM mode через Haiku / lexical fallback без API-ключа для CI).
+      chain.py: generate_answer_with_gate() возвращает confidence_score, is_faithful.
+      app.py: POST /query endpoint + badge в Gradio UI. 40/40 тестов (+11 TestFaithfulnessGate).
+      Источник: Self-RAG arxiv 2310.11511, RAGFlow 2025, DEV.to RAG Blueprint 2026.
 - [ ] Collection5 датасет для NER (Project 03)
 - [ ] Elliptic Bitcoin датасет для Fraud (Project 04)
 - [ ] VAE baseline для fraud detection (Project 04)
