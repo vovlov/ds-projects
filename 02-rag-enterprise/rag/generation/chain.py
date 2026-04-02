@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+from .faithfulness_gate import FaithfulnessResult, check_faithfulness
+
 SYSTEM_PROMPT = """You are a helpful assistant that answers questions based on the provided context.
 
 Rules:
@@ -69,4 +71,51 @@ def generate_answer(
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
         },
+    }
+
+
+def generate_answer_with_gate(
+    query: str,
+    context_chunks: list[dict],
+    model: str = "claude-sonnet-4-20250514",
+    max_tokens: int = 1024,
+    faithfulness_threshold: float = 0.5,
+) -> dict:
+    """Agentic RAG: генерация ответа + проверка верности источникам.
+
+    Двухэтапный пайплайн:
+    1. Основная генерация (generate_answer) — ответ по retrieved-контексту.
+    2. Faithfulness gate — проверяет, что ответ поддержан чанками.
+       В production используется второй LLM-вызов (Haiku).
+       В CI/без API — лексическая эвристика.
+
+    confidence_score = faithfulness gate score (0.0 — 1.0).
+    Ниже threshold → is_faithful=False → пользователю нужно показать предупреждение.
+
+    Args:
+        query: Вопрос пользователя.
+        context_chunks: Retrieved чанки из vector store.
+        model: Основная модель для генерации ответа.
+        max_tokens: Максимум токенов в ответе.
+        faithfulness_threshold: Порог is_faithful (default 0.5).
+
+    Returns:
+        Словарь с ключами: answer, model, sources, usage,
+        confidence_score, is_faithful, faithfulness_method.
+    """
+    result = generate_answer(query, context_chunks, model=model, max_tokens=max_tokens)
+
+    contexts = [c["text"] for c in context_chunks]
+    gate: FaithfulnessResult = check_faithfulness(
+        answer=result["answer"],
+        contexts=contexts,
+        threshold=faithfulness_threshold,
+    )
+
+    return {
+        **result,
+        "confidence_score": gate.score,
+        "is_faithful": gate.is_faithful,
+        "faithfulness_method": gate.method,
+        "faithfulness_verdict": gate.verdict,
     }

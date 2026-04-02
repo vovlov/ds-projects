@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import contextlib
+import os
 
 from rag.generation.chain import build_prompt
 from rag.ingestion.loader import chunk_documents, load_documents
@@ -282,3 +283,151 @@ class TestEvaluation:
             faithfulness=0.6,
         )
         assert abs(r.overall - 0.6) < 1e-9
+
+
+class TestFaithfulnessGate:
+    """Тесты Agentic RAG faithfulness gate.
+
+    Все тесты работают в lexical-режиме (без ANTHROPIC_API_KEY).
+    Проверяют корректность проверки верности ответа retrieved-чанкам.
+    """
+
+    ANSWER_GROUNDED = (
+        "All employees must use VPN when working remotely. "
+        "VPN is required for accessing internal systems and remote connections."
+    )
+    # Полностью нерелевантный ответ — нет общих слов с контекстом о VPN/политиках
+    ANSWER_HALLUCINATED = (
+        "The capital of France is Paris. "
+        "The Eiffel Tower was constructed in 1889 and stands 330 meters tall."
+    )
+    CONTEXTS = [
+        "All employees must use company VPN when working remotely."
+        " VPN is required for accessing internal systems.",
+        "Remote work policy: employees may work from home up to 3 days per week.",
+        "Security requirements include two-factor authentication and VPN usage.",
+    ]
+
+    def test_check_faithfulness_returns_result(self):
+        from rag.generation.faithfulness_gate import FaithfulnessResult, check_faithfulness
+
+        result = check_faithfulness(self.ANSWER_GROUNDED, self.CONTEXTS)
+        assert isinstance(result, FaithfulnessResult)
+        assert 0.0 <= result.score <= 1.0
+        assert result.verdict in ("FAITHFUL", "UNFAITHFUL")
+        assert result.method == "lexical"  # нет API-ключа в CI
+
+    def test_grounded_answer_scores_higher(self):
+        from rag.generation.faithfulness_gate import check_faithfulness
+
+        grounded = check_faithfulness(self.ANSWER_GROUNDED, self.CONTEXTS)
+        hallucinated = check_faithfulness(self.ANSWER_HALLUCINATED, self.CONTEXTS)
+        assert grounded.score > hallucinated.score, (
+            f"Grounded answer should score higher: {grounded.score} vs {hallucinated.score}"
+        )
+
+    def test_empty_answer_returns_unfaithful(self):
+        from rag.generation.faithfulness_gate import check_faithfulness
+
+        result = check_faithfulness("", self.CONTEXTS)
+        assert result.is_faithful is False
+        assert result.score == 0.0
+
+    def test_empty_contexts_returns_unfaithful(self):
+        from rag.generation.faithfulness_gate import check_faithfulness
+
+        result = check_faithfulness(self.ANSWER_GROUNDED, [])
+        assert result.is_faithful is False
+        assert result.score == 0.0
+
+    def test_threshold_controls_is_faithful(self):
+        from rag.generation.faithfulness_gate import check_faithfulness
+
+        check_faithfulness(self.ANSWER_GROUNDED, self.CONTEXTS, threshold=0.99)
+        result_lenient = check_faithfulness(self.ANSWER_GROUNDED, self.CONTEXTS, threshold=0.0)
+        # С нулевым порогом — всегда проходит
+        assert result_lenient.is_faithful is True
+
+    def test_parse_judge_response_valid(self):
+        from rag.generation.faithfulness_gate import _parse_judge_response
+
+        raw = "VERDICT: FAITHFUL\nSCORE: 0.92\nREASON: All claims are supported."
+        result = _parse_judge_response(raw, threshold=0.5)
+        assert result.verdict == "FAITHFUL"
+        assert result.score == 0.92
+        assert result.is_faithful is True
+        assert result.method == "llm"
+        assert "supported" in result.reason.lower()
+
+    def test_parse_judge_response_unfaithful(self):
+        from rag.generation.faithfulness_gate import _parse_judge_response
+
+        raw = "VERDICT: UNFAITHFUL\nSCORE: 0.15\nREASON: Bonus claim not in context."
+        result = _parse_judge_response(raw, threshold=0.5)
+        assert result.verdict == "UNFAITHFUL"
+        assert result.score == 0.15
+        assert result.is_faithful is False
+
+    def test_parse_judge_response_malformed_falls_back_safe(self):
+        from rag.generation.faithfulness_gate import _parse_judge_response
+
+        # Консервативный фallback: при ошибке парсинга → unfaithful, score=0
+        result = _parse_judge_response("This is not parseable at all", threshold=0.5)
+        assert result.verdict == "UNFAITHFUL"
+        assert result.score == 0.0
+        assert result.is_faithful is False
+
+    def test_parse_judge_response_score_clamped(self):
+        from rag.generation.faithfulness_gate import _parse_judge_response
+
+        raw = "VERDICT: FAITHFUL\nSCORE: 1.99\nREASON: Over limit."
+        result = _parse_judge_response(raw, threshold=0.5)
+        assert result.score <= 1.0
+
+    def test_generate_answer_with_gate_lexical_mode(self):
+        """generate_answer_with_gate возвращает confidence_score без API-ключа."""
+        old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            from rag.generation.chain import generate_answer_with_gate
+
+            chunks = [
+                {"text": "VPN is required for remote work.", "metadata": {"source": "policy.txt"}},
+                {"text": "Employees may work 3 days from home.", "metadata": {"source": "hr.txt"}},
+            ]
+            # generate_answer вернёт ошибку без ключа, но gate должен отработать
+            result = generate_answer_with_gate("What is the VPN policy?", chunks)
+            assert "confidence_score" in result
+            assert "is_faithful" in result
+            assert "faithfulness_method" in result
+            assert 0.0 <= result["confidence_score"] <= 1.0
+        finally:
+            if old_key:
+                os.environ["ANTHROPIC_API_KEY"] = old_key
+
+    def test_query_endpoint_returns_confidence(self):
+        """POST /query возвращает confidence_score в ответе.
+
+        ChromaDB создаёт singleton-клиент, поэтому мокируем _get_collection,
+        чтобы не конфликтовать с другими тестами, использующими разные persist dirs.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0  # Пустая коллекция → пустой ответ
+
+        with patch("rag.api.app._get_collection", return_value=mock_collection):
+            client = TestClient(app)
+            resp = client.post(
+                "/query",
+                json={"question": "What is the VPN policy?", "check_faithfulness": True},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "confidence_score" in data
+        assert "is_faithful" in data
+        assert "faithfulness_method" in data
+        assert isinstance(data["confidence_score"], float)

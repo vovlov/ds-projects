@@ -7,8 +7,9 @@ from pathlib import Path
 
 import gradio as gr
 from fastapi import FastAPI
+from pydantic import BaseModel
 
-from ..generation.chain import generate_answer
+from ..generation.chain import generate_answer, generate_answer_with_gate
 from ..ingestion.loader import chunk_documents, load_documents
 from ..retrieval.store import get_client, get_or_create_collection, index_chunks, search
 
@@ -35,9 +36,71 @@ def _get_collection():
     return _collection
 
 
+class QueryRequest(BaseModel):
+    """Запрос к RAG-пайплайну."""
+
+    question: str
+    n_results: int = 5
+    check_faithfulness: bool = True
+    faithfulness_threshold: float = 0.5
+
+
+class QueryResponse(BaseModel):
+    """Ответ RAG-пайплайна с оценкой верности источникам."""
+
+    answer: str
+    sources: list[str]
+    confidence_score: float
+    is_faithful: bool
+    faithfulness_method: str
+
+
 @app.get("/health")
 def health():
     return {"status": "healthy"}
+
+
+@app.post("/query", response_model=QueryResponse)
+def query(request: QueryRequest) -> QueryResponse:
+    """Agentic RAG: ответ на вопрос + faithfulness gate.
+
+    Возвращает ответ с confidence_score — оценкой того, насколько ответ
+    поддержан retrieved документами. Низкий score сигнализирует о potential hallucination.
+    """
+    collection = _get_collection()
+    if collection.count() == 0:
+        return QueryResponse(
+            answer="No documents indexed. Please add documents to data/documents/ and run /index.",
+            sources=[],
+            confidence_score=0.0,
+            is_faithful=False,
+            faithfulness_method="lexical",
+        )
+
+    context = search(request.question, collection, n_results=request.n_results)
+
+    if request.check_faithfulness:
+        result = generate_answer_with_gate(
+            query=request.question,
+            context_chunks=context,
+            faithfulness_threshold=request.faithfulness_threshold,
+        )
+    else:
+        raw = generate_answer(request.question, context)
+        result = {
+            **raw,
+            "confidence_score": 1.0,
+            "is_faithful": True,
+            "faithfulness_method": "none",
+        }
+
+    return QueryResponse(
+        answer=result["answer"],
+        sources=result.get("sources", []),
+        confidence_score=result["confidence_score"],
+        is_faithful=result["is_faithful"],
+        faithfulness_method=result["faithfulness_method"],
+    )
 
 
 @app.post("/index")
@@ -61,7 +124,7 @@ def index_documents():
 
 
 def ask(question: str, n_results: int = 5) -> str:
-    """RAG pipeline: retrieve → generate."""
+    """RAG pipeline: retrieve → generate → faithfulness gate."""
     if not question.strip():
         return "Please enter a question."
 
@@ -70,10 +133,21 @@ def ask(question: str, n_results: int = 5) -> str:
         return "No documents indexed. Please add documents to data/documents/ and run /index."
 
     context = search(question, collection, n_results=n_results)
-    result = generate_answer(question, context)
+    result = generate_answer_with_gate(question, context)
 
     sources = ", ".join(result["sources"]) if result["sources"] else "N/A"
-    return f"{result['answer']}\n\n---\n**Sources:** {sources}"
+    confidence = result["confidence_score"]
+    verdict = result["faithfulness_verdict"]
+    method = result["faithfulness_method"]
+
+    # Визуальный сигнал о надёжности ответа — низкий confidence предупреждает пользователя
+    confidence_badge = "✅" if result["is_faithful"] else "⚠️"
+    return (
+        f"{result['answer']}\n\n"
+        f"---\n"
+        f"**Sources:** {sources}\n\n"
+        f"**Confidence:** {confidence_badge} {confidence:.2f} ({verdict}, method: {method})"
+    )
 
 
 # Gradio interface
