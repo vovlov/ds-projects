@@ -75,7 +75,11 @@
       chain.py: generate_answer_with_gate() возвращает confidence_score, is_faithful.
       app.py: POST /query endpoint + badge в Gradio UI. 40/40 тестов (+11 TestFaithfulnessGate).
       Источник: Self-RAG arxiv 2310.11511, RAGFlow 2025, DEV.to RAG Blueprint 2026.
-- [ ] Collection5 датасет для NER (Project 03)
+- [x] Collection5 датасет для NER (Project 03) — 2026-04-03
+      ner/data/collection5.py: CoNLL-парсер, встроенный образец (8 предложений PER/ORG/LOC),
+      load_collection5(path=None) для CI без сети, compute_dataset_stats(), compute_metrics() через seqeval.
+      ner/model/batch.py: BatchItem/BatchResult dataclasses, process_texts(), process_collection5().
+      41/41 тестов (+23 новых: TestCollection5Parser, TestCollection5Stats, TestBatchProcessing).
 - [ ] Elliptic Bitcoin датасет для Fraud (Project 04)
 - [ ] VAE baseline для fraud detection (Project 04)
       Генеративная модель нормального поведения; отклонение = anomaly score.
