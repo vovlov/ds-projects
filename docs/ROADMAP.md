@@ -80,10 +80,17 @@
       load_collection5(path=None) для CI без сети, compute_dataset_stats(), compute_metrics() через seqeval.
       ner/model/batch.py: BatchItem/BatchResult dataclasses, process_texts(), process_collection5().
       41/41 тестов (+23 новых: TestCollection5Parser, TestCollection5Stats, TestBatchProcessing).
-- [ ] Elliptic Bitcoin датасет для Fraud (Project 04)
-- [ ] VAE baseline для fraud detection (Project 04)
-      Генеративная модель нормального поведения; отклонение = anomaly score.
-      Даёт синтетические fraud-сэмплы без SMOTE. Источник: arxiv 2503.13195.
+- [x] Elliptic Bitcoin датасет для Fraud (Project 04) — 2026-04-04
+      fraud/data/elliptic.py: load_elliptic_dataset(), generate_mock_elliptic() (mock для CI),
+      get_labeled_split() (конвертация меток Elliptic 1/2 → бинарные 0/1).
+      166 признаков, поддержка CSV из Kaggle + автоматический fallback на mock.
+      10 новых тестов TestEllipticDataset.
+- [x] VAE baseline для fraud detection (Project 04) — 2026-04-04
+      fraud/models/baseline/vae.py: FraudVAE (encoder+reparameterize+decoder),
+      ELBO loss (MSE + KL), train_vae() — обучение только на нормальных сэмплах,
+      порог = 95-й перцентиль ошибок реконструкции нормальных данных.
+      is_available() — graceful fallback без PyTorch. 5 новых тестов TestVAEModule.
+      Источник: arxiv 2503.13195, FinGuard-GNN 2025.
 
 **Iteration 11-15: Real Data + Deployment**
 - [ ] Streamlit Cloud деплой для 3 проектов

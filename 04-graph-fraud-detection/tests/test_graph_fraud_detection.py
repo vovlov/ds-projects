@@ -6,12 +6,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
+import pytest
 from fraud.data.dataset import (
     generate_synthetic_transactions,
     get_edge_index,
     get_feature_matrix,
 )
+from fraud.data.elliptic import (
+    ELLIPTIC_N_FEATURES,
+    generate_mock_elliptic,
+    get_labeled_split,
+    load_elliptic_dataset,
+)
 from fraud.models.baseline.tabular import train_baseline
+from fraud.models.baseline.vae import is_available as vae_available
 
 
 class TestDataGeneration:
@@ -73,6 +81,127 @@ class TestBaseline:
         result = train_baseline(X, y, test_size=0.2)
         assert len(result["y_pred"]) == int(200 * 0.2)
         assert len(result["y_proba"]) == int(200 * 0.2)
+
+
+class TestEllipticDataset:
+    def test_mock_returns_expected_keys(self):
+        data = generate_mock_elliptic(n_nodes=200, n_edges=300, seed=0)
+        for key in ("node_ids", "features", "labels", "edges", "is_mock"):
+            assert key in data
+        assert data["is_mock"] is True
+
+    def test_mock_feature_shape(self):
+        data = generate_mock_elliptic(n_nodes=200, n_edges=300, seed=0)
+        assert data["features"].shape == (200, ELLIPTIC_N_FEATURES)
+
+    def test_mock_edge_shape(self):
+        data = generate_mock_elliptic(n_nodes=200, n_edges=300, seed=0)
+        # n_edges может быть немного меньше из-за удаления self-loops
+        assert data["edges"].shape[0] == 2
+        assert data["edges"].shape[1] <= 300
+
+    def test_mock_labels_valid_values(self):
+        data = generate_mock_elliptic(n_nodes=200, seed=0)
+        # Метки: 1 (illicit) и 2 (licit)
+        assert set(np.unique(data["labels"])).issubset({1, 2})
+
+    def test_no_self_loops(self):
+        data = generate_mock_elliptic(n_nodes=200, n_edges=400, seed=0)
+        src, dst = data["edges"][0], data["edges"][1]
+        assert not np.any(src == dst)
+
+    def test_load_elliptic_fallback_to_mock(self):
+        # data_dir=None → mock
+        data = load_elliptic_dataset(data_dir=None)
+        assert data["is_mock"] is True
+
+    def test_load_elliptic_nonexistent_dir(self, tmp_path):
+        # Несуществующая директория → mock
+        data = load_elliptic_dataset(data_dir=tmp_path / "no_such_dir")
+        assert data["is_mock"] is True
+
+    def test_get_labeled_split_binary_labels(self):
+        data = generate_mock_elliptic(n_nodes=300, seed=7)
+        X, y = get_labeled_split(data)
+        # Метки должны быть бинарными
+        assert set(np.unique(y)).issubset({0, 1})
+
+    def test_get_labeled_split_feature_shape(self):
+        data = generate_mock_elliptic(n_nodes=300, seed=7)
+        X, y = get_labeled_split(data)
+        assert X.shape[1] == ELLIPTIC_N_FEATURES
+        assert X.shape[0] == y.shape[0]
+
+    def test_get_labeled_split_excludes_unknown(self):
+        data = generate_mock_elliptic(n_nodes=300, seed=7)
+        # Mock содержит только 1/2, но добавим unknown=0 вручную
+        data["labels"][0] = 0
+        X, y = get_labeled_split(data)
+        # Все метки должны быть 0 или 1 (без unknown)
+        assert len(X) == (data["labels"] > 0).sum()
+
+
+class TestVAEModule:
+    def test_is_available_returns_bool(self):
+        result = vae_available()
+        assert isinstance(result, bool)
+
+    @pytest.mark.skipif(not vae_available(), reason="PyTorch not available")
+    def test_vae_train_returns_expected_keys(self):
+        from fraud.models.baseline.vae import train_vae
+
+        rng = np.random.default_rng(42)
+        n = 300
+        X = rng.standard_normal((n, 10)).astype(np.float32)
+        y = np.array([0] * 240 + [1] * 60, dtype=np.int32)
+
+        result = train_vae(X, y, epochs=5, hidden_dim=32, latent_dim=8)
+        expected_keys = (
+            "model",
+            "scaler",
+            "threshold",
+            "f1_score",
+            "roc_auc",
+            "y_test",
+            "y_pred",
+            "y_score",
+        )
+        for key in expected_keys:
+            assert key in result
+
+    @pytest.mark.skipif(not vae_available(), reason="PyTorch not available")
+    def test_vae_metrics_in_valid_range(self):
+        from fraud.models.baseline.vae import train_vae
+
+        rng = np.random.default_rng(0)
+        n = 300
+        X = rng.standard_normal((n, 10)).astype(np.float32)
+        y = np.array([0] * 240 + [1] * 60, dtype=np.int32)
+
+        result = train_vae(X, y, epochs=5, hidden_dim=32, latent_dim=8)
+        assert 0.0 <= result["f1_score"] <= 1.0
+        assert 0.0 <= result["roc_auc"] <= 1.0
+
+    @pytest.mark.skipif(not vae_available(), reason="PyTorch not available")
+    def test_vae_prediction_shape(self):
+        from fraud.models.baseline.vae import train_vae
+
+        rng = np.random.default_rng(1)
+        n = 300
+        X = rng.standard_normal((n, 10)).astype(np.float32)
+        y = np.array([0] * 240 + [1] * 60, dtype=np.int32)
+
+        result = train_vae(X, y, epochs=5, test_size=0.2, hidden_dim=32, latent_dim=8)
+        expected_test_size = int(n * 0.2)
+        assert len(result["y_pred"]) == expected_test_size
+        assert len(result["y_score"]) == expected_test_size
+
+    @pytest.mark.skipif(vae_available(), reason="Only runs when PyTorch is absent")
+    def test_vae_raises_without_torch(self):
+        from fraud.models.baseline.vae import FraudVAE
+
+        with pytest.raises(RuntimeError, match="PyTorch"):
+            FraudVAE(input_dim=10)
 
 
 class TestAPI:
