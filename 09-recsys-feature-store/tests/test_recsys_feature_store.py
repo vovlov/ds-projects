@@ -15,6 +15,13 @@ import polars as pl
 import pytest
 from fastapi.testclient import TestClient
 from recsys.data.load import generate_interactions, generate_products, generate_users
+from recsys.data.movielens import (
+    MovieLensStats,
+    compute_movielens_stats,
+    generate_mock_movielens,
+    load_movielens,
+    to_recsys_format,
+)
 from recsys.feature_store.offline import compute_item_features, compute_user_features
 from recsys.feature_store.registry import FeatureRegistry
 from recsys.models.collaborative import CollaborativeRecommender
@@ -264,3 +271,201 @@ class TestAPI:
         assert response.status_code == 200
         data = response.json()
         assert len(data["recommendations"]) == 5
+
+
+# ========== TestMovieLens: загрузка датасета MovieLens-25M ==========
+
+
+class TestMovieLensMock:
+    """Тесты генератора mock-данных MovieLens / Mock MovieLens data generator tests."""
+
+    @pytest.fixture(scope="class")
+    def mock_data(self) -> tuple:
+        return generate_mock_movielens(n_users=50, n_movies=30, n_ratings=500, seed=7)
+
+    def test_ratings_schema(self, mock_data: tuple) -> None:
+        """ratings_df содержит обязательные колонки MovieLens / Required columns present."""
+        ratings_df, _ = mock_data
+        assert set(["userId", "movieId", "rating", "timestamp"]).issubset(set(ratings_df.columns))
+
+    def test_movies_schema(self, mock_data: tuple) -> None:
+        """movies_df содержит обязательные колонки / Required movie columns present."""
+        _, movies_df = mock_data
+        assert set(["movieId", "title", "genres"]).issubset(set(movies_df.columns))
+
+    def test_ratings_count(self, mock_data: tuple) -> None:
+        """Количество оценок соответствует параметру n_ratings."""
+        ratings_df, _ = mock_data
+        assert len(ratings_df) == 500
+
+    def test_movies_count(self, mock_data: tuple) -> None:
+        """Количество фильмов соответствует параметру n_movies."""
+        _, movies_df = mock_data
+        assert len(movies_df) == 30
+
+    def test_rating_values_valid(self, mock_data: tuple) -> None:
+        """Оценки — только допустимые полузвёздные значения 0.5–5.0."""
+        ratings_df, _ = mock_data
+        valid_values = {0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0}
+        actual_values = set(ratings_df["rating"].unique().to_list())
+        assert actual_values.issubset(valid_values)
+
+    def test_user_ids_in_range(self, mock_data: tuple) -> None:
+        """userId в пределах заданного диапазона / User IDs within valid range."""
+        ratings_df, _ = mock_data
+        assert ratings_df["userId"].min() >= 1
+        assert ratings_df["userId"].max() <= 50
+
+    def test_movie_ids_in_range(self, mock_data: tuple) -> None:
+        """movieId в пределах заданного диапазона / Movie IDs within valid range."""
+        ratings_df, _ = mock_data
+        assert ratings_df["movieId"].min() >= 1
+        assert ratings_df["movieId"].max() <= 30
+
+    def test_genres_non_empty(self, mock_data: tuple) -> None:
+        """Все фильмы имеют хотя бы один жанр / Every movie has at least one genre."""
+        _, movies_df = mock_data
+        assert movies_df["genres"].null_count() == 0
+        assert all(len(g) > 0 for g in movies_df["genres"].to_list())
+
+    def test_reproducibility(self) -> None:
+        """Одинаковый seed → одинаковые данные / Same seed produces identical data."""
+        r1, m1 = generate_mock_movielens(seed=99)
+        r2, m2 = generate_mock_movielens(seed=99)
+        assert r1.equals(r2)
+        assert m1.equals(m2)
+
+
+class TestMovieLensLoader:
+    """Тесты загрузчика load_movielens / load_movielens() loader tests."""
+
+    def test_load_without_paths_returns_mock(self) -> None:
+        """Вызов без путей возвращает mock-данные / No paths → mock data returned."""
+        ratings_df, movies_df = load_movielens()
+        assert len(ratings_df) > 0
+        assert len(movies_df) > 0
+        assert "userId" in ratings_df.columns
+
+    def test_load_missing_files_returns_mock(self, tmp_path) -> None:
+        """Несуществующие пути → graceful fallback на mock / Missing files → mock."""
+        ratings_df, movies_df = load_movielens(
+            ratings_path=tmp_path / "nonexistent_ratings.csv",
+            movies_path=tmp_path / "nonexistent_movies.csv",
+        )
+        assert len(ratings_df) > 0
+        assert "userId" in ratings_df.columns
+
+    def test_load_real_csv(self, tmp_path) -> None:
+        """Загрузка из реальных CSV-файлов работает корректно / Real CSV loading works."""
+        # Создаём минимальные CSV для проверки парсера
+        ratings_csv = tmp_path / "ratings.csv"
+        movies_csv = tmp_path / "movies.csv"
+
+        ratings_csv.write_text(
+            "userId,movieId,rating,timestamp\n1,1,4.0,1609459200\n2,2,3.5,1609459300\n"
+        )
+        movies_csv.write_text(
+            "movieId,title,genres\n1,Movie A (2020),Comedy|Drama\n2,Movie B (2021),Action\n"
+        )
+
+        ratings_df, movies_df = load_movielens(ratings_csv, movies_csv)
+        assert len(ratings_df) == 2
+        assert len(movies_df) == 2
+        assert ratings_df["rating"].to_list() == [4.0, 3.5]
+
+
+class TestMovieLensStats:
+    """Тесты вычисления статистики / MovieLens statistics computation tests."""
+
+    @pytest.fixture(scope="class")
+    def stats(self) -> MovieLensStats:
+        ratings_df, movies_df = generate_mock_movielens(
+            n_users=50, n_movies=20, n_ratings=300, seed=11
+        )
+        return compute_movielens_stats(ratings_df, movies_df)
+
+    def test_stats_type(self, stats: MovieLensStats) -> None:
+        assert isinstance(stats, MovieLensStats)
+
+    def test_n_users_positive(self, stats: MovieLensStats) -> None:
+        assert stats.n_users > 0
+
+    def test_n_movies_positive(self, stats: MovieLensStats) -> None:
+        assert stats.n_movies > 0
+
+    def test_sparsity_between_zero_and_one(self, stats: MovieLensStats) -> None:
+        """Разреженность в [0, 1] / Sparsity must be in valid range."""
+        assert 0.0 <= stats.sparsity <= 1.0
+
+    def test_avg_rating_in_range(self, stats: MovieLensStats) -> None:
+        """Средняя оценка в [0.5, 5.0] / Avg rating within half-star scale."""
+        assert 0.5 <= stats.avg_rating <= 5.0
+
+    def test_rating_distribution_non_empty(self, stats: MovieLensStats) -> None:
+        assert len(stats.rating_distribution) > 0
+
+    def test_top_genres_non_empty(self, stats: MovieLensStats) -> None:
+        assert len(stats.top_genres) > 0
+
+    def test_top_genres_count_at_most_ten(self, stats: MovieLensStats) -> None:
+        assert len(stats.top_genres) <= 10
+
+
+class TestMovieLensToRecsysFormat:
+    """Тесты конвертации в формат RecSys / Schema conversion tests."""
+
+    @pytest.fixture(scope="class")
+    def converted(self) -> tuple:
+        ratings_df, movies_df = generate_mock_movielens(
+            n_users=30, n_movies=15, n_ratings=200, seed=42
+        )
+        return to_recsys_format(ratings_df, movies_df)
+
+    def test_interactions_columns(self, converted: tuple) -> None:
+        """interactions_df имеет нужные колонки / Required interaction columns present."""
+        interactions_df, _ = converted
+        assert set(["user_id", "product_id", "rating", "timestamp"]).issubset(
+            set(interactions_df.columns)
+        )
+
+    def test_products_columns(self, converted: tuple) -> None:
+        """products_df имеет нужные колонки / Required product columns present."""
+        _, products_df = converted
+        assert set(["product_id", "category", "price_tier"]).issubset(set(products_df.columns))
+
+    def test_price_tiers_valid(self, converted: tuple) -> None:
+        """price_tier содержит только допустимые значения / Valid price tiers only."""
+        _, products_df = converted
+        valid_tiers = {"low", "mid", "high"}
+        actual = set(products_df["price_tier"].unique().to_list())
+        assert actual.issubset(valid_tiers)
+
+    def test_category_non_empty(self, converted: tuple) -> None:
+        """Категория не пустая для всех фильмов / Category is non-empty for all movies."""
+        _, products_df = converted
+        categories = products_df["category"].to_list()
+        assert all(isinstance(c, str) and len(c) > 0 for c in categories)
+
+    def test_timestamp_is_string(self, converted: tuple) -> None:
+        """timestamp в ISO-формате строки / Timestamp converted to ISO string."""
+        interactions_df, _ = converted
+        ts_dtype = interactions_df["timestamp"].dtype
+        assert ts_dtype == pl.Utf8 or ts_dtype == pl.String
+
+    def test_compatible_with_collaborative_recommender(self, converted: tuple) -> None:
+        """Конвертированные данные пригодны для CollaborativeRecommender."""
+        from recsys.models.collaborative import CollaborativeRecommender
+
+        interactions_df, _ = converted
+        model = CollaborativeRecommender(n_components=5)
+        model.fit(interactions_df)
+        assert model.predicted_ratings is not None
+
+    def test_compatible_with_content_based_recommender(self, converted: tuple) -> None:
+        """Конвертированные данные пригодны для ContentBasedRecommender."""
+        from recsys.models.content_based import ContentBasedRecommender
+
+        interactions_df, products_df = converted
+        model = ContentBasedRecommender()
+        model.fit(products_df)
+        assert model.item_profiles is not None

@@ -94,7 +94,13 @@
 
 **Iteration 11-15: Real Data + Deployment**
 - [ ] Streamlit Cloud деплой для 3 проектов
-- [ ] MovieLens-25M для RecSys (Project 09)
+- [x] MovieLens-25M для RecSys (Project 09) — 2026-04-05
+      recsys/data/movielens.py: generate_mock_movielens() (mock для CI), load_movielens()
+      с graceful fallback, compute_movielens_stats() (sparsity, avg_rating, top_genres),
+      to_recsys_format() конвертирует userId/movieId → user_id/product_id + ISO timestamp.
+      Полузвёздная шкала 0.5–5.0 + power-law распределение активности. 27 новых тестов
+      (TestMovieLensMock, TestMovieLensLoader, TestMovieLensStats, TestMovieLensToRecsysFormat).
+      53/53 тестов зелёные.
 - [ ] RVL-CDIP для CV Scanner (Project 06)
 - [ ] Two-tower + LLM re-ranking для RecSys (Project 09)
       sentence-transformers для two-tower embeddings в Feast feature store +
