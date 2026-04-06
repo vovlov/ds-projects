@@ -22,8 +22,19 @@ from scanner.data.dataset import (
     generate_synthetic_documents,
     get_feature_matrix,
 )
+from scanner.data.rvl_cdip import (
+    FEATURE_COLS as RVL_FEATURE_COLS,
+)
+from scanner.data.rvl_cdip import (
+    RVL_CDIP_CLASSES,
+    compute_dataset_stats,
+    generate_mock_rvl_cdip,
+    load_rvl_cdip,
+    to_scanner_format,
+)
 from scanner.models.classifier import predict, train_classifier
 from scanner.models.cnn import is_available as cnn_is_available
+from scanner.models.gradcam import is_available as gradcam_is_available
 
 # ---- fixtures ----
 
@@ -197,3 +208,256 @@ class TestCNN:
         import scanner.models.cnn as cnn_mod  # noqa: F811
 
         assert hasattr(cnn_mod, "TORCH_AVAILABLE")
+
+
+# ===========================================================================
+# TestRVLCDIPMock
+# ===========================================================================
+
+
+class TestRVLCDIPMock:
+    """Тесты mock-генератора RVL-CDIP (не требуют скачанного датасета)."""
+
+    @pytest.fixture(scope="class")
+    def mock_df(self):
+        return generate_mock_rvl_cdip(n_per_class=20, seed=0)
+
+    def test_row_count(self, mock_df):
+        # 16 классов × 20 строк = 320
+        assert len(mock_df) == 16 * 20
+
+    def test_all_16_classes_present(self, mock_df):
+        found = set(mock_df["doc_type"].to_list())
+        assert found == set(RVL_CDIP_CLASSES)
+
+    def test_label_range(self, mock_df):
+        labels = mock_df["label"].to_list()
+        assert min(labels) == 0
+        assert max(labels) == 15
+
+    def test_feature_columns_present(self, mock_df):
+        for col in RVL_FEATURE_COLS + ["doc_type", "label", "split"]:
+            assert col in mock_df.columns, f"Колонка '{col}' отсутствует"
+
+    def test_aspect_ratio_positive(self, mock_df):
+        assert mock_df["aspect_ratio"].min() > 0
+
+    def test_brightness_in_range(self, mock_df):
+        assert mock_df["brightness"].min() >= 0.0
+        assert mock_df["brightness"].max() <= 1.0
+
+    def test_text_density_in_range(self, mock_df):
+        assert mock_df["text_density"].min() >= 0.0
+        assert mock_df["text_density"].max() <= 1.0
+
+    def test_edge_density_in_range(self, mock_df):
+        assert mock_df["edge_density"].min() >= 0.0
+        assert mock_df["edge_density"].max() <= 1.0
+
+    def test_file_size_positive(self, mock_df):
+        assert mock_df["file_size_kb"].min() > 0.0
+
+    def test_split_column_values(self, mock_df):
+        valid_splits = {"train", "val", "test"}
+        found = set(mock_df["split"].to_list())
+        assert found.issubset(valid_splits)
+
+    def test_reproducibility(self):
+        df1 = generate_mock_rvl_cdip(n_per_class=10, seed=42)
+        df2 = generate_mock_rvl_cdip(n_per_class=10, seed=42)
+        assert df1["aspect_ratio"].to_list() == df2["aspect_ratio"].to_list()
+
+    def test_different_seeds_differ(self):
+        df1 = generate_mock_rvl_cdip(n_per_class=10, seed=1)
+        df2 = generate_mock_rvl_cdip(n_per_class=10, seed=2)
+        assert df1["aspect_ratio"].to_list() != df2["aspect_ratio"].to_list()
+
+
+# ===========================================================================
+# TestRVLCDIPLoader
+# ===========================================================================
+
+
+class TestRVLCDIPLoader:
+    """Тесты загрузчика: fallback на mock при отсутствии датасета."""
+
+    def test_load_without_path_returns_df(self):
+        df = load_rvl_cdip(data_dir=None)
+        assert len(df) > 0
+
+    def test_load_with_nonexistent_path_falls_back(self, tmp_path):
+        # Несуществующая директория → mock
+        df = load_rvl_cdip(data_dir=tmp_path / "no_such_dir")
+        assert len(df) > 0
+        assert "doc_type" in df.columns
+
+    def test_load_with_split_filter(self):
+        df_train = load_rvl_cdip(data_dir=None, split="train")
+        # В mock-данных split назначается случайно, поэтому "train" должен быть
+        assert all(s == "train" for s in df_train["split"].to_list())
+
+    def test_load_with_label_file(self, tmp_path):
+        """Проверяем парсинг label-файлов RVL-CDIP формата '<path> <id>'."""
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        # Минимальный train.txt: 3 строки из разных классов
+        (labels_dir / "train.txt").write_text(
+            "images/letter/doc1.tif 0\nimages/form/doc2.tif 1\nimages/invoice/doc3.tif 11\n"
+        )
+        df = load_rvl_cdip(data_dir=tmp_path, split="train")
+        assert len(df) == 3
+        assert "image_path" in df.columns
+        assert set(df["doc_type"].to_list()) == {"letter", "form", "invoice"}
+
+    def test_load_label_file_label_ids(self, tmp_path):
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        (labels_dir / "val.txt").write_text("images/budget/b1.tif 10\nimages/resume/r1.tif 14\n")
+        df = load_rvl_cdip(data_dir=tmp_path, split="val")
+        assert df["label"].to_list() == [10, 14]
+
+
+# ===========================================================================
+# TestRVLCDIPStats
+# ===========================================================================
+
+
+class TestRVLCDIPStats:
+    """Тесты compute_dataset_stats()."""
+
+    @pytest.fixture(scope="class")
+    def stats(self):
+        df = generate_mock_rvl_cdip(n_per_class=50, seed=7)
+        return compute_dataset_stats(df)
+
+    def test_n_total(self, stats):
+        assert stats["n_total"] == 16 * 50
+
+    def test_n_classes(self, stats):
+        assert stats["n_classes"] == 16
+
+    def test_class_distribution_keys(self, stats):
+        assert set(stats["class_distribution"].keys()) == set(RVL_CDIP_CLASSES)
+
+    def test_class_distribution_sum(self, stats):
+        total = sum(stats["class_distribution"].values())
+        assert total == stats["n_total"]
+
+    def test_imbalance_ratio_balanced(self, stats):
+        # mock-данные сбалансированы → imbalance close to 1
+        assert stats["imbalance_ratio"] == pytest.approx(1.0, abs=0.1)
+
+    def test_split_counts_present(self, stats):
+        assert "split_counts" in stats
+        assert isinstance(stats["split_counts"], dict)
+
+    def test_split_counts_sum(self, stats):
+        total = sum(stats["split_counts"].values())
+        assert total == stats["n_total"]
+
+
+# ===========================================================================
+# TestRVLCDIPToScannerFormat
+# ===========================================================================
+
+
+class TestRVLCDIPToScannerFormat:
+    """Тесты конвертации в формат, совместимый с scanner.data.dataset."""
+
+    @pytest.fixture(scope="class")
+    def scanner_df(self):
+        df = generate_mock_rvl_cdip(n_per_class=10, seed=0)
+        return to_scanner_format(df)
+
+    def test_has_feature_cols(self, scanner_df):
+        for col in RVL_FEATURE_COLS:
+            assert col in scanner_df.columns
+
+    def test_has_doc_type(self, scanner_df):
+        assert "doc_type" in scanner_df.columns
+
+    def test_no_extra_columns(self, scanner_df):
+        expected = set(RVL_FEATURE_COLS + ["doc_type"])
+        assert set(scanner_df.columns) == expected
+
+    def test_missing_columns_raises(self):
+        import polars as pl
+
+        bad_df = pl.DataFrame({"doc_type": ["letter"], "aspect_ratio": [0.77]})
+        with pytest.raises(ValueError, match="Колонки отсутствуют"):
+            to_scanner_format(bad_df)
+
+    def test_compatible_with_get_feature_matrix(self, scanner_df):
+        """Убеждаемся, что to_scanner_format → get_feature_matrix работает."""
+        from scanner.data.dataset import DOC_TYPES, get_feature_matrix
+
+        # Оставляем только классы из 5-классового датасета для совместимости
+        filtered = scanner_df.filter(scanner_df["doc_type"].is_in(DOC_TYPES))
+        if len(filtered) > 0:
+            X, y, le = get_feature_matrix(filtered)
+            assert X.shape[1] == 5
+
+
+# ===========================================================================
+# TestGradCAM
+# ===========================================================================
+
+
+class TestGradCAM:
+    """Тесты Grad-CAM модуля (без PyTorch — только API и fallback)."""
+
+    def test_is_available_returns_bool(self):
+        result = gradcam_is_available()
+        assert isinstance(result, bool)
+
+    def test_import_does_not_crash(self):
+        import scanner.models.gradcam as gcam_mod
+
+        assert hasattr(gcam_mod, "TORCH_AVAILABLE")
+
+    def test_gradcam_class_exists(self):
+        from scanner.models.gradcam import GradCAM
+
+        assert GradCAM is not None
+
+    def test_explain_prediction_exists(self):
+        from scanner.models.gradcam import explain_prediction
+
+        assert callable(explain_prediction)
+
+    def test_preprocess_image_exists(self):
+        from scanner.models.gradcam import preprocess_image
+
+        assert callable(preprocess_image)
+
+    def test_gradcam_raises_without_torch(self):
+        """GradCAM() должен поднимать RuntimeError при отсутствии PyTorch."""
+        import scanner.models.gradcam as gcam_mod
+
+        if gcam_mod.TORCH_AVAILABLE:
+            pytest.skip("PyTorch доступен — тест только для среды без torch")
+
+        with pytest.raises(RuntimeError, match="PyTorch"):
+            gcam_mod.GradCAM(model=None, target_layer=None)
+
+    def test_preprocess_image_raises_without_torch(self):
+        import scanner.models.gradcam as gcam_mod
+
+        if gcam_mod.TORCH_AVAILABLE:
+            pytest.skip("PyTorch доступен")
+
+        with pytest.raises(RuntimeError, match="PyTorch"):
+            gcam_mod.preprocess_image("dummy.jpg")
+
+    def test_explain_prediction_raises_without_torch(self):
+        import scanner.models.gradcam as gcam_mod
+
+        if gcam_mod.TORCH_AVAILABLE:
+            pytest.skip("PyTorch доступен")
+
+        with pytest.raises(RuntimeError, match="PyTorch"):
+            gcam_mod.explain_prediction(
+                model=None,
+                image_tensor=None,
+                target_layer=None,
+            )

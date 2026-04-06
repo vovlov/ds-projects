@@ -101,7 +101,15 @@
       Полузвёздная шкала 0.5–5.0 + power-law распределение активности. 27 новых тестов
       (TestMovieLensMock, TestMovieLensLoader, TestMovieLensStats, TestMovieLensToRecsysFormat).
       53/53 тестов зелёные.
-- [ ] RVL-CDIP для CV Scanner (Project 06)
+- [x] RVL-CDIP для CV Scanner (Project 06) — 2026-04-06
+      scanner/data/rvl_cdip.py: 16 классов документов, generate_mock_rvl_cdip()
+      для CI без сети, load_rvl_cdip() с graceful fallback, compute_dataset_stats(),
+      to_scanner_format() — конвертация в формат совместимый с existing classifier.
+      scanner/models/gradcam.py: GradCAM class с forward/backward hooks, compute(),
+      overlay(), explain_prediction() — объяснимость CNN для EU AI Act compliance.
+      is_available() graceful fallback без PyTorch.
+      56/56 тестов зелёные (+37 новых: TestRVLCDIPMock, TestRVLCDIPLoader,
+      TestRVLCDIPStats, TestRVLCDIPToScannerFormat, TestGradCAM).
 - [ ] Two-tower + LLM re-ranking для RecSys (Project 09)
       sentence-transformers для two-tower embeddings в Feast feature store +
       лёгкий re-ranker через Anthropic API для top-K кандидатов.
