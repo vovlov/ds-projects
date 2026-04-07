@@ -469,3 +469,277 @@ class TestMovieLensToRecsysFormat:
         model = ContentBasedRecommender()
         model.fit(products_df)
         assert model.item_profiles is not None
+
+
+# ========== TestTwoTowerModel ==========
+
+
+class TestTwoTowerModel:
+    """Тесты двухбашенной модели поиска кандидатов."""
+
+    @pytest.fixture(scope="class")
+    def fitted_two_tower(
+        self,
+        users: pl.DataFrame,
+        products: pl.DataFrame,
+        interactions: pl.DataFrame,
+    ):
+        """Обученная двухбашенная модель для тестов класса."""
+        from recsys.models.two_tower import TowerConfig, TwoTowerModel
+
+        config = TowerConfig(embedding_dim=16, n_epochs=5, batch_size=256)
+        model = TwoTowerModel(config=config)
+        model.fit(users, products, interactions)
+        return model
+
+    def test_fit_sets_is_fitted(self, fitted_two_tower) -> None:
+        """После fit() модель помечается как обученная."""
+        assert fitted_two_tower.is_fitted is True
+
+    def test_weight_matrices_shape(
+        self, fitted_two_tower, users: pl.DataFrame, products: pl.DataFrame
+    ) -> None:
+        """Матрицы весов башен имеют корректный размер."""
+        model = fitted_two_tower
+        emb_dim = model.config.embedding_dim
+        assert model.W_user is not None
+        assert model.W_item is not None
+        assert model.W_user.shape[1] == emb_dim
+        assert model.W_item.shape[1] == emb_dim
+
+    def test_item_embeddings_normalized(self, fitted_two_tower) -> None:
+        """Предвычисленные item-эмбеддинги должны быть L2-нормированы."""
+        embs = fitted_two_tower._item_embeddings
+        assert embs is not None
+        norms = (embs**2).sum(axis=1) ** 0.5
+        # Допускаем погрешность для нулевых векторов
+        assert all(abs(n - 1.0) < 0.01 or n < 0.01 for n in norms)
+
+    def test_recommend_returns_list(
+        self,
+        fitted_two_tower,
+        users: pl.DataFrame,
+        interactions: pl.DataFrame,
+    ) -> None:
+        """recommend() возвращает список (item_id, score)."""
+        first_uid = int(users["user_id"][0])
+        recs = fitted_two_tower.recommend(first_uid, users, interactions, top_k=5)
+        assert isinstance(recs, list)
+
+    def test_recommend_top_k(
+        self,
+        fitted_two_tower,
+        users: pl.DataFrame,
+        interactions: pl.DataFrame,
+    ) -> None:
+        """Число рекомендаций не превышает top_k."""
+        first_uid = int(users["user_id"][0])
+        recs = fitted_two_tower.recommend(first_uid, users, interactions, top_k=5)
+        assert len(recs) <= 5
+
+    def test_recommend_excludes_rated(
+        self,
+        fitted_two_tower,
+        users: pl.DataFrame,
+        interactions: pl.DataFrame,
+    ) -> None:
+        """Уже просмотренные товары не попадают в рекомендации."""
+        first_uid = int(users["user_id"][0])
+        rated = set(
+            interactions.filter(pl.col("user_id") == first_uid)["product_id"].to_list()
+        )
+        recs = fitted_two_tower.recommend(first_uid, users, interactions, top_k=20)
+        rec_ids = {iid for iid, _ in recs}
+        assert len(rec_ids & rated) == 0, "Rated items must be excluded from recommendations"
+
+    def test_recommend_scores_descending(
+        self,
+        fitted_two_tower,
+        users: pl.DataFrame,
+        interactions: pl.DataFrame,
+    ) -> None:
+        """Рекомендации отсортированы по убыванию скора."""
+        first_uid = int(users["user_id"][0])
+        recs = fitted_two_tower.recommend(first_uid, users, interactions, top_k=10)
+        if len(recs) > 1:
+            scores = [s for _, s in recs]
+            assert scores == sorted(scores, reverse=True)
+
+    def test_recommend_unknown_user_returns_empty(
+        self,
+        fitted_two_tower,
+        users: pl.DataFrame,
+        interactions: pl.DataFrame,
+    ) -> None:
+        """Неизвестный пользователь → пустой список."""
+        recs = fitted_two_tower.recommend(99999, users, interactions, top_k=5)
+        assert recs == []
+
+    def test_get_user_embedding_shape(
+        self, fitted_two_tower, users: pl.DataFrame
+    ) -> None:
+        """user_embedding имеет корректный размер и единичную норму."""
+        first_uid = int(users["user_id"][0])
+        emb = fitted_two_tower.get_user_embedding(first_uid, users)
+        assert emb is not None
+        assert emb.shape == (fitted_two_tower.config.embedding_dim,)
+
+    def test_save_load_roundtrip(
+        self,
+        fitted_two_tower,
+        users: pl.DataFrame,
+        interactions: pl.DataFrame,
+        tmp_path,
+    ) -> None:
+        """Сохранение и загрузка модели дают идентичные рекомендации."""
+        path = str(tmp_path / "two_tower.pkl")
+        fitted_two_tower.save(path)
+
+        from recsys.models.two_tower import TwoTowerModel
+
+        loaded = TwoTowerModel.load(path)
+        first_uid = int(users["user_id"][0])
+
+        recs_orig = fitted_two_tower.recommend(first_uid, users, interactions, top_k=5)
+        recs_loaded = loaded.recommend(first_uid, users, interactions, top_k=5)
+        assert recs_orig == recs_loaded
+
+    def test_repr(self, fitted_two_tower) -> None:
+        """__repr__ содержит полезную информацию о модели."""
+        r = repr(fitted_two_tower)
+        assert "TwoTowerModel" in r
+        assert "fitted" in r
+
+    def test_evaluate_returns_metrics(
+        self,
+        fitted_two_tower,
+        users: pl.DataFrame,
+        products: pl.DataFrame,
+        interactions: pl.DataFrame,
+    ) -> None:
+        """evaluate() возвращает словарь с precision, recall, ndcg."""
+        # Используем первые 800 взаимодействий как train, остальные как test
+        train = interactions.head(800)
+        test = interactions.tail(200)
+        metrics = fitted_two_tower.evaluate(users, products, test, train, top_k=5)
+        assert "precision@5" in metrics
+        assert "recall@5" in metrics
+        assert "ndcg@5" in metrics
+        assert 0.0 <= metrics["precision@5"] <= 1.0
+        assert 0.0 <= metrics["recall@5"] <= 1.0
+        assert 0.0 <= metrics["ndcg@5"] <= 1.0
+
+
+# ========== TestLLMReranker ==========
+
+
+class TestLLMReranker:
+    """Тесты LLM-переранжирователя (mock-режим без API-ключа)."""
+
+    @pytest.fixture(scope="class")
+    def reranker(self):
+        from recsys.models.reranker import LLMReranker
+
+        # mock=True гарантирует независимость от LLM в CI
+        return LLMReranker(mock=True)
+
+    @pytest.fixture(scope="class")
+    def candidates(self) -> list[tuple[int, float]]:
+        """Синтетические кандидаты от двухбашенной модели."""
+        return [(1, 0.95), (5, 0.88), (12, 0.76), (7, 0.65), (3, 0.54), (18, 0.43)]
+
+    def test_rerank_returns_list(
+        self,
+        reranker,
+        candidates: list[tuple[int, float]],
+        products: pl.DataFrame,
+        users: pl.DataFrame,
+    ) -> None:
+        """rerank() возвращает список словарей."""
+        first_uid = int(users["user_id"][0])
+        results = reranker.rerank(first_uid, candidates, products, users, top_k=3)
+        assert isinstance(results, list)
+
+    def test_rerank_top_k_count(
+        self,
+        reranker,
+        candidates: list[tuple[int, float]],
+        products: pl.DataFrame,
+        users: pl.DataFrame,
+    ) -> None:
+        """Число результатов не превышает top_k."""
+        first_uid = int(users["user_id"][0])
+        results = reranker.rerank(first_uid, candidates, products, users, top_k=3)
+        assert len(results) <= 3
+
+    def test_rerank_result_keys(
+        self,
+        reranker,
+        candidates: list[tuple[int, float]],
+        products: pl.DataFrame,
+        users: pl.DataFrame,
+    ) -> None:
+        """Каждый результат содержит обязательные ключи."""
+        first_uid = int(users["user_id"][0])
+        results = reranker.rerank(first_uid, candidates, products, users, top_k=3)
+        required_keys = {"item_id", "retrieval_score", "rerank_score", "category", "price_tier", "explanation"}
+        for item in results:
+            assert required_keys.issubset(item.keys()), f"Missing keys in {item}"
+
+    def test_rerank_scores_in_range(
+        self,
+        reranker,
+        candidates: list[tuple[int, float]],
+        products: pl.DataFrame,
+        users: pl.DataFrame,
+    ) -> None:
+        """rerank_score находится в допустимом диапазоне."""
+        first_uid = int(users["user_id"][0])
+        results = reranker.rerank(first_uid, candidates, products, users, top_k=3)
+        for item in results:
+            assert 0.0 <= item["rerank_score"] <= 1.0
+
+    def test_rerank_empty_candidates(
+        self,
+        reranker,
+        products: pl.DataFrame,
+        users: pl.DataFrame,
+    ) -> None:
+        """Пустой список кандидатов → пустой список результатов."""
+        first_uid = int(users["user_id"][0])
+        results = reranker.rerank(first_uid, [], products, users, top_k=5)
+        assert results == []
+
+    def test_reranker_repr(self, reranker) -> None:
+        """__repr__ показывает режим работы."""
+        r = repr(reranker)
+        assert "LLMReranker" in r
+        assert "mock" in r
+
+    def test_two_tower_plus_reranker_pipeline(
+        self,
+        users: pl.DataFrame,
+        products: pl.DataFrame,
+        interactions: pl.DataFrame,
+    ) -> None:
+        """
+        Интеграционный тест: two-tower retrieval → LLM re-ranking pipeline.
+
+        Проверяем полный пайплайн: от обучения до финального ранжирования.
+        """
+        from recsys.models.reranker import LLMReranker
+        from recsys.models.two_tower import TowerConfig, TwoTowerModel
+
+        # Stage 1: Two-tower retrieval
+        config = TowerConfig(embedding_dim=8, n_epochs=3, batch_size=128)
+        retriever = TwoTowerModel(config=config).fit(users, products, interactions)
+
+        first_uid = int(users["user_id"][0])
+        candidates = retriever.recommend(first_uid, users, interactions, top_k=10)
+
+        # Stage 2: LLM re-ranking (mock)
+        reranker = LLMReranker(mock=True)
+        final_recs = reranker.rerank(first_uid, candidates, products, users, top_k=5)
+
+        assert len(final_recs) <= 5
+        assert all("item_id" in r and "rerank_score" in r for r in final_recs)

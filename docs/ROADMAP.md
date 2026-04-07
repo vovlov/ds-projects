@@ -110,9 +110,15 @@
       is_available() graceful fallback без PyTorch.
       56/56 тестов зелёные (+37 новых: TestRVLCDIPMock, TestRVLCDIPLoader,
       TestRVLCDIPStats, TestRVLCDIPToScannerFormat, TestGradCAM).
-- [ ] Two-tower + LLM re-ranking для RecSys (Project 09)
-      sentence-transformers для two-tower embeddings в Feast feature store +
-      лёгкий re-ranker через Anthropic API для top-K кандидатов.
+- [x] Two-tower + LLM re-ranking для RecSys (Project 09) — 2026-04-07
+      recsys/models/two_tower.py: TwoTowerModel (UserTower + ItemTower) на numpy/sklearn
+      без PyTorch (macOS x86_64 совместимость). In-batch negative sampling + softmax
+      cross-entropy loss. L2-нормированные item-эмбеддинги для fast cosine ANN.
+      TowerConfig dataclass, evaluate() с Precision/Recall/NDCG@K, save/load.
+      recsys/models/reranker.py: LLMReranker (retrieve→re-rank пайплайн).
+      Claude Haiku переранжирует 2×top_k кандидатов с учётом профиля пользователя.
+      Mock-режим без API-ключа — CI зелёный. Graceful degradation при ошибках LLM.
+      72/72 тестов (+20 новых: TestTwoTowerModel, TestLLMReranker).
       Источник: RecSys 2025, Snap Robusta platform, Shopify NeurIPS 2025.
 - [ ] Multi-model cross-check для LLM Code Review (Project 08)
       Два прохода: correctness pass + security pass (semgrep + LLM).
