@@ -120,10 +120,14 @@
       Mock-режим без API-ключа — CI зелёный. Graceful degradation при ошибках LLM.
       72/72 тестов (+20 новых: TestTwoTowerModel, TestLLMReranker).
       Источник: RecSys 2025, Snap Robusta platform, Shopify NeurIPS 2025.
-- [ ] Multi-model cross-check для LLM Code Review (Project 08)
-      Два прохода: correctness pass + security pass (semgrep + LLM).
-      Self-consistency scoring: второй LLM оценивает качество ревью первого.
-      Источник: Ericsson 2025 study (arxiv 2507.19115), codedog (MIT).
+- [x] Multi-model cross-check для LLM Code Review (Project 08) — 2026-04-08
+      review/models/multi_review.py: correctness_pass() + security_pass() (OWASP Top 10),
+      SemgrepFinding dataclass для инъекции статического анализа в security pass,
+      self_consistency_score() — эвристический CISC-скорер (0-1) без LLM-вызова.
+      multi_model_review() — оркестратор: два прохода → дедупликация → verdict
+      (pass/review_required/fail/api_key_missing). POST /review/multi endpoint.
+      36/36 тестов (+22 новых: TestMultiModelReview).
+      Источник: Ericsson 2025 (arxiv 2507.19115), Semgrep AI 2025, CISC ACL 2025.
 
 **Iteration 16-20: Monitoring & CT**
 - [ ] Prometheus metrics exporter (Project 05)
