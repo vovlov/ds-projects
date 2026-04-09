@@ -130,7 +130,16 @@
       Источник: Ericsson 2025 (arxiv 2507.19115), Semgrep AI 2025, CISC ACL 2025.
 
 **Iteration 16-20: Monitoring & CT**
-- [ ] Prometheus metrics exporter (Project 05)
+- [x] Prometheus metrics exporter (Project 05) — 2026-04-09
+      anomaly/metrics/prometheus_exporter.py: AnomalyMetrics class с отдельным
+      CollectorRegistry (изолируется от глобального для тестов). 7 метрик:
+      requests_total, points_total, anomalies_total (Counter), anomaly_score +
+      detection_seconds (Histogram с SRE-buckets), threshold + window_size (Gauge).
+      track_detection() context manager для latency измерений. get_summary() для /health.
+      app.py: GET /metrics endpoint (PlainTextResponse, Prometheus text format),
+      /health расширен полем prometheus + stats, /detect автоматически обновляет метрики.
+      Graceful degradation: is_available() → работает без prometheus_client в CI.
+      31/31 тестов (+12 новых: TestPrometheusExporter, TestAPIWithMetrics).
 - [ ] Automated retraining trigger (Project 01)
 - [ ] Data drift alerting (Project 10 → 01)
 - [ ] Write-Audit-Publish drift gates в feature store (Projects 09/10)
