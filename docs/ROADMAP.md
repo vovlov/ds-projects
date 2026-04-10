@@ -140,7 +140,12 @@
       /health расширен полем prometheus + stats, /detect автоматически обновляет метрики.
       Graceful degradation: is_available() → работает без prometheus_client в CI.
       31/31 тестов (+12 новых: TestPrometheusExporter, TestAPIWithMetrics).
-- [ ] Automated retraining trigger (Project 01)
+- [x] Automated retraining trigger (Project 01) — 2026-04-10
+      churn/retraining/trigger.py: RetrainingTrigger, compute_psi() (PSI = BCBS 2011 стандарт).
+      OR-логика: drift (max_psi >= 0.2) ИЛИ perf_degradation (AUC drop >= 0.05) → retrain.
+      DriftReport + RetrainingResult dataclasses. Аудит-лог в MLflow для EU AI Act.
+      Graceful degradation без MLflow в CI. 20/20 тестов (+18 новых: TestComputePSI,
+      TestDriftReport, TestRetrainingTrigger).
 - [ ] Data drift alerting (Project 10 → 01)
 - [ ] Write-Audit-Publish drift gates в feature store (Projects 09/10)
       PSI-проверка при записи фичи через Evidently AI, CI-gate с порогом дрейфа.
