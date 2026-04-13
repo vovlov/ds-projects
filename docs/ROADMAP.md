@@ -146,7 +146,15 @@
       DriftReport + RetrainingResult dataclasses. Аудит-лог в MLflow для EU AI Act.
       Graceful degradation без MLflow в CI. 20/20 тестов (+18 новых: TestComputePSI,
       TestDriftReport, TestRetrainingTrigger).
-- [ ] Data drift alerting (Project 10 → 01)
+- [x] Data drift alerting (Project 10 → 01) — 2026-04-13
+      quality/alerts/alerting.py: DriftAlert dataclass, LogAlertChannel, WebhookAlertChannel,
+      AlertManager (severity_threshold-фильтрация, изоляция ошибок каналов).
+      quality/api/app.py: POST /drift/alert — drift detection + alerting в одном запросе.
+      churn/api/app.py: POST /retraining/notify — принимает DriftAlertPayload от Project 10,
+      OR-логика: critical → retrain; warning+PSI≥0.2 → retrain; иначе → skip.
+      Аудит-трейл: triggered_by, reason с PSI и списком признаков.
+      71 новый тест (TestDriftAlert×5, TestLogAlertChannel×2, TestWebhookAlertChannel×2,
+      TestAlertManager×5, TestDriftAlertAPIEndpoint×2, TestRetrainingNotify×8).
 - [ ] Write-Audit-Publish drift gates в feature store (Projects 09/10)
       PSI-проверка при записи фичи через Evidently AI, CI-gate с порогом дрейфа.
 - [ ] MMD drift detection + retraining trigger (Project 05 или 01)
