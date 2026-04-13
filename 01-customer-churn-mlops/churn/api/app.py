@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 import pickle
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from ..data.load import CATEGORICAL_FEATURES, add_features
+from ..retraining.trigger import PSI_YELLOW
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +65,128 @@ class PredictionResponse(BaseModel):
     risk_level: str
 
 
+# ---------------------------------------------------------------------------
+# Retraining notification endpoint (receives alerts from Project 10)
+# ---------------------------------------------------------------------------
+
+
+class DriftAlertPayload(BaseModel):
+    """Payload от системы алертинга Project 10 (Data Quality Platform).
+    Payload from Project 10's drift alerting system.
+
+    Project 10 отправляет этот запрос на /retraining/notify когда обнаруживает
+    дрейф в признаках, которые использует churn-модель.
+
+    Project 10 sends this to /retraining/notify when it detects drift
+    in features used by the churn model.
+    """
+
+    severity: str = Field(
+        ...,
+        description="Серьёзность дрейфа / Drift severity: ok | warning | critical",
+    )
+    features_drifted: list[str] = Field(
+        default_factory=list,
+        description="Список признаков с дрейфом / Features with detected drift",
+    )
+    max_psi: float = Field(
+        ...,
+        ge=0.0,
+        description="Максимальный PSI среди всех признаков / Max PSI across features",
+    )
+    columns_checked: int = Field(default=0, description="Сколько столбцов проверено")
+    columns_with_drift: int = Field(default=0, description="Сколько столбцов с дрейфом")
+    timestamp: str = Field(..., description="ISO-8601 timestamp алерта")
+    source: str = Field(
+        default="data-quality-platform",
+        description="Источник алерта / Alert source",
+    )
+    details: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Полный drift-отчёт для аудит-трейла / Full drift report",
+    )
+
+
+class RetrainingDecision(BaseModel):
+    """Решение о переобучении модели оттока / Churn model retraining decision."""
+
+    decision: str = Field(..., description="'retrain' или 'skip'")
+    reason: str = Field(..., description="Человекочитаемое объяснение решения")
+    severity: str = Field(..., description="Серьёзность из входящего алерта")
+    max_psi: float = Field(..., description="PSI из входящего алерта")
+    triggered_by: str = Field(..., description="Источник алерта")
+
+
 @app.get("/health")
 def health():
     return {"status": "healthy", "model_loaded": _model is not None}
+
+
+@app.post("/retraining/notify", response_model=RetrainingDecision)
+def retraining_notify(payload: DriftAlertPayload) -> RetrainingDecision:
+    """Принять алерт о дрейфе от Data Quality Platform (Project 10).
+    Accept drift alert from Data Quality Platform (Project 10).
+
+    Конечная точка замыкает цикл мониторинга:
+      Quality Platform обнаруживает дрейф → отправляет сюда POST →
+      этот эндпоинт решает: переобучать модель или нет.
+
+    Closes the monitoring loop:
+      Quality Platform detects drift → POSTs here →
+      this endpoint decides whether to trigger retraining.
+
+    Логика принятия решения (OR):
+    - severity == "critical" (PSI >= 0.25): немедленное переобучение
+    - severity == "warning" AND max_psi >= PSI_YELLOW (0.2): переобучение
+    - иначе: пропустить (drift есть, но ниже порога действия)
+
+    Decision logic (OR):
+    - severity == "critical" (PSI >= 0.25): immediate retrain
+    - severity == "warning" AND max_psi >= PSI_YELLOW (0.2): retrain
+    - otherwise: skip
+    """
+    # Критический дрейф: переобучать всегда
+    # Critical drift: always retrain
+    if payload.severity == "critical":
+        return RetrainingDecision(
+            decision="retrain",
+            reason=(
+                f"Critical drift detected by {payload.source}: "
+                f"max_psi={payload.max_psi:.4f} >= 0.25 "
+                f"in features={payload.features_drifted}"
+            ),
+            severity=payload.severity,
+            max_psi=payload.max_psi,
+            triggered_by=payload.source,
+        )
+
+    # Умеренный дрейф: переобучать если PSI >= BCBS-порог (0.2)
+    # Moderate drift: retrain if PSI >= BCBS threshold (0.2)
+    if payload.severity == "warning" and payload.max_psi >= PSI_YELLOW:
+        return RetrainingDecision(
+            decision="retrain",
+            reason=(
+                f"Warning drift from {payload.source}: "
+                f"max_psi={payload.max_psi:.4f} >= {PSI_YELLOW} (BCBS threshold) "
+                f"in features={payload.features_drifted}"
+            ),
+            severity=payload.severity,
+            max_psi=payload.max_psi,
+            triggered_by=payload.source,
+        )
+
+    # Дрейф есть но ниже порога действия — мониторим, не переобучаем
+    # Drift below action threshold — monitor but don't retrain yet
+    return RetrainingDecision(
+        decision="skip",
+        reason=(
+            f"Drift from {payload.source} below retraining threshold: "
+            f"severity={payload.severity}, max_psi={payload.max_psi:.4f} < {PSI_YELLOW}"
+        ),
+        severity=payload.severity,
+        max_psi=payload.max_psi,
+        triggered_by=payload.source,
+    )
 
 
 @app.post("/predict", response_model=PredictionResponse)

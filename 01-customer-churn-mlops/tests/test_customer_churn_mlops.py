@@ -364,3 +364,145 @@ class TestRetrainingTrigger:
         assert "tenure" in report.feature_psi
         # MonthlyCharges должен иметь больший PSI
         assert report.feature_psi["MonthlyCharges"] > report.feature_psi["tenure"]
+
+
+# ---------------------------------------------------------------------------
+# Тесты /retraining/notify — алертинг из Data Quality Platform (Project 10)
+# ---------------------------------------------------------------------------
+
+
+class TestRetrainingNotify:
+    """Тесты для эндпоинта /retraining/notify / Tests for /retraining/notify endpoint.
+
+    Эндпоинт принимает DriftAlertPayload от Project 10 (Data Quality Platform)
+    и возвращает решение: переобучать модель или нет.
+
+    Receives DriftAlertPayload from Project 10 and returns a retraining decision.
+    """
+
+    def _make_payload(
+        self,
+        severity: str = "warning",
+        max_psi: float = 0.15,
+        features_drifted: list | None = None,
+    ) -> dict:
+        """Вспомогательный метод для создания тестового payload."""
+        return {
+            "severity": severity,
+            "features_drifted": features_drifted or ["MonthlyCharges"],
+            "max_psi": max_psi,
+            "columns_checked": 3,
+            "columns_with_drift": 1,
+            "timestamp": "2026-04-13T10:00:00+00:00",
+            "source": "data-quality-platform",
+            "details": {},
+        }
+
+    def test_critical_drift_triggers_retrain(self):
+        """severity=critical → decision=retrain всегда."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = self._make_payload(severity="critical", max_psi=0.35)
+        response = client.post("/retraining/notify", json=payload)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["decision"] == "retrain"
+        assert "critical" in data["reason"].lower() or "critical" in data["severity"]
+        assert data["severity"] == "critical"
+
+    def test_warning_high_psi_triggers_retrain(self):
+        """severity=warning с PSI >= 0.2 → decision=retrain."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = self._make_payload(severity="warning", max_psi=0.22)
+        response = client.post("/retraining/notify", json=payload)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["decision"] == "retrain"
+        assert data["max_psi"] == 0.22
+
+    def test_warning_low_psi_skips_retrain(self):
+        """severity=warning с PSI < 0.2 → decision=skip."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = self._make_payload(severity="warning", max_psi=0.12)
+        response = client.post("/retraining/notify", json=payload)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["decision"] == "skip"
+        assert "below" in data["reason"].lower()
+
+    def test_ok_severity_skips_retrain(self):
+        """severity=ok → decision=skip."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = self._make_payload(severity="ok", max_psi=0.05, features_drifted=[])
+        response = client.post("/retraining/notify", json=payload)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["decision"] == "skip"
+
+    def test_response_includes_all_fields(self):
+        """Ответ содержит все обязательные поля RetrainingDecision."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = self._make_payload(severity="critical", max_psi=0.40)
+        response = client.post("/retraining/notify", json=payload)
+
+        assert response.status_code == 200
+        data = response.json()
+        for field in ("decision", "reason", "severity", "max_psi", "triggered_by"):
+            assert field in data, f"Missing field: {field}"
+
+    def test_triggered_by_reflects_source(self):
+        """triggered_by в ответе соответствует source из payload."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = self._make_payload(severity="critical", max_psi=0.30)
+        payload["source"] = "custom-quality-pipeline"
+        response = client.post("/retraining/notify", json=payload)
+
+        data = response.json()
+        assert data["triggered_by"] == "custom-quality-pipeline"
+
+    def test_missing_required_field_returns_422(self):
+        """Отсутствующий обязательный field → 422 Unprocessable Entity."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        # max_psi обязателен
+        bad_payload = {"severity": "warning", "timestamp": "2026-04-13T10:00:00+00:00"}
+        response = client.post("/retraining/notify", json=bad_payload)
+        assert response.status_code == 422
+
+    def test_features_drifted_in_reason(self):
+        """Список затронутых признаков попадает в reason."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = self._make_payload(
+            severity="critical",
+            max_psi=0.35,
+            features_drifted=["MonthlyCharges", "tenure"],
+        )
+        response = client.post("/retraining/notify", json=payload)
+        data = response.json()
+        assert "MonthlyCharges" in data["reason"] or "tenure" in data["reason"]

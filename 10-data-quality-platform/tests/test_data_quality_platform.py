@@ -343,3 +343,371 @@ class TestAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["passed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Тесты системы алертинга / Alerting system tests
+# ---------------------------------------------------------------------------
+
+
+class TestDriftAlert:
+    """Тесты для DriftAlert dataclass / DriftAlert dataclass tests."""
+
+    def test_create_alert_from_stable_report(self) -> None:
+        """Отчёт без дрейфа → severity=ok, features_drifted пустой."""
+        from quality.alerts.alerting import create_alert_from_report
+
+        report = {
+            "drift_detected": False,
+            "columns_checked": 2,
+            "columns_with_drift": 0,
+            "details": [
+                {
+                    "column": "age",
+                    "psi": 0.05,
+                    "psi_alert": "ok",
+                    "drift_detected": False,
+                },
+            ],
+        }
+        alert = create_alert_from_report(report)
+        assert alert.severity == "ok"
+        assert alert.features_drifted == []
+        assert alert.max_psi == 0.05
+        assert alert.columns_checked == 2
+        assert alert.columns_with_drift == 0
+
+    def test_create_alert_warning_severity(self) -> None:
+        """PSI=0.15 → severity=warning."""
+        from quality.alerts.alerting import create_alert_from_report
+
+        report = {
+            "drift_detected": True,
+            "columns_checked": 1,
+            "columns_with_drift": 1,
+            "details": [
+                {
+                    "column": "MonthlyCharges",
+                    "psi": 0.15,
+                    "psi_alert": "moderate",
+                    "drift_detected": True,
+                },
+            ],
+        }
+        alert = create_alert_from_report(report, source="test-pipeline")
+        assert alert.severity == "warning"
+        assert "MonthlyCharges" in alert.features_drifted
+        assert alert.max_psi == 0.15
+        assert alert.source == "test-pipeline"
+
+    def test_create_alert_critical_severity(self) -> None:
+        """PSI=0.4 → severity=critical."""
+        from quality.alerts.alerting import create_alert_from_report
+
+        report = {
+            "drift_detected": True,
+            "columns_checked": 1,
+            "columns_with_drift": 1,
+            "details": [
+                {
+                    "column": "tenure",
+                    "psi": 0.40,
+                    "psi_alert": "critical",
+                    "drift_detected": True,
+                },
+            ],
+        }
+        alert = create_alert_from_report(report)
+        assert alert.severity == "critical"
+        assert alert.max_psi == 0.40
+
+    def test_alert_to_dict_serializable(self) -> None:
+        """to_dict() возвращает JSON-сериализуемый словарь."""
+        import json
+
+        from quality.alerts.alerting import create_alert_from_report
+
+        report = {
+            "drift_detected": False,
+            "columns_checked": 1,
+            "columns_with_drift": 0,
+            "details": [{"column": "x", "psi": 0.01, "drift_detected": False}],
+        }
+        alert = create_alert_from_report(report)
+        d = alert.to_dict()
+        # Убедимся, что сериализуется без ошибок
+        assert json.dumps(d)
+        assert "severity" in d
+        assert "timestamp" in d
+
+    def test_alert_is_actionable_threshold(self) -> None:
+        """is_actionable корректно работает с порогами."""
+        from quality.alerts.alerting import DriftAlert
+
+        ok_alert = DriftAlert(
+            severity="ok",
+            features_drifted=[],
+            max_psi=0.05,
+            columns_checked=1,
+            columns_with_drift=0,
+            timestamp="2026-04-13T10:00:00+00:00",
+        )
+        warn_alert = DriftAlert(
+            severity="warning",
+            features_drifted=["x"],
+            max_psi=0.15,
+            columns_checked=1,
+            columns_with_drift=1,
+            timestamp="2026-04-13T10:00:00+00:00",
+        )
+        crit_alert = DriftAlert(
+            severity="critical",
+            features_drifted=["x"],
+            max_psi=0.35,
+            columns_checked=1,
+            columns_with_drift=1,
+            timestamp="2026-04-13T10:00:00+00:00",
+        )
+
+        assert not ok_alert.is_actionable("warning")
+        assert warn_alert.is_actionable("warning")
+        assert not warn_alert.is_actionable("critical")
+        assert crit_alert.is_actionable("warning")
+        assert crit_alert.is_actionable("critical")
+
+
+class TestLogAlertChannel:
+    """Тесты для LogAlertChannel / LogAlertChannel tests."""
+
+    def test_send_returns_true(self) -> None:
+        """send() всегда возвращает True (лог недоступным не бывает)."""
+        from quality.alerts.alerting import DriftAlert, LogAlertChannel
+
+        channel = LogAlertChannel()
+        alert = DriftAlert(
+            severity="warning",
+            features_drifted=["score"],
+            max_psi=0.18,
+            columns_checked=2,
+            columns_with_drift=1,
+            timestamp="2026-04-13T10:00:00+00:00",
+        )
+        result = channel.send(alert)
+        assert result is True
+
+    def test_send_critical_uses_error_level(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Критический алерт логируется на уровне ERROR."""
+        import logging
+
+        from quality.alerts.alerting import DriftAlert, LogAlertChannel
+
+        channel = LogAlertChannel(name="test.drift.alert")
+        alert = DriftAlert(
+            severity="critical",
+            features_drifted=["tenure"],
+            max_psi=0.45,
+            columns_checked=1,
+            columns_with_drift=1,
+            timestamp="2026-04-13T10:00:00+00:00",
+        )
+        with caplog.at_level(logging.ERROR, logger="test.drift.alert"):
+            channel.send(alert)
+        assert any("DRIFT ALERT" in r.message for r in caplog.records)
+
+
+class TestWebhookAlertChannel:
+    """Тесты для WebhookAlertChannel / WebhookAlertChannel tests."""
+
+    def test_is_available(self) -> None:
+        """httpx установлен — is_available() должен вернуть True."""
+        from quality.alerts.alerting import WebhookAlertChannel
+
+        # httpx есть в зависимостях проекта
+        assert WebhookAlertChannel.is_available() is True
+
+    def test_send_unreachable_url_returns_false(self) -> None:
+        """Недостижимый URL → graceful degradation (False, без исключения)."""
+        from quality.alerts.alerting import DriftAlert, WebhookAlertChannel
+
+        channel = WebhookAlertChannel(url="http://localhost:9999/no-such-endpoint", timeout=0.5)
+        alert = DriftAlert(
+            severity="critical",
+            features_drifted=["x"],
+            max_psi=0.3,
+            columns_checked=1,
+            columns_with_drift=1,
+            timestamp="2026-04-13T10:00:00+00:00",
+        )
+        # Не должно кидать исключение
+        result = channel.send(alert)
+        assert result is False
+
+
+class TestAlertManager:
+    """Тесты для AlertManager / AlertManager tests."""
+
+    def test_no_alert_below_threshold(self) -> None:
+        """Дрейф ниже порога → alert не отправляется (возвращает None)."""
+        from quality.alerts.alerting import AlertManager
+
+        manager = AlertManager(severity_threshold="warning")
+        # PSI=0.05 → severity=ok — ниже порога warning
+        report = {
+            "drift_detected": False,
+            "columns_checked": 1,
+            "columns_with_drift": 0,
+            "details": [{"column": "x", "psi": 0.05, "drift_detected": False}],
+        }
+        result = manager.process_drift_report(report)
+        assert result is None
+
+    def test_alert_sent_on_warning(self) -> None:
+        """Дрейф warning → AlertManager создаёт и возвращает алерт."""
+        from quality.alerts.alerting import AlertManager
+
+        sent_alerts: list = []
+
+        class MockChannel:
+            def send(self, alert):  # noqa: ANN001
+                sent_alerts.append(alert)
+                return True
+
+        manager = AlertManager(channels=[MockChannel()], severity_threshold="warning")  # type: ignore[list-item]
+        report = {
+            "drift_detected": True,
+            "columns_checked": 1,
+            "columns_with_drift": 1,
+            "details": [{"column": "MonthlyCharges", "psi": 0.18, "drift_detected": True}],
+        }
+        alert = manager.process_drift_report(report)
+        assert alert is not None
+        assert alert.severity == "warning"
+        assert len(sent_alerts) == 1
+
+    def test_alert_sent_on_critical(self) -> None:
+        """Дрейф critical → отправляется при threshold=warning."""
+        from quality.alerts.alerting import AlertManager
+
+        received: list = []
+
+        class MockChannel:
+            def send(self, alert):  # noqa: ANN001
+                received.append(alert)
+                return True
+
+        manager = AlertManager(channels=[MockChannel()], severity_threshold="warning")  # type: ignore[list-item]
+        report = {
+            "drift_detected": True,
+            "columns_checked": 2,
+            "columns_with_drift": 2,
+            "details": [
+                {"column": "tenure", "psi": 0.35, "drift_detected": True},
+                {"column": "score", "psi": 0.28, "drift_detected": True},
+            ],
+        }
+        alert = manager.process_drift_report(report)
+        assert alert is not None
+        assert alert.severity == "critical"
+        assert alert.max_psi == 0.35
+        assert len(alert.features_drifted) == 2
+
+    def test_channel_error_doesnt_break_manager(self) -> None:
+        """Ошибка в одном канале не ломает остальные."""
+        from quality.alerts.alerting import AlertManager
+
+        second_channel_called = []
+
+        class FailingChannel:
+            def send(self, alert):  # noqa: ANN001
+                raise RuntimeError("channel down")
+
+        class GoodChannel:
+            def send(self, alert):  # noqa: ANN001
+                second_channel_called.append(True)
+                return True
+
+        manager = AlertManager(  # type: ignore[list-item]
+            channels=[FailingChannel(), GoodChannel()],
+            severity_threshold="warning",
+        )
+        report = {
+            "drift_detected": True,
+            "columns_checked": 1,
+            "columns_with_drift": 1,
+            "details": [{"column": "x", "psi": 0.20, "drift_detected": True}],
+        }
+        # Не должно кидать исключение
+        alert = manager.process_drift_report(report)
+        assert alert is not None
+        # Второй канал всё равно вызвался
+        assert second_channel_called
+
+    def test_default_channel_is_log(self) -> None:
+        """По умолчанию AlertManager использует LogAlertChannel."""
+        from quality.alerts.alerting import AlertManager, LogAlertChannel
+
+        manager = AlertManager()
+        assert len(manager.channels) == 1
+        assert isinstance(manager.channels[0], LogAlertChannel)
+
+
+class TestDriftAlertAPIEndpoint:
+    """Тесты для /drift/alert endpoint / Drift alert API endpoint tests."""
+
+    def test_drift_alert_no_drift(self, tmp_path) -> None:
+        """Одинаковые данные → drift_report без дрейфа, alert=null."""
+        import io
+
+        import polars as pl
+        from fastapi.testclient import TestClient
+        from quality.api.app import app
+
+        rng = np.random.default_rng(42)
+        df = pl.DataFrame({"value": rng.normal(0, 1, 200).tolist()})
+
+        ref_csv = df.write_csv()
+        cur_csv = df.write_csv()
+
+        client = TestClient(app)
+        response = client.post(
+            "/drift/alert",
+            files={
+                "reference": ("ref.csv", io.BytesIO(ref_csv.encode()), "text/csv"),
+                "current": ("cur.csv", io.BytesIO(cur_csv.encode()), "text/csv"),
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "drift_report" in data
+        assert "alert" in data
+        assert data["alert"] is None  # no drift → no alert
+        assert data["alert_sent"] is False
+
+    def test_drift_alert_with_drift(self, tmp_path) -> None:
+        """Сдвинутые данные → alert создаётся (без webhook)."""
+        import io
+
+        import polars as pl
+        from fastapi.testclient import TestClient
+        from quality.api.app import app
+
+        rng = np.random.default_rng(42)
+        ref_df = pl.DataFrame({"value": rng.normal(0, 1, 500).tolist()})
+        cur_df = pl.DataFrame({"value": rng.normal(5, 1, 500).tolist()})
+
+        client = TestClient(app)
+        response = client.post(
+            "/drift/alert",
+            files={
+                "reference": ("ref.csv", io.BytesIO(ref_df.write_csv().encode()), "text/csv"),
+                "current": ("cur.csv", io.BytesIO(cur_df.write_csv().encode()), "text/csv"),
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["drift_report"]["drift_detected"] is True
+        assert data["alert"] is not None
+        assert data["alert"]["severity"] in ("warning", "critical")
+        assert data["alert_sent"] is True

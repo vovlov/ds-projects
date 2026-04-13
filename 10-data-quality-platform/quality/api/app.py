@@ -19,6 +19,7 @@ import yaml
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
+from quality.alerts.alerting import AlertManager, LogAlertChannel, WebhookAlertChannel
 from quality.data.profiler import profile_dataframe
 from quality.quality.drift import detect_drift
 from quality.quality.expectations import run_suite
@@ -126,3 +127,60 @@ async def drift_endpoint(
     col_list = json.loads(columns) if columns else None
     report = detect_drift(ref_df, cur_df, columns=col_list)
     return JSONResponse(content=_make_serializable(report))
+
+
+@app.post("/drift/alert")
+async def drift_alert_endpoint(
+    reference: UploadFile = File(..., description="Эталонный CSV / Reference CSV"),
+    current: UploadFile = File(..., description="Текущий CSV / Current CSV"),
+    columns: str | None = Form(
+        None,
+        description="JSON-список столбцов / JSON list of columns to check (optional)",
+    ),
+    webhook_url: str | None = Form(
+        None,
+        description=(
+            "URL webhook для алертинга (например, http://churn-svc/retraining/notify). "
+            "Webhook URL to notify on drift (e.g. churn service retraining endpoint)."
+        ),
+    ),
+    severity_threshold: str = Form(
+        "warning",
+        description="Минимальная серьёзность / Min severity: ok|warning|critical",
+    ),
+) -> JSONResponse:
+    """
+    Детекция дрейфа + алертинг / Drift detection with alerting.
+
+    Запускает проверку дрейфа и при обнаружении значимого отклонения
+    (severity >= severity_threshold) отправляет структурированный алерт.
+
+    Runs drift detection and sends a structured alert when drift severity
+    exceeds severity_threshold. If webhook_url is provided, POSTs the alert
+    to that URL (e.g. Project 01's /retraining/notify endpoint).
+
+    Returns:
+        drift_report: полный отчёт детекции дрейфа
+        alert: алерт (если отправлен) или null
+    """
+    ref_df = _read_upload_csv(reference)
+    cur_df = _read_upload_csv(current)
+
+    col_list = json.loads(columns) if columns else None
+    drift_report = detect_drift(ref_df, cur_df, columns=col_list)
+
+    # Настраиваем каналы: всегда лог + опциональный webhook
+    # Always log + optional webhook (typically Project 01's retraining endpoint)
+    channels = [LogAlertChannel()]
+    if webhook_url:
+        channels.append(WebhookAlertChannel(url=webhook_url))
+
+    manager = AlertManager(channels=channels, severity_threshold=severity_threshold)
+    alert = manager.process_drift_report(drift_report)
+
+    response_body = {
+        "drift_report": _make_serializable(drift_report),
+        "alert": _make_serializable(alert.to_dict()) if alert else None,
+        "alert_sent": alert is not None,
+    }
+    return JSONResponse(content=response_body)
