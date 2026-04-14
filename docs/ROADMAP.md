@@ -155,8 +155,15 @@
       Аудит-трейл: triggered_by, reason с PSI и списком признаков.
       71 новый тест (TestDriftAlert×5, TestLogAlertChannel×2, TestWebhookAlertChannel×2,
       TestAlertManager×5, TestDriftAlertAPIEndpoint×2, TestRetrainingNotify×8).
-- [ ] Write-Audit-Publish drift gates в feature store (Projects 09/10)
-      PSI-проверка при записи фичи через Evidently AI, CI-gate с порогом дрейфа.
+- [x] Write-Audit-Publish drift gates в feature store (Projects 09/10) — 2026-04-14
+      recsys/feature_store/wap.py: WAPGate class — write() → audit() → publish_or_quarantine().
+      PSI-гейт без внешних зависимостей (numpy only), threshold=0.2 (BCBS-стандарт).
+      AuditResult dataclass: status (published/quarantined/no_reference), psi, reason.
+      Cold-start: первый батч без reference → auto-publishes и устанавливает reference.
+      recsys/api/app.py: POST /features/wap — принимает батч фичей + опциональный reference,
+      возвращает AuditResult с полным audit-trail (draft_id, psi, reason, timestamp).
+      89/89 тестов зелёные (+17 новых: TestWAPGate×13, TestWAPAPIEndpoint×4).
+      Источники: lakefs.io WAP pattern 2024, Dagster WAP 2025, BCBS PSI thresholds 2011.
 - [ ] MMD drift detection + retraining trigger (Project 05 или 01)
       alibi-detect MMD-тест → Prometheus endpoint → MLflow retraining run.
       EU AI Act compliance: audit log для drift-событий.

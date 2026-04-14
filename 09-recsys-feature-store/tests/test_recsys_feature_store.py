@@ -545,9 +545,7 @@ class TestTwoTowerModel:
     ) -> None:
         """Уже просмотренные товары не попадают в рекомендации."""
         first_uid = int(users["user_id"][0])
-        rated = set(
-            interactions.filter(pl.col("user_id") == first_uid)["product_id"].to_list()
-        )
+        rated = set(interactions.filter(pl.col("user_id") == first_uid)["product_id"].to_list())
         recs = fitted_two_tower.recommend(first_uid, users, interactions, top_k=20)
         rec_ids = {iid for iid, _ in recs}
         assert len(rec_ids & rated) == 0, "Rated items must be excluded from recommendations"
@@ -575,9 +573,7 @@ class TestTwoTowerModel:
         recs = fitted_two_tower.recommend(99999, users, interactions, top_k=5)
         assert recs == []
 
-    def test_get_user_embedding_shape(
-        self, fitted_two_tower, users: pl.DataFrame
-    ) -> None:
+    def test_get_user_embedding_shape(self, fitted_two_tower, users: pl.DataFrame) -> None:
         """user_embedding имеет корректный размер и единичную норму."""
         first_uid = int(users["user_id"][0])
         emb = fitted_two_tower.get_user_embedding(first_uid, users)
@@ -682,7 +678,14 @@ class TestLLMReranker:
         """Каждый результат содержит обязательные ключи."""
         first_uid = int(users["user_id"][0])
         results = reranker.rerank(first_uid, candidates, products, users, top_k=3)
-        required_keys = {"item_id", "retrieval_score", "rerank_score", "category", "price_tier", "explanation"}
+        required_keys = {
+            "item_id",
+            "retrieval_score",
+            "rerank_score",
+            "category",
+            "price_tier",
+            "explanation",
+        }
         for item in results:
             assert required_keys.issubset(item.keys()), f"Missing keys in {item}"
 
@@ -743,3 +746,323 @@ class TestLLMReranker:
 
         assert len(final_recs) <= 5
         assert all("item_id" in r and "rerank_score" in r for r in final_recs)
+
+
+# ========== TestWAPGate: Write-Audit-Publish drift gate ==========
+
+
+class TestWAPGate:
+    """
+    Тесты Write-Audit-Publish gate для feature store.
+    Write-Audit-Publish drift gate tests.
+    """
+
+    def test_cold_start_no_reference_publishes(self) -> None:
+        """Первый батч без reference → статус 'no_reference', данные публикуются."""
+        from recsys.feature_store.wap import WAPGate
+
+        gate = WAPGate(psi_threshold=0.2)
+        result = gate.write_audit_publish("avg_rating", [1.0, 2.0, 3.0, 4.0, 5.0])
+
+        assert result.status == "no_reference"
+        assert result.passed is True
+        assert result.psi == 0.0
+        assert result.n_reference == 0
+        assert result.n_current == 5
+
+    def test_cold_start_sets_reference(self) -> None:
+        """После первого батча (cold start) reference устанавливается автоматически."""
+        from recsys.feature_store.wap import WAPGate
+
+        gate = WAPGate(psi_threshold=0.2)
+        gate.write_audit_publish("avg_rating", [1.0, 2.0, 3.0, 4.0, 5.0])
+
+        assert gate.has_reference("avg_rating")
+
+    def test_stable_batch_published(self) -> None:
+        """Батч из похожего распределения → PSI < threshold → 'published'."""
+        import numpy as np
+        from recsys.feature_store.wap import WAPGate
+
+        rng = np.random.default_rng(42)
+        reference = rng.normal(0.0, 1.0, 500).tolist()
+        current = rng.normal(0.0, 1.0, 500).tolist()  # то же распределение
+
+        gate = WAPGate(psi_threshold=0.2)
+        gate.set_reference("feature_x", reference)
+        result = gate.write_audit_publish("feature_x", current)
+
+        assert result.status == "published"
+        assert result.passed is True
+        assert result.psi < 0.2
+
+    def test_drifted_batch_quarantined(self) -> None:
+        """Батч со сдвинутым распределением → PSI > threshold → 'quarantined'."""
+        import numpy as np
+        from recsys.feature_store.wap import WAPGate
+
+        rng = np.random.default_rng(42)
+        reference = rng.normal(0.0, 1.0, 500).tolist()
+        current = rng.normal(5.0, 1.0, 500).tolist()  # сдвиг 5 сигм → большой PSI
+
+        gate = WAPGate(psi_threshold=0.2)
+        gate.set_reference("feature_x", reference)
+        result = gate.write_audit_publish("feature_x", current)
+
+        assert result.status == "quarantined"
+        assert result.passed is False
+        assert result.psi >= 0.2
+
+    def test_psi_value_in_result(self) -> None:
+        """AuditResult содержит корректное PSI-значение."""
+        import numpy as np
+        from recsys.feature_store.wap import WAPGate
+
+        rng = np.random.default_rng(7)
+        reference = rng.normal(0.0, 1.0, 300).tolist()
+        current = rng.normal(3.0, 1.0, 300).tolist()
+
+        gate = WAPGate(psi_threshold=0.2)
+        gate.set_reference("score", reference)
+        result = gate.write_audit_publish("score", current)
+
+        assert isinstance(result.psi, float)
+        assert result.psi > 0.0
+
+    def test_audit_log_grows(self) -> None:
+        """После каждого WAP-вызова audit_log увеличивается на 1."""
+        import numpy as np
+        from recsys.feature_store.wap import WAPGate
+
+        gate = WAPGate()
+        rng = np.random.default_rng(0)
+
+        for i in range(3):
+            gate.write_audit_publish("feat", rng.normal(0, 1, 100).tolist())
+            assert len(gate.get_audit_log()) == i + 1
+
+    def test_stable_batch_lands_in_production(self) -> None:
+        """Опубликованный батч доступен в production store."""
+        import numpy as np
+        from recsys.feature_store.wap import WAPGate
+
+        rng = np.random.default_rng(42)
+        reference = rng.normal(0.0, 1.0, 200).tolist()
+        current = rng.normal(0.0, 1.0, 200).tolist()
+
+        gate = WAPGate(psi_threshold=0.2)
+        gate.set_reference("feat", reference)
+        result = gate.write_audit_publish("feat", current)
+
+        assert result.passed
+        assert gate.get_production("feat") is not None
+        assert len(gate.get_production("feat")) == 200
+
+    def test_quarantined_batch_not_in_production(self) -> None:
+        """Забракованный батч НЕ попадает в production store."""
+        import numpy as np
+        from recsys.feature_store.wap import WAPGate
+
+        rng = np.random.default_rng(42)
+        reference = rng.normal(0.0, 1.0, 200).tolist()
+        drifted = rng.normal(10.0, 1.0, 200).tolist()
+
+        gate = WAPGate(psi_threshold=0.2)
+        gate.set_reference("feat", reference)
+        gate.write_audit_publish("feat", drifted)
+
+        # В production store должно быть пусто
+        assert gate.get_production("feat") is None
+
+    def test_staging_cleared_after_publish(self) -> None:
+        """После WAP staging-буфер очищается."""
+        import numpy as np
+        from recsys.feature_store.wap import WAPGate
+
+        gate = WAPGate(psi_threshold=0.2)
+        rng = np.random.default_rng(1)
+        values = rng.normal(0, 1, 100).tolist()
+
+        gate.write_audit_publish("f", values)
+        # После полного цикла staging пуст
+        assert gate.n_staging == 0
+
+    def test_step_by_step_write_audit_publish(self) -> None:
+        """Пошаговый вызов write → audit → publish работает идентично all-in-one."""
+        import numpy as np
+        from recsys.feature_store.wap import WAPGate
+
+        rng = np.random.default_rng(42)
+        reference = rng.normal(0.0, 1.0, 200).tolist()
+        current = rng.normal(0.0, 1.0, 200).tolist()
+
+        gate = WAPGate(psi_threshold=0.2)
+        gate.set_reference("f", reference)
+
+        draft_id = gate.write("f", current)
+        result = gate.audit(draft_id)
+        published = gate.publish(draft_id, result)
+
+        assert result.passed
+        assert published is True
+
+    def test_audit_unknown_draft_raises(self) -> None:
+        """audit() с несуществующим draft_id → KeyError."""
+        from recsys.feature_store.wap import WAPGate
+
+        gate = WAPGate()
+        with pytest.raises(KeyError):
+            gate.audit("nonexistent-draft-id")
+
+    def test_audit_result_to_dict_serializable(self) -> None:
+        """to_dict() возвращает JSON-сериализуемый словарь."""
+        import json
+
+        from recsys.feature_store.wap import WAPGate
+
+        gate = WAPGate()
+        result = gate.write_audit_publish("f", [1.0, 2.0, 3.0])
+        d = result.to_dict()
+        assert json.dumps(d)  # не бросает исключение
+        required_keys = {
+            "draft_id",
+            "feature_name",
+            "status",
+            "psi",
+            "threshold",
+            "passed",
+            "n_reference",
+            "n_current",
+            "timestamp",
+            "reason",
+        }
+        assert required_keys.issubset(d.keys())
+
+    def test_custom_psi_threshold(self) -> None:
+        """Строгий порог PSI=0.01 забраковывает даже умеренный дрейф."""
+        import numpy as np
+        from recsys.feature_store.wap import WAPGate
+
+        rng = np.random.default_rng(42)
+        reference = rng.normal(0.0, 1.0, 500).tolist()
+        # Небольшой сдвиг — умеренный PSI
+        current = rng.normal(0.5, 1.0, 500).tolist()
+
+        gate_strict = WAPGate(psi_threshold=0.01)
+        gate_strict.set_reference("feat", reference)
+        result = gate_strict.write_audit_publish("feat", current)
+
+        # При очень строгом пороге даже небольшой сдвиг → quarantined
+        assert result.threshold == 0.01
+
+
+# ========== TestWAPAPIEndpoint ==========
+
+
+class TestWAPAPIEndpoint:
+    """
+    Тесты API-эндпоинта POST /features/wap.
+    Tests for the /features/wap API endpoint.
+    """
+
+    @pytest.fixture(scope="class")
+    def client(self) -> TestClient:
+        """Отдельный клиент без сессии WAP-gate из TestAPI."""
+        from recsys.api.app import app
+
+        return TestClient(app)
+
+    def test_wap_cold_start(self, client: TestClient) -> None:
+        """Первый вызов без reference → статус 'no_reference', passed=True."""
+        import time
+
+        # Уникальное имя фичи, чтобы не пересекаться с другими тестами
+        feature_name = f"cold_start_test_{time.time_ns()}"
+        response = client.post(
+            "/features/wap",
+            json={
+                "feature_name": feature_name,
+                "values": [1.0, 2.0, 3.0, 4.0, 5.0],
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "no_reference"
+        assert data["passed"] is True
+        assert data["psi"] == 0.0
+        assert data["feature_name"] == feature_name
+
+    def test_wap_stable_batch_published(self, client: TestClient) -> None:
+        """Батч из стабильного распределения → 'published'."""
+        import time
+
+        import numpy as np
+
+        feature_name = f"stable_test_{time.time_ns()}"
+        rng = np.random.default_rng(42)
+        reference = rng.normal(0.0, 1.0, 300).tolist()
+        current = rng.normal(0.0, 1.0, 300).tolist()
+
+        response = client.post(
+            "/features/wap",
+            json={
+                "feature_name": feature_name,
+                "values": current,
+                "reference": reference,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "published"
+        assert data["passed"] is True
+        assert data["psi"] < 0.2
+
+    def test_wap_drifted_batch_quarantined(self, client: TestClient) -> None:
+        """Батч со сдвигом → 'quarantined', passed=False."""
+        import time
+
+        import numpy as np
+
+        feature_name = f"drift_test_{time.time_ns()}"
+        rng = np.random.default_rng(7)
+        reference = rng.normal(0.0, 1.0, 500).tolist()
+        drifted = rng.normal(5.0, 1.0, 500).tolist()
+
+        response = client.post(
+            "/features/wap",
+            json={
+                "feature_name": feature_name,
+                "values": drifted,
+                "reference": reference,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "quarantined"
+        assert data["passed"] is False
+        assert data["psi"] >= 0.2
+
+    def test_wap_response_has_required_fields(self, client: TestClient) -> None:
+        """Ответ содержит все обязательные поля."""
+        import time
+
+        feature_name = f"fields_test_{time.time_ns()}"
+        response = client.post(
+            "/features/wap",
+            json={"feature_name": feature_name, "values": [1.0, 2.0, 3.0]},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        required = {
+            "draft_id",
+            "feature_name",
+            "status",
+            "psi",
+            "threshold",
+            "passed",
+            "n_reference",
+            "n_current",
+            "timestamp",
+            "reason",
+        }
+        assert required.issubset(data.keys())

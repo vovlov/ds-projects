@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from recsys.data.load import load_all_data
+from recsys.feature_store.wap import WAPGate
 from recsys.models.collaborative import CollaborativeRecommender
 from recsys.models.content_based import get_popular_items
 
@@ -46,6 +47,32 @@ class PopularResponse(BaseModel):
     recommendations: list[RecommendationItem]
 
 
+class WAPRequest(BaseModel):
+    """Запрос на WAP drift check для батча фичей.
+    Request body for Write-Audit-Publish drift gate."""
+
+    feature_name: str
+    values: list[float]
+    reference: list[float] | None = None
+    psi_threshold: float = 0.2
+
+
+class WAPResponse(BaseModel):
+    """Результат WAP drift check.
+    Write-Audit-Publish drift gate result."""
+
+    draft_id: str
+    feature_name: str
+    status: str  # "published" | "quarantined" | "no_reference"
+    psi: float
+    threshold: float
+    passed: bool
+    n_reference: int
+    n_current: int
+    timestamp: str
+    reason: str
+
+
 class HealthResponse(BaseModel):
     """Статус здоровья сервиса / Health check response."""
 
@@ -62,6 +89,18 @@ _recommender: CollaborativeRecommender | None = None
 _interactions = None
 _users = None
 _products = None
+
+# WAP gate — singleton, хранит reference между вызовами
+# WAP gate singleton — persists reference distributions across requests
+_wap_gate: WAPGate | None = None
+
+
+def _get_wap_gate(psi_threshold: float = 0.2) -> WAPGate:
+    """Ленивая инициализация WAP gate / Lazy WAP gate initialization."""
+    global _wap_gate
+    if _wap_gate is None:
+        _wap_gate = WAPGate(psi_threshold=psi_threshold)
+    return _wap_gate
 
 
 def _get_recommender() -> CollaborativeRecommender:
@@ -119,6 +158,38 @@ def recommend(
         recommendations=items,
         method=method,
     )
+
+
+@app.post("/features/wap", response_model=WAPResponse)
+def features_wap(request: WAPRequest) -> WAPResponse:
+    """
+    Write-Audit-Publish drift gate для батча фичей.
+    WAP drift gate for a feature batch.
+
+    Принимает батч новых значений фичи и проверяет PSI-дрейф
+    относительно сохранённого reference-распределения.
+    Если drift < psi_threshold — публикует; иначе — карантин.
+
+    Accepts a new feature batch and checks PSI drift against stored reference.
+    If PSI < psi_threshold → "published"; else → "quarantined".
+
+    Поле reference (опционально):
+    - Если передано — устанавливается как новый reference перед аудитом.
+    - Если не передано — используется ранее установленное (или холодный старт).
+
+    Optional `reference` field:
+    - If provided — set as new reference before auditing.
+    - If not provided — use previously stored reference (or cold start).
+    """
+    gate = _get_wap_gate(psi_threshold=request.psi_threshold)
+
+    # Позволяем переопределить reference через запрос (например, из training pipeline)
+    # Allow caller to update reference (e.g. after model retraining)
+    if request.reference is not None:
+        gate.set_reference(request.feature_name, request.reference)
+
+    result = gate.write_audit_publish(request.feature_name, request.values)
+    return WAPResponse(**result.to_dict())
 
 
 @app.get("/popular", response_model=PopularResponse)
