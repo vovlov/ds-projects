@@ -164,11 +164,19 @@
       возвращает AuditResult с полным audit-trail (draft_id, psi, reason, timestamp).
       89/89 тестов зелёные (+17 новых: TestWAPGate×13, TestWAPAPIEndpoint×4).
       Источники: lakefs.io WAP pattern 2024, Dagster WAP 2025, BCBS PSI thresholds 2011.
-- [ ] MMD drift detection + retraining trigger (Project 05 или 01)
-      alibi-detect MMD-тест → Prometheus endpoint → MLflow retraining run.
-      EU AI Act compliance: audit log для drift-событий.
-      Источник: Evidently AI v0.5+, Gartner MLOps 2025.
-      Источник: Medium "Data Quality Assurance in MLOps" Mar 2026.
+- [x] MMD drift detection + retraining trigger (Project 05) — 2026-04-15
+      anomaly/drift/mmd.py: compute_mmd_rbf() (RBF-ядро Гаусса, numpy-only, без alibi-detect),
+      _median_heuristic_gamma() (Gretton 2012), bootstrap_mmd_threshold() (перестановочный
+      bootstrap, контроль α), MMDDriftDetector (null-распределение → p-value), DriftResult
+      (audit_id UUID + ISO 8601 timestamp, EU AI Act Article 9 compliance).
+      anomaly/retraining/trigger.py: AnomalyRetrainingTrigger — MMD-дрейф → решение о
+      переобучении, MLflow-аудит (graceful degradation), triggered_by audit-trail.
+      anomaly/api/app.py: POST /drift/check (reference vs current MMD + bootstrap-порог),
+      GET /drift/status (статус для Grafana/Prometheus alerting),
+      GET /health расширен полем last_drift.
+      57/57 тестов зелёные (+26 новых: TestMMDCore×9, TestMMDDriftDetector×7,
+      TestAnomalyRetrainingTrigger×5, TestMMDDriftAPIEndpoint×5).
+      Источник: Gretton et al. 2012 JMLR, Evidently AI v0.5+, EU AI Act Article 9.
 
 ---
 
