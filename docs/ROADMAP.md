@@ -93,7 +93,14 @@
       Источник: arxiv 2503.13195, FinGuard-GNN 2025.
 
 **Iteration 11-15: Real Data + Deployment**
-- [ ] Streamlit Cloud деплой для 3 проектов
+- [x] Streamlit Cloud деплой для 3 проектов — 2026-04-16
+      Project 01 (Churn): streamlit_app.py, requirements.txt, .streamlit/config.toml (red theme)
+      Project 07 (Pricing): streamlit_app.py, requirements.txt, .streamlit/config.toml (blue theme)
+      Project 05 (Anomaly): anomaly/dashboard/app.py (3 вкладки: Live Monitor, Drift MMD, Architecture),
+        anomaly/dashboard/utils.py (generate_metric_stream, compute_detection_summary, ref/cur generators),
+        streamlit_app.py, requirements.txt, .streamlit/config.toml (dark SRE theme).
+      18 новых тестов: TestDashboardGenerateMetricStream×9, TestDashboardComputeDetectionSummary×5,
+        TestDashboardReferenceCurrentData×4. 75/75 зелёных.
 - [x] MovieLens-25M для RecSys (Project 09) — 2026-04-05
       recsys/data/movielens.py: generate_mock_movielens() (mock для CI), load_movielens()
       с graceful fallback, compute_movielens_stats() (sparsity, avg_rating, top_genres),

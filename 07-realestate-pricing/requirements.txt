@@ -1,0 +1,7 @@
+# Streamlit Cloud requirements for Real Estate Pricing demo
+# Pinned to minor versions for reproducibility
+streamlit>=1.32.0,<2.0
+plotly>=5.20.0,<6.0
+polars>=0.20.0,<2.0
+numpy>=1.26.0,<3.0
+catboost>=1.2.0,<2.0

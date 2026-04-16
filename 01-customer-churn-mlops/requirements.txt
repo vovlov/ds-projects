@@ -1,0 +1,7 @@
+# Streamlit Cloud requirements for Customer Churn MLOps demo
+streamlit>=1.32.0,<2.0
+plotly>=5.20.0,<6.0
+polars>=0.20.0,<2.0
+numpy>=1.26.0,<3.0
+catboost>=1.2.0,<2.0
+scikit-learn>=1.4.0,<2.0

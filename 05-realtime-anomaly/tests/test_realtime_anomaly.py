@@ -767,3 +767,184 @@ class TestMMDDriftAPIEndpoint:
         assert "last_drift" in data
         assert "is_drift" in data["last_drift"]
         assert "mmd_statistic" in data["last_drift"]
+
+
+# ---------------------------------------------------------------------------
+# Tests for Dashboard utils (anomaly/dashboard/utils.py)
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardGenerateMetricStream:
+    """Тесты для generate_metric_stream: форма, диапазоны, воспроизводимость."""
+
+    def test_output_keys(self):
+        """Должен вернуть ключи cpu, latency, requests."""
+        from anomaly.dashboard.utils import generate_metric_stream
+
+        stream = generate_metric_stream(n_points=50)
+        assert set(stream.keys()) == {"cpu", "latency", "requests"}
+
+    def test_output_shape(self):
+        """Все серии должны иметь одинаковую длину = n_points."""
+        from anomaly.dashboard.utils import generate_metric_stream
+
+        for n in [50, 100, 200]:
+            stream = generate_metric_stream(n_points=n)
+            for key in ("cpu", "latency", "requests"):
+                assert len(stream[key]) == n, f"{key} length mismatch for n={n}"
+
+    def test_cpu_range(self):
+        """CPU должен быть в диапазоне [5, 95] без аномалий."""
+        from anomaly.dashboard.utils import generate_metric_stream
+
+        stream = generate_metric_stream(n_points=200, inject_anomaly=False)
+        assert stream["cpu"].min() >= 5.0
+        assert stream["cpu"].max() <= 95.0
+
+    def test_latency_positive(self):
+        """Latency должна быть строго положительной."""
+        from anomaly.dashboard.utils import generate_metric_stream
+
+        stream = generate_metric_stream(n_points=200)
+        assert (stream["latency"] > 0).all()
+
+    def test_requests_positive(self):
+        """Requests должны быть неотрицательными."""
+        from anomaly.dashboard.utils import generate_metric_stream
+
+        stream = generate_metric_stream(n_points=200)
+        assert (stream["requests"] >= 0).all()
+
+    def test_reproducible_with_same_seed(self):
+        """Одинаковый seed → идентичные результаты."""
+        from anomaly.dashboard.utils import generate_metric_stream
+
+        s1 = generate_metric_stream(n_points=100, seed=7)
+        s2 = generate_metric_stream(n_points=100, seed=7)
+        for key in ("cpu", "latency", "requests"):
+            np.testing.assert_array_equal(s1[key], s2[key])
+
+    def test_different_seeds_differ(self):
+        """Разные seeds → разные данные."""
+        from anomaly.dashboard.utils import generate_metric_stream
+
+        s1 = generate_metric_stream(n_points=100, seed=0)
+        s2 = generate_metric_stream(n_points=100, seed=1)
+        assert not np.array_equal(s1["cpu"], s2["cpu"])
+
+    def test_inject_anomaly_raises_cpu(self):
+        """С аномалией CPU в конце серии должен быть выше нормального уровня."""
+        from anomaly.dashboard.utils import generate_metric_stream
+
+        n = 200
+        normal = generate_metric_stream(n_points=n, inject_anomaly=False, seed=42)
+        anomalous = generate_metric_stream(
+            n_points=n, inject_anomaly=True, anomaly_start=150, anomaly_magnitude=5.0, seed=42
+        )
+        # Аномалия в точках 150-200: среднее CPU должно вырасти
+        cpu_normal_tail = float(np.mean(normal["cpu"][150:]))
+        cpu_anomaly_tail = float(np.mean(anomalous["cpu"][150:]))
+        assert cpu_anomaly_tail > cpu_normal_tail
+
+    def test_no_anomaly_without_inject(self):
+        """Без inject обе серии одинаковы при одинаковом seed."""
+        from anomaly.dashboard.utils import generate_metric_stream
+
+        s = generate_metric_stream(n_points=100, inject_anomaly=False, seed=0)
+        # Просто проверяем что данные разумные — нет NaN, нет Inf
+        for key in ("cpu", "latency", "requests"):
+            assert np.isfinite(s[key]).all(), f"{key} contains non-finite values"
+
+
+class TestDashboardComputeDetectionSummary:
+    """Тесты для compute_detection_summary."""
+
+    def test_all_normal(self):
+        """Нет аномалий → n_anomalies=0, rate=0."""
+        from anomaly.dashboard.utils import compute_detection_summary
+
+        preds = np.zeros(100, dtype=int)
+        scores = np.random.default_rng(0).uniform(0, 1, 100)
+        summary = compute_detection_summary(preds, scores)
+        assert summary["n_anomalies"] == 0
+        assert summary["anomaly_rate"] == 0.0
+        assert summary["n_total"] == 100
+
+    def test_all_anomaly(self):
+        """Все аномалии → rate=1."""
+        from anomaly.dashboard.utils import compute_detection_summary
+
+        preds = np.ones(50, dtype=int)
+        scores = np.full(50, 5.0)
+        summary = compute_detection_summary(preds, scores)
+        assert summary["n_anomalies"] == 50
+        assert summary["anomaly_rate"] == 1.0
+
+    def test_partial_anomalies(self):
+        """10 из 100 → rate=0.1."""
+        from anomaly.dashboard.utils import compute_detection_summary
+
+        preds = np.zeros(100, dtype=int)
+        preds[:10] = 1
+        scores = np.ones(100) * 2.0
+        summary = compute_detection_summary(preds, scores)
+        assert summary["n_anomalies"] == 10
+        assert abs(summary["anomaly_rate"] - 0.1) < 1e-9
+
+    def test_max_score(self):
+        """max_score должен совпадать с np.max(scores)."""
+        from anomaly.dashboard.utils import compute_detection_summary
+
+        scores = np.array([1.0, 3.5, 2.2, 4.7, 0.5])
+        preds = np.zeros(5, dtype=int)
+        summary = compute_detection_summary(preds, scores)
+        assert abs(summary["max_score"] - 4.7) < 1e-9
+
+    def test_empty_returns_zero_rate(self):
+        """Пустые массивы → anomaly_rate=0 без ZeroDivisionError."""
+        from anomaly.dashboard.utils import compute_detection_summary
+
+        summary = compute_detection_summary(np.array([]), np.array([]))
+        assert summary["anomaly_rate"] == 0.0
+        assert summary["n_total"] == 0
+
+
+class TestDashboardReferenceCurrentData:
+    """Тесты для generate_reference_data и generate_current_data."""
+
+    def test_reference_shape(self):
+        """reference данные: список точек, каждая точка [cpu, lat, req]."""
+        from anomaly.dashboard.utils import generate_reference_data
+
+        data = generate_reference_data(n_points=100)
+        assert len(data) == 100
+        assert all(len(p) == 3 for p in data)
+
+    def test_current_shape(self):
+        """current данные: список точек правильной формы."""
+        from anomaly.dashboard.utils import generate_current_data
+
+        data = generate_current_data(n_points=50)
+        assert len(data) == 50
+        assert all(len(p) == 3 for p in data)
+
+    def test_reference_values_numeric(self):
+        """Все значения в reference данных — числа."""
+        from anomaly.dashboard.utils import generate_reference_data
+
+        data = generate_reference_data(n_points=30)
+        for point in data:
+            for val in point:
+                assert isinstance(val, float), f"Expected float, got {type(val)}"
+
+    def test_drift_shifts_distribution(self):
+        """С inject_drift=True среднее current должно отличаться от reference."""
+        from anomaly.dashboard.utils import generate_current_data, generate_reference_data
+
+        ref = np.array(generate_reference_data(n_points=200, seed=0))
+        cur_drift = np.array(generate_current_data(n_points=200, inject_drift=True, drift_magnitude=6.0, seed=99))
+
+        # CPU: среднее при дрейфе должно быть выше (аномалия подняла CPU)
+        ref_mean_cpu = float(np.mean(ref[:, 0]))
+        cur_mean_cpu = float(np.mean(cur_drift[:, 0]))
+        assert cur_mean_cpu > ref_mean_cpu, "Drift injection should raise CPU mean"
