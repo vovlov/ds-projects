@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -134,7 +134,7 @@ def create_alert_from_report(
         max_psi=round(max_psi, 6),
         columns_checked=drift_report.get("columns_checked", len(details)),
         columns_with_drift=drift_report.get("columns_with_drift", len(features_drifted)),
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         source=source,
         details=drift_report,
     )

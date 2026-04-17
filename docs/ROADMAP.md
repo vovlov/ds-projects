@@ -189,7 +189,17 @@
 
 ## Фаза 2: Product-Level (2-4 недели)
 
-- [ ] mkdocs documentation site
+- [x] mkdocs documentation site — 2026-04-17
+      mkdocs.yml: Material theme (indigo, dark/light toggle), tabbed navigation, Mermaid diagrams,
+      mkdocstrings для авто-API из docstrings, поиск на EN+RU.
+      docs/index.md: landing page с badge'ами, сравнительной таблицей, quick start, tech stack tabs.
+      docs/projects/: 10 страниц (по одной на проект) с архитектурными диаграммами, ключевыми
+      компонентами, таблицами API endpoints, примерами. docs/architecture.md, docs/mlops-maturity.md,
+      docs/evolution.md, docs/contributing.md.
+      .github/workflows/docs.yml: автодеплой на GitHub Pages при push в main (paths: docs/**, mkdocs.yml).
+      pyproject.toml: новый extras [docs] = mkdocs-material>=9.5 + mkdocstrings[python]>=0.27.
+      Бонус: исправлены pre-existing ruff ошибки B905 (zip без strict=) в Project 06,
+      N803 (noqa) в Project 05. 131/131 тестов зелёных (75+56).
 - [ ] Model serving via BentoML (not just FastAPI)
 - [ ] A/B testing framework
 - [ ] Feature store integration (Feast)

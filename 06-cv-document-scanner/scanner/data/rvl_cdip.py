@@ -329,6 +329,7 @@ def compute_dataset_stats(df: pl.DataFrame) -> dict[str, object]:
         zip(
             class_counts["doc_type"].to_list(),
             class_counts["len"].to_list(),
+            strict=False,
         )
     )
 
@@ -338,7 +339,9 @@ def compute_dataset_stats(df: pl.DataFrame) -> dict[str, object]:
     split_counts: dict[str, int] = {}
     if "split" in df.columns:
         split_df = df.group_by("split").len().sort("split")
-        split_counts = dict(zip(split_df["split"].to_list(), split_df["len"].to_list()))
+        split_counts = dict(
+            zip(split_df["split"].to_list(), split_df["len"].to_list(), strict=False)
+        )
 
     return {
         "n_total": n_total,

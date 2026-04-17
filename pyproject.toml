@@ -19,6 +19,11 @@ dev = [
     "httpx>=0.27",
     "pre-commit>=4.0",
 ]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.27",
+    "mkdocs-gen-files>=0.5",
+]
 churn = [
     "polars>=1.0",
     "catboost>=1.2",

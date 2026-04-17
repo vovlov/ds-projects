@@ -942,7 +942,9 @@ class TestDashboardReferenceCurrentData:
         from anomaly.dashboard.utils import generate_current_data, generate_reference_data
 
         ref = np.array(generate_reference_data(n_points=200, seed=0))
-        cur_drift = np.array(generate_current_data(n_points=200, inject_drift=True, drift_magnitude=6.0, seed=99))
+        cur_drift = np.array(
+            generate_current_data(n_points=200, inject_drift=True, drift_magnitude=6.0, seed=99)
+        )
 
         # CPU: среднее при дрейфе должно быть выше (аномалия подняла CPU)
         ref_mean_cpu = float(np.mean(ref[:, 0]))

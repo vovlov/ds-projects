@@ -1,0 +1,106 @@
+site_name: DS Projects — ML Portfolio
+site_description: Ten production-grade ML projects from classical predictive analytics to LLM fine-tuning
+site_author: Vladimir Lovtsov
+site_url: https://vovlov.github.io/ds-projects/
+repo_url: https://github.com/vovlov/ds-projects
+repo_name: vovlov/ds-projects
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: en
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - search.highlight
+    - search.share
+    - search.suggest
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search:
+      lang: [en, ru]
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_category_heading: true
+            members_order: source
+            show_signature_annotations: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/vovlov/ds-projects
+  analytics:
+    provider: google
+    property: !ENV [GOOGLE_ANALYTICS_KEY, ""]
+
+nav:
+  - Home: index.md
+  - Projects:
+    - Overview: projects/index.md
+    - "01 · Customer Churn MLOps": projects/01-churn.md
+    - "02 · RAG Enterprise": projects/02-rag.md
+    - "03 · NER Service": projects/03-ner.md
+    - "04 · Graph Fraud Detection": projects/04-fraud.md
+    - "05 · Realtime Anomaly": projects/05-anomaly.md
+    - "06 · CV Document Scanner": projects/06-scanner.md
+    - "07 · Real Estate Pricing": projects/07-pricing.md
+    - "08 · LLM Code Review": projects/08-review.md
+    - "09 · RecSys Feature Store": projects/09-recsys.md
+    - "10 · Data Quality Platform": projects/10-quality.md
+  - Architecture:
+    - Decisions: architecture.md
+    - MLOps Maturity: mlops-maturity.md
+    - Evolution: evolution.md
+  - Contributing: contributing.md

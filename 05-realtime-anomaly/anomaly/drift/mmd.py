@@ -46,7 +46,9 @@ _GAMMA_AUTO = "auto"
 
 
 def _rbf_kernel_matrix(  # noqa: N803
-    X: np.ndarray, Y: np.ndarray, gamma: float  # noqa: N803
+    X: np.ndarray,  # noqa: N803
+    Y: np.ndarray,  # noqa: N803
+    gamma: float,
 ) -> np.ndarray:
     """Вычислить матрицу ядра RBF K[i,j] = exp(-γ ‖X[i] - Y[j]‖²).
 
@@ -67,7 +69,9 @@ def _rbf_kernel_matrix(  # noqa: N803
 
 
 def _median_heuristic_gamma(  # noqa: N803
-    X: np.ndarray, Y: np.ndarray, subsample: int = 500  # noqa: N803
+    X: np.ndarray,  # noqa: N803
+    Y: np.ndarray,  # noqa: N803
+    subsample: int = 500,
 ) -> float:
     """Выбрать gamma по медианной эвристике Гретона.
 
