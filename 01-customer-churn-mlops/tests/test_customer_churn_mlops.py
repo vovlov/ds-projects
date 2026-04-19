@@ -506,3 +506,263 @@ class TestRetrainingNotify:
         response = client.post("/retraining/notify", json=payload)
         data = response.json()
         assert "MonthlyCharges" in data["reason"] or "tenure" in data["reason"]
+
+
+# ---------------------------------------------------------------------------
+# BentoML Serving Tests
+# ---------------------------------------------------------------------------
+
+# Module-level mock models — локальные классы нельзя pickle,
+# поэтому определяем здесь, где pickle может найти их по имени.
+
+
+class _MockModelHigh:
+    """Mock: churn_proba=0.7 (high risk)."""
+
+    def predict_proba(self, X):  # noqa: N803
+        return np.array([[0.3, 0.7]] * len(X))
+
+
+class _MockModelLow:
+    """Mock: churn_proba=0.15 (low risk)."""
+
+    def predict_proba(self, X):  # noqa: N803
+        return np.array([[0.85, 0.15]] * len(X))
+
+
+class _MockModelMedium:
+    """Mock: churn_proba=0.6 (medium risk)."""
+
+    def predict_proba(self, X):  # noqa: N803
+        return np.array([[0.4, 0.6]] * len(X))
+
+
+class _MockModelAny:
+    """Mock: churn_proba=0.4 (medium risk boundary)."""
+
+    def predict_proba(self, X):  # noqa: N803
+        return np.array([[0.5, 0.5]] * len(X))
+
+
+def _make_churn_input():
+    """Вспомогательный factory для ChurnInput в тестах."""
+    from churn.serving.bento_service import ChurnInput
+
+    return ChurnInput(
+        gender="Female",
+        SeniorCitizen=0,
+        Partner="No",
+        Dependents="No",
+        tenure=12,
+        PhoneService="Yes",
+        MultipleLines="No",
+        InternetService="Fiber optic",
+        OnlineSecurity="No",
+        OnlineBackup="No",
+        DeviceProtection="No",
+        TechSupport="No",
+        StreamingTV="No",
+        StreamingMovies="No",
+        Contract="Month-to-month",
+        PaperlessBilling="Yes",
+        PaymentMethod="Electronic check",
+        MonthlyCharges=70.35,
+        TotalCharges=844.2,
+    )
+
+
+class TestBentoService:
+    """Тесты BentoML serving layer / Tests for BentoML serving module.
+
+    Все тесты работают без установленного bentoml — graceful degradation.
+    """
+
+    def test_is_available_returns_bool(self):
+        """is_available() должна возвращать bool независимо от среды."""
+        from churn.serving.bento_service import is_available
+
+        assert isinstance(is_available(), bool)
+
+    def test_module_importable_without_bentoml(self):
+        """Модуль импортируется без bentoml — никаких ImportError."""
+        import churn.serving.bento_service as svc
+
+        assert hasattr(svc, "is_available")
+        assert hasattr(svc, "ChurnPredictor")
+        assert hasattr(svc, "ChurnInput")
+        assert hasattr(svc, "ChurnPrediction")
+        assert hasattr(svc, "save_to_bentoml")
+
+    def test_churn_input_dataclass(self):
+        """ChurnInput создаётся как dataclass с правильными полями."""
+        inp = _make_churn_input()
+        assert inp.gender == "Female"
+        assert inp.SeniorCitizen == 0
+        assert inp.MonthlyCharges == pytest.approx(70.35)
+        assert inp.tenure == 12
+
+    def test_churn_prediction_dataclass(self):
+        """ChurnPrediction хранит все поля включая model_version."""
+        from churn.serving.bento_service import ChurnPrediction
+
+        pred = ChurnPrediction(
+            churn_probability=0.75,
+            churn_prediction=True,
+            risk_level="high",
+        )
+        assert pred.churn_probability == pytest.approx(0.75)
+        assert pred.churn_prediction is True
+        assert pred.risk_level == "high"
+        assert pred.model_version == "v1"  # default
+
+    def test_churn_prediction_custom_version(self):
+        """model_version можно переопределить для A/B тестирования."""
+        from churn.serving.bento_service import ChurnPrediction
+
+        pred = ChurnPrediction(
+            churn_probability=0.3,
+            churn_prediction=False,
+            risk_level="low",
+            model_version="catboost-v2",
+        )
+        assert pred.model_version == "catboost-v2"
+
+    def test_classify_risk_thresholds(self):
+        """Пороговая логика: 0.7 = high, 0.4 = medium, < 0.4 = low."""
+        from churn.serving.bento_service import ChurnPredictor
+
+        assert ChurnPredictor._classify_risk(0.0) == "low"
+        assert ChurnPredictor._classify_risk(0.39) == "low"
+        assert ChurnPredictor._classify_risk(0.4) == "medium"
+        assert ChurnPredictor._classify_risk(0.69) == "medium"
+        assert ChurnPredictor._classify_risk(0.7) == "high"
+        assert ChurnPredictor._classify_risk(1.0) == "high"
+
+    def test_predictor_missing_model_raises(self, tmp_path):
+        """FileNotFoundError при обращении к несуществующему артефакту."""
+        from churn.serving.bento_service import ChurnPredictor
+
+        predictor = ChurnPredictor(model_path=tmp_path / "nonexistent.pkl")
+        with pytest.raises(FileNotFoundError, match="Model artifact not found"):
+            predictor.predict(_make_churn_input())
+
+    def test_predictor_lazy_load(self, tmp_path):
+        """Модель не загружается при создании predictor'а — только при predict()."""
+        from churn.serving.bento_service import ChurnPredictor
+
+        # Инициализация с несуществующим путём не бросает исключений
+        predictor = ChurnPredictor(model_path=tmp_path / "nonexistent.pkl")
+        assert predictor._model is None  # ещё не загружен
+
+    def test_predictor_with_mock_model(self, tmp_path):
+        """Predictor корректно работает с mock sklearn-совместимой моделью."""
+        import pickle
+
+        from churn.serving.bento_service import ChurnPredictor
+
+        model_path = tmp_path / "model.pkl"
+        with open(model_path, "wb") as f:
+            pickle.dump(_MockModelHigh(), f)
+
+        predictor = ChurnPredictor(model_path=model_path, model_version="mock-v1")
+        result = predictor.predict(_make_churn_input())
+
+        assert result.churn_probability == pytest.approx(0.7, abs=0.001)
+        assert result.churn_prediction is True
+        assert result.risk_level == "high"
+        assert result.model_version == "mock-v1"
+
+    def test_predictor_low_proba_mock(self, tmp_path):
+        """Predictor корректно классифицирует низкую вероятность оттока."""
+        import pickle
+
+        from churn.serving.bento_service import ChurnPredictor
+
+        model_path = tmp_path / "low_model.pkl"
+        with open(model_path, "wb") as f:
+            pickle.dump(_MockModelLow(), f)
+
+        predictor = ChurnPredictor(model_path=model_path)
+        result = predictor.predict(_make_churn_input())
+
+        assert result.churn_probability == pytest.approx(0.15, abs=0.001)
+        assert result.churn_prediction is False
+        assert result.risk_level == "low"
+
+    def test_batch_predict_multiple_inputs(self, tmp_path):
+        """predict_batch возвращает результаты для каждого входа."""
+        import pickle
+
+        from churn.serving.bento_service import ChurnPredictor
+
+        model_path = tmp_path / "batch_model.pkl"
+        with open(model_path, "wb") as f:
+            pickle.dump(_MockModelMedium(), f)
+
+        predictor = ChurnPredictor(model_path=model_path)
+        inputs = [_make_churn_input() for _ in range(5)]
+        results = predictor.predict_batch(inputs)
+
+        assert len(results) == 5
+        for r in results:
+            assert r.churn_probability == pytest.approx(0.6, abs=0.001)
+            assert r.churn_prediction is True
+            assert r.risk_level == "medium"
+
+    def test_batch_predict_empty_list(self, tmp_path):
+        """predict_batch с пустым списком возвращает пустой список."""
+        import pickle
+
+        from churn.serving.bento_service import ChurnPredictor
+
+        model_path = tmp_path / "any_model.pkl"
+        with open(model_path, "wb") as f:
+            pickle.dump(_MockModelAny(), f)
+
+        predictor = ChurnPredictor(model_path=model_path)
+        results = predictor.predict_batch([])
+        assert results == []
+
+    def test_save_to_bentoml_without_bentoml(self):
+        """save_to_bentoml() возвращает None если bentoml не установлен."""
+        from churn.serving.bento_service import is_available, save_to_bentoml
+
+        if is_available():
+            pytest.skip("BentoML is installed — skip graceful degradation test")
+
+        result = save_to_bentoml()
+        assert result is None
+
+    def test_save_to_bentoml_missing_artifact(self, tmp_path):
+        """save_to_bentoml() возвращает None если артефакт отсутствует."""
+        from churn.serving.bento_service import is_available, save_to_bentoml
+
+        if is_available():
+            pytest.skip("BentoML is installed — different code path")
+
+        result = save_to_bentoml(model_path=tmp_path / "nonexistent.pkl")
+        assert result is None
+
+    def test_churn_service_exists_when_bentoml_available(self):
+        """ChurnService существует только если bentoml установлен."""
+        import churn.serving.bento_service as svc
+        from churn.serving.bento_service import is_available
+
+        if is_available():
+            assert hasattr(svc, "ChurnService")
+        else:
+            assert not hasattr(svc, "ChurnService")
+
+    def test_predictor_model_version_default(self, tmp_path):
+        """По умолчанию model_version='v1'."""
+        import pickle
+
+        from churn.serving.bento_service import ChurnPredictor
+
+        p = tmp_path / "m.pkl"
+        with open(p, "wb") as f:
+            pickle.dump(_MockModelLow(), f)
+
+        predictor = ChurnPredictor(model_path=p)
+        result = predictor.predict(_make_churn_input())
+        assert result.model_version == "v1"

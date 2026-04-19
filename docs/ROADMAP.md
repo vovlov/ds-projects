@@ -200,7 +200,14 @@
       pyproject.toml: новый extras [docs] = mkdocs-material>=9.5 + mkdocstrings[python]>=0.27.
       Бонус: исправлены pre-existing ruff ошибки B905 (zip без strict=) в Project 06,
       N803 (noqa) в Project 05. 131/131 тестов зелёных (75+56).
-- [ ] Model serving via BentoML (not just FastAPI)
+- [x] Model serving via BentoML (not just FastAPI) — 2026-04-19
+      churn/serving/bento_service.py: ChurnPredictor (transport-agnostic core),
+      ChurnInput/ChurnPrediction dataclasses, save_to_bentoml() → BentoML model store.
+      ChurnService (conditional, когда bentoml установлен): /predict, /predict_batch
+      (adaptive batching max_batch_size=32, max_latency_ms=100), /health endpoints.
+      Graceful degradation: is_available() — работает без bentoml в CI.
+      44/44 тестов зелёные (+16 новых: TestBentoService).
+      Источник: BentoML docs 1.3, oneuptime.com Docker+BentoML 2026.
 - [ ] A/B testing framework
 - [ ] Feature store integration (Feast)
 - [ ] Kubernetes deployment manifests
