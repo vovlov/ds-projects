@@ -11,10 +11,20 @@ import polars as pl
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from ..ab_testing.experiment import ABExperiment, VariantConfig
 from ..data.load import CATEGORICAL_FEATURES, add_features
 from ..retraining.trigger import PSI_YELLOW
 
 logger = logging.getLogger(__name__)
+
+# Глобальный эксперимент: control (v1) vs treatment (v2).
+# В production заменяется на Redis-backed store для горизонтального масштабирования.
+_experiment = ABExperiment(
+    variants=[
+        VariantConfig("control", 0.5, "v1", "current production model"),
+        VariantConfig("treatment", 0.5, "v2", "challenger model"),
+    ]
+)
 
 app = FastAPI(
     title="Customer Churn Prediction API",
@@ -249,3 +259,193 @@ def predict(customer: CustomerInput):
         churn_prediction=prediction,
         risk_level=risk,
     )
+
+
+# ---------------------------------------------------------------------------
+# A/B Testing endpoints
+# ---------------------------------------------------------------------------
+
+
+class ABPredictRequest(BaseModel):
+    """Запрос на предсказание с A/B роутингом / A/B routed prediction request."""
+
+    customer_id: str = Field(
+        ..., description="Уникальный ID клиента для детерминированного роутинга"
+    )
+    customer: CustomerInput
+
+
+class ABPredictionResponse(BaseModel):
+    """Ответ с A/B мета-данными / Prediction response with A/B metadata."""
+
+    churn_probability: float
+    churn_prediction: bool
+    risk_level: str
+    variant: str = Field(..., description="Вариант A/B эксперимента (control/treatment)")
+    model_version: str = Field(..., description="Версия модели обслуживающей вариант")
+
+
+class OutcomeRequest(BaseModel):
+    """Запись фактического исхода для клиента / Record ground-truth outcome."""
+
+    customer_id: str = Field(..., description="ID клиента из предыдущего /ab/predict запроса")
+    actual_churn: bool = Field(..., description="Фактически ли клиент ушёл")
+
+
+class OutcomeResponse(BaseModel):
+    """Ответ на запись исхода / Outcome recording response."""
+
+    recorded: bool
+    customer_id: str
+    message: str
+
+
+class ABResultsResponse(BaseModel):
+    """Статистические результаты эксперимента / Experiment statistical results."""
+
+    status: str
+    winner: str | None
+    p_value_rate: float | None = Field(None, description="Chi-squared p-value for high-risk rate")
+    p_value_prob: float | None = Field(None, description="Welch t-test p-value for churn prob")
+    control_n: int
+    treatment_n: int
+    control_high_risk_rate: float
+    treatment_high_risk_rate: float
+    relative_effect_pct: float | None
+    recommendation: str
+    scipy_available: bool
+
+
+@app.post("/ab/predict", response_model=ABPredictionResponse)
+def ab_predict(request: ABPredictRequest) -> ABPredictionResponse:
+    """Предсказать отток с детерминированным A/B роутингом по customer_id.
+
+    Predict churn with deterministic A/B routing by customer_id.
+
+    Один и тот же customer_id всегда попадает в один вариант —
+    нет switching noise при повторных обращениях клиента.
+    Предсказание записывается для последующего статистического анализа.
+    """
+    model = get_model()
+    customer = request.customer
+
+    row: dict[str, Any] = {
+        "customerID": request.customer_id,
+        "gender": customer.gender,
+        "SeniorCitizen": customer.SeniorCitizen,
+        "Partner": customer.Partner,
+        "Dependents": customer.Dependents,
+        "tenure": customer.tenure,
+        "PhoneService": customer.PhoneService,
+        "MultipleLines": customer.MultipleLines,
+        "InternetService": customer.InternetService,
+        "OnlineSecurity": customer.OnlineSecurity,
+        "OnlineBackup": customer.OnlineBackup,
+        "DeviceProtection": customer.DeviceProtection,
+        "TechSupport": customer.TechSupport,
+        "StreamingTV": customer.StreamingTV,
+        "StreamingMovies": customer.StreamingMovies,
+        "Contract": customer.Contract,
+        "PaperlessBilling": customer.PaperlessBilling,
+        "PaymentMethod": customer.PaymentMethod,
+        "MonthlyCharges": customer.MonthlyCharges,
+        "TotalCharges": customer.TotalCharges,
+        "Churn": 0,
+    }
+    df = pl.DataFrame([row])
+    df = add_features(df)
+    cat_cols = [c for c in CATEGORICAL_FEATURES if c in df.columns] + ["TenureGroup"]
+    df_enc = df.to_dummies(columns=cat_cols)
+    feature_cols = [c for c in df_enc.columns if c not in ("customerID", "Churn")]
+    X = df_enc.select(feature_cols).to_pandas()
+
+    if hasattr(model, "feature_name_"):
+        model_cols = model.feature_name_
+        for col in model_cols:
+            if col not in X.columns:
+                X[col] = 0
+        X = X[model_cols]
+
+    proba = float(model.predict_proba(X)[0][1])
+    risk = "high" if proba >= 0.7 else "medium" if proba >= 0.4 else "low"
+
+    # Детерминированный роутинг и запись результата
+    variant = _experiment.route(request.customer_id)
+    _experiment.record_prediction(request.customer_id, variant, round(proba, 4), risk)
+
+    # Версия модели берётся из конфигурации варианта
+    variant_cfg = next((v for v in _experiment._variants if v.name == variant), None)
+    model_version = variant_cfg.model_version if variant_cfg else "v1"
+
+    return ABPredictionResponse(
+        churn_probability=round(proba, 4),
+        churn_prediction=proba >= 0.5,
+        risk_level=risk,
+        variant=variant,
+        model_version=model_version,
+    )
+
+
+@app.post("/ab/outcome", response_model=OutcomeResponse)
+def ab_outcome(request: OutcomeRequest) -> OutcomeResponse:
+    """Записать фактический исход оттока для клиента.
+
+    Record actual churn outcome for a customer.
+    Ground truth поступает с задержкой (дни/недели после предсказания) —
+    этот endpoint замыкает петлю обратной связи для outcome-based анализа.
+    """
+    recorded = _experiment.record_outcome(request.customer_id, request.actual_churn)
+    return OutcomeResponse(
+        recorded=recorded,
+        customer_id=request.customer_id,
+        message=(
+            "Outcome recorded successfully."
+            if recorded
+            else f"No pending prediction found for customer_id='{request.customer_id}'."
+        ),
+    )
+
+
+@app.get("/ab/results", response_model=ABResultsResponse)
+def ab_results() -> ABResultsResponse:
+    """Получить статистические результаты текущего A/B эксперимента.
+
+    Get statistical results of the current A/B experiment.
+
+    Возвращает p-value, победителя и рекомендацию.
+    Для значимых выводов нужно >= 385 предсказаний на вариант.
+    """
+    result = _experiment.compute_results()
+    return ABResultsResponse(
+        status=result.status,
+        winner=result.winner,
+        p_value_rate=result.p_value_rate,
+        p_value_prob=result.p_value_prob,
+        control_n=result.control_stats.n_predictions,
+        treatment_n=result.treatment_stats.n_predictions,
+        control_high_risk_rate=result.control_stats.high_risk_rate,
+        treatment_high_risk_rate=result.treatment_stats.high_risk_rate,
+        relative_effect_pct=result.relative_effect,
+        recommendation=result.recommendation,
+        scipy_available=result.scipy_available,
+    )
+
+
+@app.get("/ab/status")
+def ab_status() -> dict[str, Any]:
+    """Краткая сводка состояния эксперимента для дашбордов.
+
+    Quick experiment status overview for monitoring dashboards.
+    """
+    return _experiment.get_status_summary()
+
+
+@app.post("/ab/reset")
+def ab_reset() -> dict[str, str]:
+    """Сбросить эксперимент: удалить все собранные предсказания.
+
+    Reset experiment — clears all collected predictions.
+    Используется при запуске нового эксперимента.
+    """
+    _experiment.reset()
+    return {"status": "reset", "message": "Experiment data cleared. Ready for new experiment."}

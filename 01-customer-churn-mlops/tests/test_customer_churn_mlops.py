@@ -766,3 +766,318 @@ class TestBentoService:
         predictor = ChurnPredictor(model_path=p)
         result = predictor.predict(_make_churn_input())
         assert result.model_version == "v1"
+
+
+# ---------------------------------------------------------------------------
+# A/B Testing Framework Tests
+# ---------------------------------------------------------------------------
+
+
+class TestABExperiment:
+    """Тесты ядра A/B эксперимента / Tests for ABExperiment core logic."""
+
+    def _make_experiment(self, min_samples: int = 5):  # -> ABExperiment
+        """Фабрика эксперимента с низким порогом для тестов."""
+        from churn.ab_testing.experiment import ABExperiment, VariantConfig
+
+        return ABExperiment(
+            variants=[
+                VariantConfig("control", 0.5, "v1", "baseline"),
+                VariantConfig("treatment", 0.5, "v2", "challenger"),
+            ],
+            min_samples_per_variant=min_samples,
+        )
+
+    def test_route_returns_valid_variant(self):
+        """route() возвращает один из двух вариантов."""
+        exp = self._make_experiment()
+        for cid in ["cust_001", "cust_002", "cust_abc", "user-xyz-123"]:
+            variant = exp.route(cid)
+            assert variant in ("control", "treatment"), f"Unexpected variant: {variant}"
+
+    def test_route_is_deterministic(self):
+        """Один и тот же customer_id всегда получает один вариант."""
+        exp = self._make_experiment()
+        for cid in ["abc", "def", "ghi", "jkl"]:
+            first = exp.route(cid)
+            # Повторные вызовы должны давать тот же результат
+            for _ in range(5):
+                assert exp.route(cid) == first, f"Non-deterministic routing for {cid}"
+
+    def test_route_distributes_traffic(self):
+        """Хеш-роутинг должен распределять ~50/50 на большой выборке."""
+        exp = self._make_experiment()
+        counts = {"control": 0, "treatment": 0}
+        for i in range(1000):
+            v = exp.route(f"customer_{i:05d}")
+            counts[v] += 1
+        # Допускаем ±15% от идеального 50/50
+        assert 350 <= counts["control"] <= 650, f"Unbalanced split: {counts}"
+        assert 350 <= counts["treatment"] <= 650
+
+    def test_record_prediction_stores_correctly(self):
+        """record_prediction() корректно сохраняет запись."""
+        exp = self._make_experiment()
+        record = exp.record_prediction("cust_001", "control", 0.75, "high")
+        assert record.customer_id == "cust_001"
+        assert record.variant == "control"
+        assert record.churn_probability == pytest.approx(0.75)
+        assert record.risk_level == "high"
+        assert record.actual_churn is None
+        assert record.timestamp  # должен быть заполнен
+
+    def test_total_predictions_count(self):
+        """total_predictions считает все записи во всех вариантах."""
+        exp = self._make_experiment()
+        assert exp.total_predictions == 0
+        exp.record_prediction("c1", "control", 0.3, "low")
+        exp.record_prediction("c2", "treatment", 0.8, "high")
+        exp.record_prediction("c3", "control", 0.5, "medium")
+        assert exp.total_predictions == 3
+
+    def test_record_outcome_updates_existing_prediction(self):
+        """record_outcome() заполняет actual_churn в существующей записи."""
+        exp = self._make_experiment()
+        exp.record_prediction("cust_42", "control", 0.65, "high")
+        result = exp.record_outcome("cust_42", actual_churn=True)
+        assert result is True
+        records = exp.get_variant_predictions("control")
+        assert records[0].actual_churn is True
+
+    def test_record_outcome_unknown_customer_returns_false(self):
+        """record_outcome() для неизвестного ID возвращает False."""
+        exp = self._make_experiment()
+        result = exp.record_outcome("unknown_cust_999", actual_churn=False)
+        assert result is False
+
+    def test_compute_results_not_enough_data(self):
+        """При малом числе предсказаний статус = not_enough_data."""
+        exp = self._make_experiment(min_samples=100)
+        exp.record_prediction("c1", "control", 0.3, "low")
+        exp.record_prediction("c2", "treatment", 0.8, "high")
+        result = exp.compute_results()
+        assert result.status == "not_enough_data"
+        assert result.winner is None
+        assert "more samples" in result.recommendation
+
+    def test_compute_results_enough_data_returns_result(self):
+        """При достаточном числе предсказаний получаем статистический результат."""
+        exp = self._make_experiment(min_samples=10)
+        rng = np.random.default_rng(42)
+        # control: умеренный риск
+        for i in range(20):
+            prob = float(rng.uniform(0.3, 0.6))
+            risk = "medium"
+            exp.record_prediction(f"ctrl_{i}", "control", prob, risk)
+        # treatment: такой же риск (нет разницы → inconclusive)
+        for i in range(20):
+            prob = float(rng.uniform(0.3, 0.6))
+            risk = "medium"
+            exp.record_prediction(f"trt_{i}", "treatment", prob, risk)
+        result = exp.compute_results()
+        assert result.status in ("significant", "inconclusive")
+        assert isinstance(result.control_stats.n_predictions, int)
+        assert result.control_stats.n_predictions == 20
+
+    def test_reset_clears_predictions(self):
+        """reset() очищает все собранные данные."""
+        exp = self._make_experiment()
+        exp.record_prediction("c1", "control", 0.5, "medium")
+        exp.record_prediction("c2", "treatment", 0.7, "high")
+        exp.reset()
+        assert exp.total_predictions == 0
+
+    def test_variant_config_weights_must_sum_to_one(self):
+        """Веса вариантов должны суммироваться в 1.0."""
+        from churn.ab_testing.experiment import ABExperiment, VariantConfig
+
+        with pytest.raises(ValueError, match="sum to 1.0"):
+            ABExperiment(
+                variants=[
+                    VariantConfig("a", 0.3),
+                    VariantConfig("b", 0.3),
+                ]
+            )
+
+    def test_get_status_summary_structure(self):
+        """get_status_summary() возвращает корректную структуру."""
+        exp = self._make_experiment()
+        summary = exp.get_status_summary()
+        assert "total_predictions" in summary
+        assert "variants" in summary
+        assert len(summary["variants"]) == 2
+        assert summary["variants"][0]["name"] == "control"
+
+    def test_variant_names_property(self):
+        """variant_names возвращает список имён вариантов."""
+        exp = self._make_experiment()
+        assert exp.variant_names == ["control", "treatment"]
+
+    def test_significant_winner_lower_risk_rate(self):
+        """При значимой разнице победитель — вариант с меньшим high-risk rate."""
+        exp = self._make_experiment(min_samples=20)
+        # control: 80% high risk
+        for i in range(30):
+            exp.record_prediction(f"ctrl_{i}", "control", 0.75, "high")
+        # treatment: 0% high risk
+        for i in range(30):
+            exp.record_prediction(f"trt_{i}", "treatment", 0.3, "low")
+        result = exp.compute_results()
+        if result.status == "significant":
+            # treatment должен победить (меньше high-risk)
+            assert result.winner == "treatment"
+
+    def test_is_scipy_available_returns_bool(self):
+        """is_scipy_available() возвращает bool."""
+        from churn.ab_testing.experiment import is_scipy_available
+
+        assert isinstance(is_scipy_available(), bool)
+
+    def test_experiment_result_dataclass_fields(self):
+        """ExperimentResult имеет все ожидаемые поля."""
+        from churn.ab_testing.experiment import ABExperiment, VariantConfig
+
+        exp = ABExperiment(
+            variants=[
+                VariantConfig("control", 0.5),
+                VariantConfig("treatment", 0.5),
+            ],
+            min_samples_per_variant=999,
+        )
+        result = exp.compute_results()
+        assert hasattr(result, "status")
+        assert hasattr(result, "winner")
+        assert hasattr(result, "recommendation")
+        assert hasattr(result, "min_samples_per_variant")
+        assert hasattr(result, "scipy_available")
+
+
+class TestABAPIEndpoints:
+    """Тесты FastAPI A/B endpoints / Tests for A/B testing API endpoints."""
+
+    @pytest.fixture(autouse=True)
+    def reset_experiment(self):
+        """Сбрасываем эксперимент перед каждым тестом."""
+        from churn.api.app import _experiment
+
+        _experiment.reset()
+        yield
+        _experiment.reset()
+
+    def test_ab_status_endpoint(self):
+        """GET /ab/status возвращает корректную структуру."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.get("/ab/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "total_predictions" in data
+        assert "variants" in data
+        assert len(data["variants"]) == 2
+
+    def test_ab_results_not_enough_data(self):
+        """GET /ab/results при пустом эксперименте → not_enough_data."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.get("/ab/results")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "not_enough_data"
+        assert data["winner"] is None
+
+    def test_ab_reset_endpoint(self):
+        """POST /ab/reset очищает данные эксперимента."""
+        from churn.api.app import _experiment, app
+        from fastapi.testclient import TestClient
+
+        # Добавим предсказание напрямую
+        _experiment.record_prediction("c1", "control", 0.5, "medium")
+
+        client = TestClient(app)
+        resp = client.post("/ab/reset")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "reset"
+        assert _experiment.total_predictions == 0
+
+    def test_ab_outcome_unknown_customer(self):
+        """POST /ab/outcome для незнакомого ID → recorded=False."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.post(
+            "/ab/outcome",
+            json={"customer_id": "ghost_customer_xyz", "actual_churn": True},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["recorded"] is False
+        assert "ghost_customer_xyz" in data["customer_id"]
+
+    def test_ab_outcome_after_prediction(self):
+        """POST /ab/outcome обновляет запись после предсказания."""
+        from churn.api.app import _experiment, app
+        from fastapi.testclient import TestClient
+
+        _experiment.record_prediction("cust_999", "control", 0.6, "medium")
+
+        client = TestClient(app)
+        resp = client.post(
+            "/ab/outcome",
+            json={"customer_id": "cust_999", "actual_churn": False},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["recorded"] is True
+
+    def test_ab_results_has_required_fields(self):
+        """GET /ab/results содержит все ключи ABResultsResponse."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.get("/ab/results")
+        data = resp.json()
+        for key in (
+            "status",
+            "winner",
+            "control_n",
+            "treatment_n",
+            "control_high_risk_rate",
+            "treatment_high_risk_rate",
+            "recommendation",
+            "scipy_available",
+        ):
+            assert key in data, f"Missing key: {key}"
+
+    def test_ab_status_shows_variant_counts(self):
+        """GET /ab/status показывает корректные счётчики после предсказаний."""
+        from churn.api.app import _experiment, app
+        from fastapi.testclient import TestClient
+
+        # Добавляем напрямую в эксперимент (без модели)
+        _experiment.record_prediction("c1", "control", 0.3, "low")
+        _experiment.record_prediction("c2", "control", 0.4, "medium")
+        _experiment.record_prediction("c3", "treatment", 0.7, "high")
+
+        client = TestClient(app)
+        resp = client.get("/ab/status")
+        data = resp.json()
+        assert data["total_predictions"] == 3
+
+        ctrl = next(v for v in data["variants"] if v["name"] == "control")
+        trt = next(v for v in data["variants"] if v["name"] == "treatment")
+        assert ctrl["n_predictions"] == 2
+        assert trt["n_predictions"] == 1
+
+    def test_ab_outcome_validation(self):
+        """POST /ab/outcome с некорректными данными → 422."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.post("/ab/outcome", json={"customer_id": "c1"})  # нет actual_churn
+        assert resp.status_code == 422
