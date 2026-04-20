@@ -208,7 +208,16 @@
       Graceful degradation: is_available() — работает без bentoml в CI.
       44/44 тестов зелёные (+16 новых: TestBentoService).
       Источник: BentoML docs 1.3, oneuptime.com Docker+BentoML 2026.
-- [ ] A/B testing framework
+- [x] A/B testing framework — 2026-04-20
+      churn/ab_testing/experiment.py: ABExperiment с детерминированным MD5-роутингом
+      (customer_id → вариант без switching noise), VariantConfig/PredictionRecord/
+      VariantStats/ExperimentResult dataclasses. compute_results(): chi-squared z-test
+      для high-risk rate + Welch's t-test для churn probability. Graceful degradation
+      без scipy. Победитель = min(high_risk_rate) при p < 0.05, n >= 385 (Cohen's h).
+      churn/api/app.py: POST /ab/predict (роутинг+запись), POST /ab/outcome (ground truth),
+      GET /ab/results (статанализ+рекомендация), GET /ab/status, POST /ab/reset.
+      68/68 тестов зелёные (+23: TestABExperiment×15, TestABAPIEndpoints×8).
+      Источник: AWS Blog Dynamic A/B Testing 2025, Marvelous MLOps 2025.
 - [ ] Feature store integration (Feast)
 - [ ] Kubernetes deployment manifests
 - [ ] Automated model comparison reports
