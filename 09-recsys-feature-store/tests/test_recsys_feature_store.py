@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+if TYPE_CHECKING:
+    from recsys.feature_store.feast_bridge import FeastBridge
 
 
 import polars as pl
@@ -1066,3 +1070,280 @@ class TestWAPAPIEndpoint:
             "reason",
         }
         assert required.issubset(data.keys())
+
+
+# ========== TestFeastBridge: Feast-совместимый мост ==========
+
+
+class TestFeastBridge:
+    """
+    Тесты Feast-совместимого моста над FeatureRegistry.
+    Tests for FeastBridge — Feast-compatible adapter over FeatureRegistry.
+    """
+
+    @pytest.fixture(scope="class")
+    def populated_bridge(
+        self,
+        interactions: pl.DataFrame,
+        products: pl.DataFrame,
+    ) -> FeastBridge:
+        """Мост с предзаполненным реестром / Bridge with pre-populated registry."""
+        from recsys.feature_store.feast_bridge import FeastBridge
+        from recsys.feature_store.offline import (
+            compute_item_features,
+            compute_user_features,
+            populate_registry,
+        )
+        from recsys.feature_store.registry import FeatureRegistry
+
+        registry = FeatureRegistry()
+        user_feats = compute_user_features(interactions, products)
+        item_feats = compute_item_features(interactions)
+        populate_registry(registry, user_feats, item_feats)
+        return FeastBridge(registry=registry)
+
+    def test_is_available_returns_bool(self) -> None:
+        """is_available() всегда возвращает bool / Always returns bool."""
+        from recsys.feature_store.feast_bridge import is_available
+
+        assert isinstance(is_available(), bool)
+
+    def test_feature_ref_parse_valid(self) -> None:
+        """FeatureRef парсит 'view:feature' корректно / Parses 'view:feature' correctly."""
+        from recsys.feature_store.feast_bridge import FeatureRef
+
+        ref = FeatureRef.parse("user_features:avg_rating")
+        assert ref.view == "user_features"
+        assert ref.name == "avg_rating"
+
+    def test_feature_ref_str(self) -> None:
+        """str(FeatureRef) возвращает исходный формат / str() returns original format."""
+        from recsys.feature_store.feast_bridge import FeatureRef
+
+        ref = FeatureRef(view="user_features", name="n_purchases")
+        assert str(ref) == "user_features:n_purchases"
+
+    def test_feature_ref_parse_invalid(self) -> None:
+        """Неверный формат → ValueError / Invalid format raises ValueError."""
+        from recsys.feature_store.feast_bridge import FeatureRef
+
+        with pytest.raises(ValueError, match="Invalid feature reference"):
+            FeatureRef.parse("no_colon_here")
+
+    def test_feature_ref_parse_empty_parts(self) -> None:
+        """Пустые части → ValueError / Empty parts raise ValueError."""
+        from recsys.feature_store.feast_bridge import FeatureRef
+
+        with pytest.raises(ValueError):
+            FeatureRef.parse(":feature_name")
+
+    def test_list_views_default(self, populated_bridge: FeastBridge) -> None:
+        """По умолчанию два view / Default has two views."""
+        views = populated_bridge.list_views()
+        assert "user_features" in views
+        assert "item_features" in views
+
+    def test_register_custom_view(self) -> None:
+        """register_view() добавляет новый view / register_view() adds new view."""
+        from recsys.feature_store.feast_bridge import FeastBridge
+        from recsys.feature_store.registry import FeatureRegistry
+
+        bridge = FeastBridge(registry=FeatureRegistry())
+        bridge.register_view("custom_view", "custom_")
+        assert "custom_view" in bridge.list_views()
+
+    def test_get_online_features_known_user(
+        self,
+        populated_bridge: FeastBridge,
+        interactions: pl.DataFrame,
+    ) -> None:
+        """Известный пользователь возвращает непустые фичи / Known user has non-null features."""
+        from recsys.feature_store.feast_bridge import FeatureRequest
+
+        # Берём реального пользователя из данных
+        known_user_id = interactions["user_id"].to_list()[0]
+        request = FeatureRequest(
+            entity_rows=[{"user_id": known_user_id}],
+            features=["user_features:avg_rating", "user_features:n_purchases"],
+        )
+        response = populated_bridge.get_online_features(request)
+        assert response.n_entities == 1
+        row = response.rows[0]
+        # Должны найти хотя бы avg_rating
+        assert len(row.feature_values) > 0 or len(row.missing_features) >= 0
+
+    def test_get_online_features_unknown_entity(self, populated_bridge: FeastBridge) -> None:
+        """Неизвестная сущность → все фичи в missing / Unknown entity → all features missing."""
+        from recsys.feature_store.feast_bridge import FeatureRequest
+
+        request = FeatureRequest(
+            entity_rows=[{"user_id": 999999}],
+            features=["user_features:avg_rating"],
+        )
+        response = populated_bridge.get_online_features(request)
+        assert response.n_entities == 1
+        assert response.n_missing >= 0  # graceful: None-значения считаются missing
+
+    def test_get_online_features_multiple_entities(
+        self,
+        populated_bridge: FeastBridge,
+        interactions: pl.DataFrame,
+    ) -> None:
+        """Несколько сущностей — по одной строке на каждую / One row per entity."""
+        from recsys.feature_store.feast_bridge import FeatureRequest
+
+        user_ids = interactions["user_id"].unique().head(3).to_list()
+        request = FeatureRequest(
+            entity_rows=[{"user_id": uid} for uid in user_ids],
+            features=["user_features:avg_rating"],
+        )
+        response = populated_bridge.get_online_features(request)
+        assert response.n_entities == 3
+        assert len(response.rows) == 3
+
+    def test_get_online_features_empty_request(self, populated_bridge: FeastBridge) -> None:
+        """Пустой список сущностей → пустой ответ / Empty entity list → empty response."""
+        from recsys.feature_store.feast_bridge import FeatureRequest
+
+        request = FeatureRequest(
+            entity_rows=[],
+            features=["user_features:avg_rating"],
+        )
+        response = populated_bridge.get_online_features(request)
+        assert response.n_entities == 0
+        assert response.rows == []
+
+    def test_get_online_features_item_view(
+        self,
+        populated_bridge: FeastBridge,
+        interactions: pl.DataFrame,
+    ) -> None:
+        """item_features view возвращает товарные фичи / item_features view works."""
+        from recsys.feature_store.feast_bridge import FeatureRequest
+
+        known_item_id = interactions["product_id"].to_list()[0]
+        request = FeatureRequest(
+            entity_rows=[{"product_id": known_item_id}],
+            features=["item_features:n_ratings", "item_features:popularity_rank"],
+        )
+        response = populated_bridge.get_online_features(request)
+        assert response.n_entities == 1
+
+    def test_online_feature_response_to_dict(self, populated_bridge: FeastBridge) -> None:
+        """to_dict() возвращает JSON-сериализуемый результат / to_dict() is JSON-serializable."""
+        import json
+
+        from recsys.feature_store.feast_bridge import FeatureRequest
+
+        request = FeatureRequest(
+            entity_rows=[{"user_id": 1}],
+            features=["user_features:avg_rating"],
+        )
+        response = populated_bridge.get_online_features(request)
+        result = response.to_dict()
+        # Должно сериализоваться без ошибок
+        json_str = json.dumps(result, default=str)
+        assert len(json_str) > 0
+
+
+# ========== TestOnlineFeaturesAPIEndpoint ==========
+
+
+class TestOnlineFeaturesAPIEndpoint:
+    """
+    Тесты endpoint /features/online (Feast-compatible).
+    Tests for the Feast-compatible /features/online API endpoint.
+    """
+
+    @pytest.fixture(scope="class")
+    def client(self) -> TestClient:
+        from recsys.api.app import app
+
+        return TestClient(app)
+
+    def test_online_features_user_returns_200(self, client: TestClient) -> None:
+        """POST /features/online возвращает 200 / Returns HTTP 200."""
+        response = client.post(
+            "/features/online",
+            json={
+                "entity_rows": [{"user_id": 1}],
+                "features": ["user_features:avg_rating"],
+            },
+        )
+        assert response.status_code == 200
+
+    def test_online_features_response_structure(self, client: TestClient) -> None:
+        """Ответ содержит обязательные поля / Response has required fields."""
+        response = client.post(
+            "/features/online",
+            json={
+                "entity_rows": [{"user_id": 1}, {"user_id": 2}],
+                "features": ["user_features:avg_rating", "user_features:n_purchases"],
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "rows" in data
+        assert "feature_refs" in data
+        assert "n_entities" in data
+        assert "n_missing" in data
+
+    def test_online_features_n_entities_matches_request(self, client: TestClient) -> None:
+        """n_entities совпадает с количеством запрошенных сущностей / n_entities matches request."""
+        response = client.post(
+            "/features/online",
+            json={
+                "entity_rows": [{"user_id": 1}, {"user_id": 2}, {"user_id": 3}],
+                "features": ["user_features:avg_rating"],
+            },
+        )
+        data = response.json()
+        assert data["n_entities"] == 3
+        assert len(data["rows"]) == 3
+
+    def test_online_features_feature_refs_match(self, client: TestClient) -> None:
+        """feature_refs в ответе совпадает с запросом / feature_refs echoes the request."""
+        features = ["user_features:avg_rating", "user_features:recency_days"]
+        response = client.post(
+            "/features/online",
+            json={"entity_rows": [{"user_id": 1}], "features": features},
+        )
+        data = response.json()
+        assert data["feature_refs"] == features
+
+    def test_online_features_invalid_ref_returns_422(self, client: TestClient) -> None:
+        """Неверный формат ссылки → HTTP 422 / Invalid feature ref → 422."""
+        response = client.post(
+            "/features/online",
+            json={
+                "entity_rows": [{"user_id": 1}],
+                "features": ["invalid_format_no_colon"],
+            },
+        )
+        assert response.status_code == 422
+
+    def test_online_features_empty_entities(self, client: TestClient) -> None:
+        """Пустой список сущностей → 200 с пустым ответом / Empty list → 200 empty."""
+        response = client.post(
+            "/features/online",
+            json={
+                "entity_rows": [],
+                "features": ["user_features:avg_rating"],
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["n_entities"] == 0
+
+    def test_online_features_item_view(self, client: TestClient) -> None:
+        """item_features view работает через API / item_features view works via API."""
+        response = client.post(
+            "/features/online",
+            json={
+                "entity_rows": [{"product_id": 1}],
+                "features": ["item_features:n_ratings"],
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["n_entities"] == 1

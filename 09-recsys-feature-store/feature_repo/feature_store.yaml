@@ -1,0 +1,24 @@
+# Feast Feature Store Configuration
+# Конфигурация Feast Feature Store для RecSys проекта
+#
+# Provider "local" — подходит для разработки и CI без внешней инфраструктуры.
+# Для production: замени provider на "gcp", "aws" или "azure".
+# "local" provider — suitable for dev and CI without external infrastructure.
+# For production: replace provider with "gcp", "aws", or "azure".
+#
+# Online store: SQLite (локальный, без Redis) — для продакшена используй Redis.
+# Online store: SQLite (local, no Redis) — for production use Redis.
+#
+# Sources:
+#   - Feast docs: docs.feast.dev/reference/feature-store-yaml
+#   - Feast local provider: docs.feast.dev/how-to-guides/feast-snowflake-gcp-aws/snowflake
+
+project: recsys_feature_store
+provider: local
+registry: data/registry.db
+online_store:
+  type: sqlite
+  path: data/online_store.db
+offline_store:
+  type: file
+entity_key_serialization_version: 2

@@ -218,7 +218,18 @@
       GET /ab/results (статанализ+рекомендация), GET /ab/status, POST /ab/reset.
       68/68 тестов зелёные (+23: TestABExperiment×15, TestABAPIEndpoints×8).
       Источник: AWS Blog Dynamic A/B Testing 2025, Marvelous MLOps 2025.
-- [ ] Feature store integration (Feast)
+- [x] Feature store integration (Feast) — 2026-04-21
+      recsys/feature_store/feast_bridge.py: FeastBridge — Feast-совместимый адаптер над FeatureRegistry.
+      FeatureRef ("view:feature" формат), FeatureRequest/OnlineFeatureResponse dataclasses,
+      get_online_features() с авто-детекцией entity-ключа (user_id/product_id).
+      is_available() graceful fallback без Feast в CI. register_view() для кастомных view.
+      feature_repo/feature_store.yaml: Feast-конфиг (local provider, SQLite online store).
+      feature_repo/features.py: Entity (user_id, product_id) + FeatureView definitions
+      (user_features, item_features) — conditional import если Feast не установлен.
+      recsys/api/app.py: POST /features/online — Feast-compatible online serving endpoint,
+      автоматически вычисляет фичи из interaction data при первом запросе.
+      109/109 тестов зелёных (+20 новых: TestFeastBridge×13, TestOnlineFeaturesAPIEndpoint×7).
+      Источники: Feast docs 2026, Made With ML feature-store, oneuptime.com 2026.
 - [ ] Kubernetes deployment manifests
 - [ ] Automated model comparison reports
 
