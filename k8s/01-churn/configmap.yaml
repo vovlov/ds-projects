@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: churn-config
+  namespace: ds-projects
+  labels:
+    app: churn-api
+data:
+  MLFLOW_TRACKING_URI: "http://mlflow:5000"
+  LOG_LEVEL: "INFO"
+  # PSI threshold from BCBS 2011 standard
+  PSI_THRESHOLD: "0.2"
+  AB_TEST_ENABLED: "true"

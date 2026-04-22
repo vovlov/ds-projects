@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ds-projects
+
+resources:
+  - namespace.yaml
+  - 01-churn/configmap.yaml
+  - 01-churn/deployment.yaml
+  - 01-churn/service.yaml
+  - 01-churn/hpa.yaml
+  - 02-rag/deployment.yaml
+  - 02-rag/service.yaml
+  - 02-rag/hpa.yaml
+  - 03-ner/deployment.yaml
+  - 03-ner/service.yaml
+  - 03-ner/hpa.yaml
+  - 04-fraud/deployment.yaml
+  - 04-fraud/service.yaml
+  - 04-fraud/hpa.yaml
+  - 05-anomaly/deployment.yaml
+  - 05-anomaly/service.yaml
+  - 05-anomaly/hpa.yaml
+  - 06-scanner/deployment.yaml
+  - 06-scanner/service.yaml
+  - 06-scanner/hpa.yaml
+  - 07-pricing/deployment.yaml
+  - 07-pricing/service.yaml
+  - 07-pricing/hpa.yaml
+  - 08-review/deployment.yaml
+  - 08-review/service.yaml
+  - 08-review/hpa.yaml
+  - 09-recsys/deployment.yaml
+  - 09-recsys/service.yaml
+  - 09-recsys/hpa.yaml
+  - 10-quality/deployment.yaml
+  - 10-quality/service.yaml
+  - 10-quality/hpa.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: ds-projects
+  app.kubernetes.io/managed-by: kustomize

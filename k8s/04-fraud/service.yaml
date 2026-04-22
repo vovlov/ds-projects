@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fraud-api
+  namespace: ds-projects
+  labels:
+    app: fraud-api
+spec:
+  selector:
+    app: fraud-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP

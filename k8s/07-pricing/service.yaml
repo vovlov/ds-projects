@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pricing-api
+  namespace: ds-projects
+  labels:
+    app: pricing-api
+spec:
+  selector:
+    app: pricing-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
