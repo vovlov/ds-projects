@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scanner-api
+  namespace: ds-projects
+  labels:
+    app: scanner-api
+    version: "1.0"
+    project: "06-cv-document-scanner"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: scanner-api
+  template:
+    metadata:
+      labels:
+        app: scanner-api
+        version: "1.0"
+    spec:
+      containers:
+        - name: scanner-api
+          image: ds-projects/scanner-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: MAX_IMAGE_SIZE_MB
+              value: "10"
+          resources:
+            requests:
+              cpu: "500m"
+              # CNN inference + GradCAM requires extra memory for activations
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 45
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      terminationGracePeriodSeconds: 30

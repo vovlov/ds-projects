@@ -230,7 +230,25 @@
       автоматически вычисляет фичи из interaction data при первом запросе.
       109/109 тестов зелёных (+20 новых: TestFeastBridge×13, TestOnlineFeaturesAPIEndpoint×7).
       Источники: Feast docs 2026, Made With ML feature-store, oneuptime.com 2026.
-- [ ] Kubernetes deployment manifests
+- [x] Kubernetes deployment manifests — 2026-04-22
+      k8s/namespace.yaml: namespace ds-projects с common labels.
+      k8s/kustomization.yaml: Kustomize root — все 10 проектов под одним namespace.
+      k8s/{01-churn,02-rag,03-ner,04-fraud,05-anomaly,06-scanner,07-pricing,08-review,09-recsys,10-quality}/:
+        deployment.yaml: replicas=2 (HA), resource requests+limits (CPU/mem по профилю нагрузки),
+          liveness+readiness probes → /health, terminationGracePeriodSeconds для graceful shutdown.
+          Secrets из secretKeyRef (ANTHROPIC_API_KEY, webhook URLs) с optional=true (CI-safe).
+          Prometheus annotations для scraping. Project-specific tweaks:
+          02-rag: replicas=1 (ChromaDB in-process stateful), 4Gi RAM, emptyDir для chroma data;
+          05-anomaly: percent-based scaleUp policy для instant burst scaling (SRE use case).
+        service.yaml: ClusterIP (внутренний трафик), порты 80→8000 (RAG: 7860).
+        hpa.yaml: autoscaling/v2, minReplicas/maxReplicas по профилю, CPU/mem targets,
+          scaleDown.stabilizationWindowSeconds≥60 (антифлаппинг), aggressive scaleUp для аномалий.
+      k8s/01-churn/configmap.yaml: MLFLOW_TRACKING_URI, PSI_THRESHOLD=0.2, AB_TEST_ENABLED.
+      10-data-quality-platform/tests/test_k8s_manifests.py: 349 новых тестов —
+        TestK8sFilesExist×32, TestK8sYamlValid×22, TestK8sDeploymentStructure×140,
+        TestK8sServiceStructure×50, TestK8sHPAStructure×80, TestK8sNamespace×2, TestK8sKustomization×3.
+      392/392 тестов зелёные (+349).
+      Источники: Kubernetes v1.36 HPA docs, KServe 2026, Wiz AI/ML K8s best practices.
 - [ ] Automated model comparison reports
 
 ---

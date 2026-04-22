@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: anomaly-api
+  namespace: ds-projects
+  labels:
+    app: anomaly-api
+spec:
+  selector:
+    app: anomaly-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP

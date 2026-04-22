@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-api
+  namespace: ds-projects
+  labels:
+    app: rag-api
+    version: "1.0"
+    project: "02-rag-enterprise"
+spec:
+  # Single replica: ChromaDB is in-process, stateful — use StatefulSet for multi-replica
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rag-api
+  template:
+    metadata:
+      labels:
+        app: rag-api
+        version: "1.0"
+    spec:
+      containers:
+        - name: rag-api
+          image: ds-projects/rag-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 7860
+              name: gradio
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: anthropic-secret
+                  key: api-key
+                  optional: true
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              # ChromaDB + LangChain in-memory index requires extra RAM
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 7860
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 7860
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          volumeMounts:
+            - name: chroma-data
+              mountPath: /app/data/chroma
+      volumes:
+        - name: chroma-data
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30

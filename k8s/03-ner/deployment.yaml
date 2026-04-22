@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ner-api
+  namespace: ds-projects
+  labels:
+    app: ner-api
+    version: "1.0"
+    project: "03-ner-service"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ner-api
+  template:
+    metadata:
+      labels:
+        app: ner-api
+        version: "1.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+    spec:
+      containers:
+        - name: ner-api
+          image: ds-projects/ner-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: BATCH_MAX_SIZE
+              value: "32"
+          resources:
+            requests:
+              cpu: "500m"
+              # spaCy model loads ~300MB; leave room for batch processing
+              memory: "768Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 45
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      terminationGracePeriodSeconds: 30
