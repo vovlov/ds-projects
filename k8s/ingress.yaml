@@ -1,0 +1,61 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ds-projects-ingress
+  namespace: ds-projects
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: "/$2"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    # Rate-limit: 100 RPS per IP to prevent abuse of inference endpoints
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: ds-projects.example.com
+      http:
+        paths:
+          - path: /api/churn(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: churn-api
+                port:
+                  name: http
+          - path: /api/rag(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: rag-api
+                port:
+                  name: http
+          - path: /api/anomaly(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: anomaly-api
+                port:
+                  name: http
+          - path: /api/pricing(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: pricing-api
+                port:
+                  name: http
+          - path: /api/recsys(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: recsys-api
+                port:
+                  name: http
+          - path: /api/quality(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: quality-api
+                port:
+                  name: http

@@ -230,7 +230,20 @@
       автоматически вычисляет фичи из interaction data при первом запросе.
       109/109 тестов зелёных (+20 новых: TestFeastBridge×13, TestOnlineFeaturesAPIEndpoint×7).
       Источники: Feast docs 2026, Made With ML feature-store, oneuptime.com 2026.
-- [ ] Kubernetes deployment manifests
+- [x] Kubernetes deployment manifests — 2026-04-23
+      k8s/: Namespace, ConfigMap, Secrets-template, Ingress (nginx, rate-limit 100 RPS),
+      NetworkPolicy (ingress-only per service + Prometheus scrape).
+      Per service (churn, rag, anomaly, pricing, recsys, quality):
+        Deployment: 2 replicas, podAntiAffinity, securityContext(runAsNonRoot=true),
+        resource requests+limits (CPU/memory calibrated per model type),
+        liveness/readiness/startup probes, Prometheus annotations.
+        Service (ClusterIP), HPA (autoscaling/v2, CPU 60-70%, min2/max6-10, stabilization windows),
+        PodDisruptionBudget (minAvailable=1).
+      scripts/validate_k8s.py: CLI-валидатор YAML структуры + security-проверки.
+      10-data-quality-platform/tests/test_k8s_manifests.py: 106 pytest-тестов
+        (TestK8sManifestStructure×8, TestDeploymentSecurity×42, TestHPAPresence×2).
+        149/149 тестов зелёные (43 pre-existing + 106 новых).
+      Источники: kubeify.com ML/K8s 2026, scaleops.com HPA best-practices, BentoML K8s docs.
 - [ ] Automated model comparison reports
 
 ---

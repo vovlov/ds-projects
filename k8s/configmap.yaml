@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ds-projects-config
+  namespace: ds-projects
+data:
+  LOG_LEVEL: "INFO"
+  ENVIRONMENT: "production"
+  MLFLOW_TRACKING_URI: "http://mlflow-service:5000"
+  PROMETHEUS_ENABLED: "true"
+  # Overridden per-service in individual deployments
+  WORKERS: "2"
