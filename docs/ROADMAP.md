@@ -244,7 +244,16 @@
         (TestK8sManifestStructure×8, TestDeploymentSecurity×42, TestHPAPresence×2).
         149/149 тестов зелёные (43 pre-existing + 106 новых).
       Источники: kubeify.com ML/K8s 2026, scaleops.com HPA best-practices, BentoML K8s docs.
-- [ ] Automated model comparison reports
+- [x] Automated model comparison reports — 2026-04-24
+      churn/evaluation/model_comparison.py: ModelResult/ComparisonSummary/ComparisonReport
+      dataclasses. compare_models() — ранжирование по AUC+F1, порог значимости 0.02
+      (Hanley & McNeil 1982 ~2 SE AUC). generate_markdown_report() с emoji-медалями
+      и таблицей признаковых важностей. generate_json_report() для API/MLflow.
+      churn/api/app.py: POST /compare/models (json|markdown формат, in-memory кэш),
+      GET /compare/report (последний отчёт или 404), GET /compare/leaderboard (Grafana).
+      33 новых теста: TestModelComparisonCore×12, TestComparisonReportFormat×9,
+      TestComparisonAPIEndpoints×12. 101/101 зелёных (было 68).
+      Источник: Hanley & McNeil 1982 (AUC SE), MLflow Model Registry champion pattern.
 
 ---
 

@@ -13,6 +13,12 @@ from pydantic import BaseModel, Field
 
 from ..ab_testing.experiment import ABExperiment, VariantConfig
 from ..data.load import CATEGORICAL_FEATURES, add_features
+from ..evaluation.model_comparison import (
+    ModelResult,
+    compare_models,
+    generate_json_report,
+    generate_markdown_report,
+)
 from ..retraining.trigger import PSI_YELLOW
 
 logger = logging.getLogger(__name__)
@@ -449,3 +455,119 @@ def ab_reset() -> dict[str, str]:
     """
     _experiment.reset()
     return {"status": "reset", "message": "Experiment data cleared. Ready for new experiment."}
+
+
+# ---------------------------------------------------------------------------
+# Model comparison endpoints
+# ---------------------------------------------------------------------------
+
+# In-memory cache for the last comparison report (replaced on each POST).
+# In production, this would be persisted to MLflow or a database.
+_last_comparison_report: dict[str, Any] | None = None
+
+
+class ModelResultInput(BaseModel):
+    """Input schema for a single model's metrics.
+    Входные данные метрик одной модели.
+    """
+
+    name: str = Field(..., description="Уникальное имя модели / Unique model name")
+    roc_auc: float = Field(..., ge=0.0, le=1.0, description="ROC AUC на тестовой выборке")
+    f1_score: float = Field(..., ge=0.0, le=1.0, description="F1-score (macro)")
+    precision: float = Field(default=0.0, ge=0.0, le=1.0)
+    recall: float = Field(default=0.0, ge=0.0, le=1.0)
+    training_time_sec: float = Field(default=0.0, ge=0.0)
+    params: dict[str, Any] = Field(default_factory=dict)
+    feature_importances: dict[str, float] = Field(default_factory=dict)
+    run_id: str | None = Field(default=None, description="MLflow run ID")
+
+
+class CompareModelsRequest(BaseModel):
+    """Request body for POST /compare/models."""
+
+    models: list[ModelResultInput] = Field(
+        ...,
+        min_length=1,
+        description="Список результатов моделей для сравнения / List of model results to compare",
+    )
+    format: str = Field(
+        default="json",
+        description="Формат отчёта: 'json' или 'markdown' / Report format: 'json' or 'markdown'",
+    )
+
+
+@app.post("/compare/models")
+def compare_models_endpoint(request: CompareModelsRequest) -> dict[str, Any]:
+    """Сравнить несколько обученных моделей и вернуть отчёт с ранжированием.
+
+    Compare multiple trained models and return a ranking report.
+
+    Ранжирует по ROC AUC (primary) и F1 (tiebreaker). Победитель считается
+    значимым, если разница в AUC >= 0.02 (Hanley & McNeil 1982, ~2 SE AUC).
+    Отчёт кэшируется и доступен через GET /compare/report.
+
+    Ranks by ROC AUC (primary) and F1 (tiebreaker). Winner is declared
+    significant when AUC gap >= 0.02. Report is cached for GET /compare/report.
+    """
+    global _last_comparison_report
+
+    results = [
+        ModelResult(
+            name=m.name,
+            roc_auc=m.roc_auc,
+            f1_score=m.f1_score,
+            precision=m.precision,
+            recall=m.recall,
+            training_time_sec=m.training_time_sec,
+            params=m.params,
+            feature_importances=m.feature_importances,
+            run_id=m.run_id,
+        )
+        for m in request.models
+    ]
+
+    report = compare_models(results)
+    json_report = generate_json_report(report)
+    _last_comparison_report = json_report
+
+    if request.format == "markdown":
+        return {
+            **json_report,
+            "markdown": generate_markdown_report(report),
+        }
+
+    return json_report
+
+
+@app.get("/compare/report")
+def get_comparison_report() -> dict[str, Any]:
+    """Вернуть последний закэшированный отчёт сравнения моделей.
+
+    Return the last cached model comparison report.
+
+    Отчёт создаётся через POST /compare/models и сохраняется до следующего вызова.
+    Report is created via POST /compare/models and persists until next call.
+    """
+    if _last_comparison_report is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=404,
+            detail="No comparison report available. POST to /compare/models first.",
+        )
+    return _last_comparison_report
+
+
+@app.get("/compare/leaderboard")
+def get_leaderboard() -> dict[str, Any]:
+    """Вернуть только таблицу лидеров из последнего отчёта.
+
+    Return only the leaderboard from the last comparison report.
+    Удобно для Grafana-дашбордов и мониторинга / Useful for Grafana dashboards.
+    """
+    if _last_comparison_report is None:
+        return {"leaderboard": [], "message": "No comparison data yet. POST to /compare/models."}
+    return {
+        "leaderboard": _last_comparison_report.get("leaderboard", []),
+        "timestamp": _last_comparison_report.get("timestamp"),
+    }

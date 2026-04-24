@@ -1081,3 +1081,418 @@ class TestABAPIEndpoints:
         client = TestClient(app)
         resp = client.post("/ab/outcome", json={"customer_id": "c1"})  # нет actual_churn
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Automated Model Comparison Tests
+# ---------------------------------------------------------------------------
+
+
+def _make_model_result(
+    name: str = "catboost",
+    roc_auc: float = 0.85,
+    f1_score: float = 0.62,
+    precision: float = 0.70,
+    recall: float = 0.56,
+    training_time_sec: float = 12.5,
+    feature_importances: dict | None = None,
+    run_id: str | None = None,
+):
+    """Factory for ModelResult in tests."""
+    from churn.evaluation.model_comparison import ModelResult
+
+    return ModelResult(
+        name=name,
+        roc_auc=roc_auc,
+        f1_score=f1_score,
+        precision=precision,
+        recall=recall,
+        training_time_sec=training_time_sec,
+        feature_importances=feature_importances or {},
+        run_id=run_id,
+    )
+
+
+class TestModelComparisonCore:
+    """Тесты ядра сравнения моделей / Tests for compare_models() logic."""
+
+    def test_single_model_wins_by_default(self):
+        """Единственная модель → победитель без runner-up."""
+        from churn.evaluation.model_comparison import compare_models
+
+        result = compare_models([_make_model_result("solo", roc_auc=0.80)])
+        assert result.summary.winner == "solo"
+        assert result.summary.runner_up is None
+        assert result.summary.auc_margin == 0.0
+
+    def test_winner_by_higher_auc(self):
+        """Модель с бо́льшим AUC побеждает."""
+        from churn.evaluation.model_comparison import compare_models
+
+        results = [
+            _make_model_result("lgbm", roc_auc=0.82),
+            _make_model_result("catboost", roc_auc=0.87),
+        ]
+        report = compare_models(results)
+        assert report.summary.winner == "catboost"
+        assert report.summary.runner_up == "lgbm"
+
+    def test_auc_margin_computed_correctly(self):
+        """auc_margin = winner_auc - runner_up_auc."""
+        from churn.evaluation.model_comparison import compare_models
+
+        results = [
+            _make_model_result("a", roc_auc=0.80),
+            _make_model_result("b", roc_auc=0.85),
+        ]
+        report = compare_models(results)
+        assert abs(report.summary.auc_margin - 0.05) < 1e-4
+
+    def test_significant_when_margin_large(self):
+        """Разница >= 0.02 → is_significant=True."""
+        from churn.evaluation.model_comparison import compare_models
+
+        results = [
+            _make_model_result("a", roc_auc=0.80),
+            _make_model_result("b", roc_auc=0.83),  # margin 0.03
+        ]
+        report = compare_models(results)
+        assert report.summary.is_significant is True
+
+    def test_not_significant_when_margin_small(self):
+        """Разница < 0.02 → is_significant=False."""
+        from churn.evaluation.model_comparison import compare_models
+
+        results = [
+            _make_model_result("a", roc_auc=0.850),
+            _make_model_result("b", roc_auc=0.855),  # margin 0.005
+        ]
+        report = compare_models(results)
+        assert report.summary.is_significant is False
+
+    def test_f1_tiebreaker_on_equal_auc(self):
+        """При равном AUC побеждает модель с лучшим F1."""
+        from churn.evaluation.model_comparison import compare_models
+
+        results = [
+            _make_model_result("a", roc_auc=0.85, f1_score=0.60),
+            _make_model_result("b", roc_auc=0.85, f1_score=0.65),
+        ]
+        report = compare_models(results)
+        assert report.summary.winner == "b"
+
+    def test_leaderboard_sorted_descending(self):
+        """Leaderboard ранжирован по убыванию AUC."""
+        from churn.evaluation.model_comparison import compare_models
+
+        results = [
+            _make_model_result("c", roc_auc=0.78),
+            _make_model_result("a", roc_auc=0.88),
+            _make_model_result("b", roc_auc=0.83),
+        ]
+        report = compare_models(results)
+        aucs = [row["roc_auc"] for row in report.leaderboard]
+        assert aucs == sorted(aucs, reverse=True)
+
+    def test_leaderboard_rank_sequential(self):
+        """Rank = 1, 2, 3, ... последовательно."""
+        from churn.evaluation.model_comparison import compare_models
+
+        results = [_make_model_result(f"m{i}", roc_auc=0.8 + i * 0.01) for i in range(4)]
+        report = compare_models(results)
+        ranks = [row["rank"] for row in report.leaderboard]
+        assert ranks == list(range(1, 5))
+
+    def test_empty_results_raises(self):
+        """Пустой список → ValueError."""
+        from churn.evaluation.model_comparison import compare_models
+
+        with pytest.raises(ValueError, match="at least one"):
+            compare_models([])
+
+    def test_three_models_ranking(self):
+        """Три модели → правильная расстановка призовых мест."""
+        from churn.evaluation.model_comparison import compare_models
+
+        results = [
+            _make_model_result("xgb", roc_auc=0.81),
+            _make_model_result("lgbm", roc_auc=0.84),
+            _make_model_result("catboost", roc_auc=0.87),
+        ]
+        report = compare_models(results)
+        assert report.leaderboard[0]["name"] == "catboost"
+        assert report.leaderboard[1]["name"] == "lgbm"
+        assert report.leaderboard[2]["name"] == "xgb"
+
+    def test_recommendation_contains_winner_name(self):
+        """recommendation упоминает имя победителя."""
+        from churn.evaluation.model_comparison import compare_models
+
+        results = [
+            _make_model_result("model_x", roc_auc=0.88),
+            _make_model_result("model_y", roc_auc=0.82),
+        ]
+        report = compare_models(results)
+        assert "model_x" in report.summary.recommendation
+
+    def test_timestamp_is_iso8601(self):
+        """timestamp в формате ISO 8601."""
+        from churn.evaluation.model_comparison import compare_models
+
+        report = compare_models([_make_model_result()])
+        assert "T" in report.timestamp  # ISO 8601: YYYY-MM-DDTHH:MM:SS
+
+
+class TestComparisonReportFormat:
+    """Тесты форматирования отчётов / Tests for report generation."""
+
+    def test_json_report_required_keys(self):
+        """JSON-отчёт содержит timestamp, summary, leaderboard."""
+        from churn.evaluation.model_comparison import compare_models, generate_json_report
+
+        report = compare_models([_make_model_result()])
+        jr = generate_json_report(report)
+        for key in ("timestamp", "summary", "leaderboard"):
+            assert key in jr, f"Missing key: {key}"
+
+    def test_json_summary_keys(self):
+        """summary в JSON содержит все обязательные поля."""
+        from churn.evaluation.model_comparison import compare_models, generate_json_report
+
+        report = compare_models([_make_model_result()])
+        summary = generate_json_report(report)["summary"]
+        required_keys = (
+            "winner",
+            "winner_auc",
+            "runner_up",
+            "auc_margin",
+            "is_significant",
+            "recommendation",
+        )
+        for key in required_keys:
+            assert key in summary, f"Missing summary key: {key}"
+
+    def test_json_report_serializable(self):
+        """JSON-отчёт можно сериализовать через json.dumps() без ошибок."""
+        import json as _json
+
+        from churn.evaluation.model_comparison import compare_models, generate_json_report
+
+        results = [
+            _make_model_result("a", roc_auc=0.85, feature_importances={"tenure": 12.5}),
+            _make_model_result("b", roc_auc=0.82),
+        ]
+        jr = generate_json_report(compare_models(results))
+        serialized = _json.dumps(jr)  # не должен бросать исключение
+        assert len(serialized) > 0
+
+    def test_markdown_report_has_header(self):
+        """Markdown-отчёт начинается с заголовка '# Model Comparison Report'."""
+        from churn.evaluation.model_comparison import compare_models, generate_markdown_report
+
+        md = generate_markdown_report(compare_models([_make_model_result()]))
+        assert md.startswith("# Model Comparison Report")
+
+    def test_markdown_report_contains_winner(self):
+        """Markdown-отчёт упоминает имя победителя в секции Summary."""
+        from churn.evaluation.model_comparison import compare_models, generate_markdown_report
+
+        results = [
+            _make_model_result("best_model", roc_auc=0.90),
+            _make_model_result("other_model", roc_auc=0.85),
+        ]
+        md = generate_markdown_report(compare_models(results))
+        assert "best_model" in md
+
+    def test_markdown_report_has_leaderboard_table(self):
+        """Markdown-отчёт содержит таблицу (строка с '|')."""
+        from churn.evaluation.model_comparison import compare_models, generate_markdown_report
+
+        md = generate_markdown_report(compare_models([_make_model_result()]))
+        assert "|" in md
+
+    def test_markdown_report_includes_feature_importances(self):
+        """Секция Feature Importance появляется если importances непустые."""
+        from churn.evaluation.model_comparison import compare_models, generate_markdown_report
+
+        m = _make_model_result(feature_importances={"MonthlyCharges": 30.0, "tenure": 20.0})
+        md = generate_markdown_report(compare_models([m]))
+        assert "Feature Importance" in md
+        assert "MonthlyCharges" in md
+
+    def test_markdown_no_importance_section_when_empty(self):
+        """Секция Feature Importance отсутствует если importances пустые."""
+        from churn.evaluation.model_comparison import compare_models, generate_markdown_report
+
+        md = generate_markdown_report(compare_models([_make_model_result()]))
+        assert "Feature Importance" not in md
+
+    def test_leaderboard_values_rounded(self):
+        """Значения в leaderboard округлены до 4 знаков."""
+        from churn.evaluation.model_comparison import compare_models
+
+        m = _make_model_result(roc_auc=0.856789, f1_score=0.623456)
+        report = compare_models([m])
+        row = report.leaderboard[0]
+        assert row["roc_auc"] == round(0.856789, 4)
+        assert row["f1_score"] == round(0.623456, 4)
+
+
+class TestComparisonAPIEndpoints:
+    """Тесты API-эндпоинтов сравнения / Tests for /compare/* API endpoints."""
+
+    def _make_payload(self, models: list[dict] | None = None) -> dict:
+        if models is None:
+            models = [
+                {"name": "catboost", "roc_auc": 0.87, "f1_score": 0.63},
+                {"name": "lgbm", "roc_auc": 0.84, "f1_score": 0.60},
+            ]
+        return {"models": models, "format": "json"}
+
+    def test_compare_endpoint_returns_200(self):
+        """POST /compare/models → 200."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.post("/compare/models", json=self._make_payload())
+        assert resp.status_code == 200
+
+    def test_compare_endpoint_returns_winner(self):
+        """POST /compare/models → summary.winner = модель с макс AUC."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = self._make_payload(
+            [
+                {"name": "lgbm", "roc_auc": 0.82, "f1_score": 0.60},
+                {"name": "catboost", "roc_auc": 0.88, "f1_score": 0.65},
+            ]
+        )
+        resp = client.post("/compare/models", json=payload)
+        data = resp.json()
+        assert data["summary"]["winner"] == "catboost"
+
+    def test_compare_endpoint_leaderboard_ordered(self):
+        """Leaderboard отсортирован по убыванию AUC."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.post("/compare/models", json=self._make_payload())
+        data = resp.json()
+        aucs = [row["roc_auc"] for row in data["leaderboard"]]
+        assert aucs == sorted(aucs, reverse=True)
+
+    def test_compare_single_model(self):
+        """POST /compare/models с одной моделью → 200, корректный summary."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = self._make_payload([{"name": "only_model", "roc_auc": 0.80, "f1_score": 0.58}])
+        resp = client.post("/compare/models", json=payload)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["summary"]["winner"] == "only_model"
+        assert data["summary"]["runner_up"] is None
+
+    def test_compare_markdown_format(self):
+        """format=markdown → ответ содержит поле 'markdown' с таблицей."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = {**self._make_payload(), "format": "markdown"}
+        resp = client.post("/compare/models", json=payload)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "markdown" in data
+        assert "# Model Comparison Report" in data["markdown"]
+
+    def test_get_report_after_compare(self):
+        """GET /compare/report возвращает закэшированный отчёт после POST."""
+        import churn.api.app as app_module
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        # Сбрасываем кэш перед тестом
+        app_module._last_comparison_report = None
+
+        client = TestClient(app)
+        client.post("/compare/models", json=self._make_payload())
+        resp = client.get("/compare/report")
+        assert resp.status_code == 200
+        assert "summary" in resp.json()
+
+    def test_get_report_before_compare_returns_404(self):
+        """GET /compare/report без предварительного POST → 404."""
+        import churn.api.app as app_module
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        app_module._last_comparison_report = None
+
+        client = TestClient(app)
+        resp = client.get("/compare/report")
+        assert resp.status_code == 404
+
+    def test_get_leaderboard_empty_before_compare(self):
+        """GET /compare/leaderboard без данных → leaderboard=[] без ошибок."""
+        import churn.api.app as app_module
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        app_module._last_comparison_report = None
+
+        client = TestClient(app)
+        resp = client.get("/compare/leaderboard")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["leaderboard"] == []
+
+    def test_get_leaderboard_after_compare(self):
+        """GET /compare/leaderboard возвращает таблицу после POST /compare/models."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        client.post("/compare/models", json=self._make_payload())
+        resp = client.get("/compare/leaderboard")
+        assert resp.status_code == 200
+        assert len(resp.json()["leaderboard"]) == 2
+
+    def test_compare_empty_models_returns_422(self):
+        """POST /compare/models с пустым списком → 422 валидация."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.post("/compare/models", json={"models": [], "format": "json"})
+        assert resp.status_code == 422
+
+    def test_compare_missing_required_fields_returns_422(self):
+        """POST /compare/models без roc_auc → 422."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        bad_payload = {"models": [{"name": "no_auc"}], "format": "json"}
+        resp = client.post("/compare/models", json=bad_payload)
+        assert resp.status_code == 422
+
+    def test_compare_with_run_id(self):
+        """run_id прокидывается в leaderboard без ошибок."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = self._make_payload(
+            [
+                {"name": "m1", "roc_auc": 0.85, "f1_score": 0.62, "run_id": "abc123"},
+            ]
+        )
+        resp = client.post("/compare/models", json=payload)
+        data = resp.json()
+        assert data["leaderboard"][0]["run_id"] == "abc123"
