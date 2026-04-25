@@ -259,7 +259,16 @@
 
 ## Фаза 3: Enterprise (1-2 месяца)
 
-- [ ] Multi-model orchestration (Project 01 → 04 → 05 pipeline)
+- [x] Multi-model orchestration (Project 01 → 04 → 05 pipeline) — 2026-04-25
+      11-orchestration/orchestration/: ChurnPredictor (heuristic, SHAP-calibrated) +
+      FraudPredictor (logistic over lognormal distributions, numpy-only) +
+      AnomalyPredictor (rolling Z-score, zero-std edge case → score=10).
+      OrchestrationPipeline: DI через конструктор, run() + run_batch().
+      compute_risk(): иерархический action ladder (fraud 55% + churn 30% + anomaly 15%),
+      actions: block→review→intervene→monitor→ok.
+      FastAPI: POST /orchestrate (unified event → risk profile), POST /orchestrate/batch,
+      GET /health. 59/59 тестов зелёные.
+      Источники: MLOps 2026 multi-model patterns, IRIS neuro-symbolic approach (arxiv 2506).
 - [ ] Schema registry for data contracts
 - [ ] Data lineage visualization
 - [ ] Cost optimization (model quantization, batching)
