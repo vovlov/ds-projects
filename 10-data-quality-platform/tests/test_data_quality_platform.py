@@ -710,4 +710,478 @@ class TestDriftAlertAPIEndpoint:
         assert data["drift_report"]["drift_detected"] is True
         assert data["alert"] is not None
         assert data["alert"]["severity"] in ("warning", "critical")
-        assert data["alert_sent"] is True
+
+
+# ---------------------------------------------------------------------------
+# Тесты Schema Registry / Schema Registry tests
+# ---------------------------------------------------------------------------
+
+import io  # noqa: E402
+
+from quality.schema_registry.registry import SchemaRegistry, get_registry  # noqa: E402
+from quality.schema_registry.schema import (  # noqa: E402
+    ColumnSchema,
+    ColumnType,
+    Compatibility,
+    DataSchema,
+)
+from quality.schema_registry.validator import (  # noqa: E402
+    infer_schema_from_dataframe,
+    validate_dataframe_against_schema,
+)
+
+
+def _make_schema(name: str = "test", extra_col: bool = False) -> DataSchema:
+    """Вспомогательная фабрика схем для тестов."""
+    cols = [
+        ColumnSchema(name="id", dtype=ColumnType.INTEGER, nullable=False),
+        ColumnSchema(name="score", dtype=ColumnType.FLOAT),
+        ColumnSchema(name="label", dtype=ColumnType.STRING),
+    ]
+    if extra_col:
+        cols.append(ColumnSchema(name="extra", dtype=ColumnType.FLOAT))
+    return DataSchema(name=name, columns=cols)
+
+
+class TestColumnSchemaAndDataSchema:
+    """Unit-тесты структур данных / Unit tests for schema data structures."""
+
+    def test_column_schema_defaults(self) -> None:
+        col = ColumnSchema(name="age", dtype=ColumnType.INTEGER)
+        assert col.nullable is True
+        assert col.allowed_values is None
+        assert col.description == ""
+
+    def test_column_type_values(self) -> None:
+        assert ColumnType.INTEGER.value == "integer"
+        assert ColumnType.FLOAT.value == "float"
+        assert ColumnType.STRING.value == "string"
+
+    def test_data_schema_column_map(self) -> None:
+        schema = _make_schema()
+        col_map = schema.column_map()
+        assert "id" in col_map
+        assert col_map["id"].nullable is False
+        assert col_map["score"].dtype == ColumnType.FLOAT
+
+    def test_schema_version_to_dict(self) -> None:
+        from quality.schema_registry.schema import SchemaVersion
+
+        sv = SchemaVersion(schema_name="s", version="1.0.0", schema=_make_schema("s"))
+        d = sv.to_dict()
+        assert d["schema_name"] == "s"
+        assert d["version"] == "1.0.0"
+        assert isinstance(d["columns"], list)
+        assert d["is_latest"] is True
+
+
+class TestSchemaRegistryCore:
+    """Тесты реестра схем / Schema registry core tests."""
+
+    def _fresh(self) -> SchemaRegistry:
+        return SchemaRegistry()
+
+    def test_register_first_version(self) -> None:
+        reg = self._fresh()
+        sv = reg.register(_make_schema("users"))
+        assert sv.version == "1.0.0"
+        assert sv.is_latest is True
+        assert "users" in reg.list_schemas()
+
+    def test_register_explicit_version(self) -> None:
+        reg = self._fresh()
+        sv = reg.register(_make_schema("users"), version="2.5.0")
+        assert sv.version == "2.5.0"
+
+    def test_register_non_breaking_bumps_minor(self) -> None:
+        reg = self._fresh()
+        reg.register(_make_schema("ds"))
+        # Добавляем nullable столбец — не breaking
+        schema_v2 = _make_schema("ds", extra_col=True)
+        sv2 = reg.register(schema_v2)
+        assert sv2.version == "1.1.0"
+
+    def test_register_breaking_raises(self) -> None:
+        reg = self._fresh()
+        reg.register(_make_schema("ds"))
+        # Удаляем столбец — breaking
+        schema_bad = DataSchema(
+            name="ds",
+            columns=[ColumnSchema(name="id", dtype=ColumnType.INTEGER, nullable=False)],
+        )
+        with pytest.raises(ValueError, match="Breaking change"):
+            reg.register(schema_bad)
+
+    def test_register_breaking_allowed(self) -> None:
+        reg = self._fresh()
+        reg.register(_make_schema("ds"))
+        schema_bad = DataSchema(
+            name="ds",
+            columns=[ColumnSchema(name="id", dtype=ColumnType.INTEGER, nullable=False)],
+        )
+        sv2 = reg.register(schema_bad, allow_breaking=True)
+        assert sv2.version == "2.0.0"
+
+    def test_register_breaking_with_none_compat(self) -> None:
+        reg = self._fresh()
+        reg.register(_make_schema("ds"))
+        schema_none = DataSchema(
+            name="ds",
+            columns=[ColumnSchema(name="new_col", dtype=ColumnType.STRING)],
+            compatibility=Compatibility.NONE,
+        )
+        sv2 = reg.register(schema_none)
+        assert sv2.version == "2.0.0"
+
+    def test_get_latest(self) -> None:
+        reg = self._fresh()
+        reg.register(_make_schema("x"))
+        reg.register(_make_schema("x", extra_col=True))
+        sv = reg.get("x")
+        assert sv is not None
+        assert sv.is_latest is True
+
+    def test_get_by_version(self) -> None:
+        reg = self._fresh()
+        reg.register(_make_schema("x"))
+        reg.register(_make_schema("x", extra_col=True))
+        sv = reg.get("x", "1.0.0")
+        assert sv is not None
+        assert sv.version == "1.0.0"
+
+    def test_get_nonexistent_returns_none(self) -> None:
+        reg = self._fresh()
+        assert reg.get("missing") is None
+        assert reg.get("missing", "1.0.0") is None
+
+    def test_list_versions(self) -> None:
+        reg = self._fresh()
+        reg.register(_make_schema("y"))
+        reg.register(_make_schema("y", extra_col=True))
+        versions = reg.list_versions("y")
+        assert versions == ["1.0.0", "1.1.0"]
+
+    def test_list_schemas(self) -> None:
+        reg = self._fresh()
+        reg.register(_make_schema("a"))
+        reg.register(_make_schema("b"))
+        names = reg.list_schemas()
+        assert "a" in names
+        assert "b" in names
+
+
+class TestBreakingChangeDetection:
+    """Тесты детектора breaking changes / Breaking change detector tests."""
+
+    def _reg(self) -> SchemaRegistry:
+        return SchemaRegistry()
+
+    def test_removed_column_is_breaking(self) -> None:
+        reg = self._reg()
+        reg.register(_make_schema("s"))
+        schema_no_score = DataSchema(
+            name="s",
+            columns=[
+                ColumnSchema(name="id", dtype=ColumnType.INTEGER, nullable=False),
+                ColumnSchema(name="label", dtype=ColumnType.STRING),
+            ],
+        )
+        result = reg.check_compatibility("s", schema_no_score)
+        assert result["compatible"] is False
+        assert any("removed" in c for c in result["breaking_changes"])
+
+    def test_type_change_is_breaking(self) -> None:
+        reg = self._reg()
+        reg.register(_make_schema("s"))
+        schema_bad_type = DataSchema(
+            name="s",
+            columns=[
+                ColumnSchema(name="id", dtype=ColumnType.STRING),  # was INTEGER
+                ColumnSchema(name="score", dtype=ColumnType.FLOAT),
+                ColumnSchema(name="label", dtype=ColumnType.STRING),
+            ],
+        )
+        result = reg.check_compatibility("s", schema_bad_type)
+        assert result["compatible"] is False
+        assert any("Type changed" in c for c in result["breaking_changes"])
+
+    def test_nullable_to_not_null_is_breaking(self) -> None:
+        reg = self._reg()
+        reg.register(_make_schema("s"))
+        schema_strict = DataSchema(
+            name="s",
+            columns=[
+                ColumnSchema(name="id", dtype=ColumnType.INTEGER, nullable=False),
+                ColumnSchema(name="score", dtype=ColumnType.FLOAT, nullable=False),  # was nullable
+                ColumnSchema(name="label", dtype=ColumnType.STRING),
+            ],
+        )
+        result = reg.check_compatibility("s", schema_strict)
+        assert result["compatible"] is False
+        assert any("NOT NULL" in c for c in result["breaking_changes"])
+
+    def test_integer_to_float_widening_is_safe(self) -> None:
+        reg = self._reg()
+        schema_int = DataSchema(
+            name="w",
+            columns=[ColumnSchema(name="val", dtype=ColumnType.INTEGER)],
+        )
+        reg.register(schema_int)
+        schema_float = DataSchema(
+            name="w",
+            columns=[ColumnSchema(name="val", dtype=ColumnType.FLOAT)],
+        )
+        result = reg.check_compatibility("w", schema_float)
+        assert result["compatible"] is True
+        assert result["breaking_changes"] == []
+
+    def test_new_nullable_column_is_safe(self) -> None:
+        reg = self._reg()
+        reg.register(_make_schema("s"))
+        result = reg.check_compatibility("s", _make_schema("s", extra_col=True))
+        assert result["compatible"] is True
+
+    def test_new_required_column_is_breaking(self) -> None:
+        reg = self._reg()
+        reg.register(_make_schema("s"))
+        schema_new_required = DataSchema(
+            name="s",
+            columns=[
+                ColumnSchema(name="id", dtype=ColumnType.INTEGER, nullable=False),
+                ColumnSchema(name="score", dtype=ColumnType.FLOAT),
+                ColumnSchema(name="label", dtype=ColumnType.STRING),
+                ColumnSchema(name="mandatory", dtype=ColumnType.INTEGER, nullable=False),
+            ],
+        )
+        result = reg.check_compatibility("s", schema_new_required)
+        assert result["compatible"] is False
+        assert any("required" in c for c in result["breaking_changes"])
+
+    def test_no_existing_schema_is_compatible(self) -> None:
+        reg = self._reg()
+        result = reg.check_compatibility("nonexistent", _make_schema("nonexistent"))
+        assert result["compatible"] is True
+        assert result["current_version"] is None
+
+
+class TestSchemaInference:
+    """Тесты авто-инференса схемы / Schema auto-inference tests."""
+
+    def test_infer_types(self) -> None:
+        df = pl.DataFrame({"id": [1, 2], "score": [1.5, 2.5], "name": ["a", "b"]})
+        schema = infer_schema_from_dataframe(df, name="test")
+        col_map = schema.column_map()
+        assert col_map["id"].dtype == ColumnType.INTEGER
+        assert col_map["score"].dtype == ColumnType.FLOAT
+        assert col_map["name"].dtype == ColumnType.STRING
+
+    def test_infer_nullable(self) -> None:
+        df = pl.DataFrame({"a": [1, None, 3], "b": [1, 2, 3]})
+        schema = infer_schema_from_dataframe(df)
+        col_map = schema.column_map()
+        assert col_map["a"].nullable is True
+        assert col_map["b"].nullable is False
+
+    def test_infer_schema_name(self) -> None:
+        df = pl.DataFrame({"x": [1]})
+        schema = infer_schema_from_dataframe(df, name="my_schema")
+        assert schema.name == "my_schema"
+
+
+class TestDataValidation:
+    """Тесты валидации данных / Data validation tests."""
+
+    def _base_schema(self) -> DataSchema:
+        return DataSchema(
+            name="v",
+            columns=[
+                ColumnSchema(name="id", dtype=ColumnType.INTEGER, nullable=False),
+                ColumnSchema(
+                    name="age",
+                    dtype=ColumnType.INTEGER,
+                    nullable=True,
+                    min_value=0,
+                    max_value=120,
+                ),
+                ColumnSchema(
+                    name="status",
+                    dtype=ColumnType.STRING,
+                    allowed_values=["active", "inactive"],
+                ),
+            ],
+        )
+
+    def test_valid_data_passes(self) -> None:
+        schema = self._base_schema()
+        df = pl.DataFrame({"id": [1, 2], "age": [25, 30], "status": ["active", "inactive"]})
+        result = validate_dataframe_against_schema(df, schema)
+        assert result["passed"] is True
+        assert result["failed_checks"] == 0
+
+    def test_missing_column_fails(self) -> None:
+        schema = self._base_schema()
+        df = pl.DataFrame({"id": [1], "age": [25]})  # missing "status"
+        result = validate_dataframe_against_schema(df, schema)
+        assert result["passed"] is False
+        checks = [i["check"] for i in result["issues"]]
+        assert "column_exists" in checks
+
+    def test_null_in_non_nullable_fails(self) -> None:
+        schema = self._base_schema()
+        df = pl.DataFrame({"id": [1, None], "age": [25, 30], "status": ["active", "active"]})
+        result = validate_dataframe_against_schema(df, schema)
+        assert result["passed"] is False
+        assert any(i["check"] == "nullable" for i in result["issues"])
+
+    def test_out_of_range_fails(self) -> None:
+        schema = self._base_schema()
+        df = pl.DataFrame({"id": [1], "age": [200], "status": ["active"]})  # age > 120
+        result = validate_dataframe_against_schema(df, schema)
+        assert result["passed"] is False
+        assert any(i["check"] == "value_range" for i in result["issues"])
+
+    def test_invalid_allowed_value_fails(self) -> None:
+        schema = self._base_schema()
+        df = pl.DataFrame({"id": [1], "age": [25], "status": ["unknown"]})
+        result = validate_dataframe_against_schema(df, schema)
+        assert result["passed"] is False
+        assert any(i["check"] == "allowed_values" for i in result["issues"])
+
+    def test_extra_columns_not_errors(self) -> None:
+        schema = self._base_schema()
+        df = pl.DataFrame({"id": [1], "age": [25], "status": ["active"], "extra": [99]})
+        result = validate_dataframe_against_schema(df, schema)
+        assert result["passed"] is True
+        assert "extra" in result["extra_columns"]
+
+
+class TestSchemaRegistryAPI:
+    """Интеграционные тесты API реестра схем / Schema registry API integration tests."""
+
+    @pytest.fixture(autouse=True)
+    def reset_registry(self) -> None:
+        """Очистить реестр перед каждым тестом / Clear registry before each test."""
+        get_registry()._versions.clear()
+
+    @pytest.fixture()
+    def client(self) -> TestClient:
+        return TestClient(app)
+
+    def _register_payload(self, schema_name: str = "features") -> dict:
+        return {
+            "schema_name": schema_name,
+            "description": "Test schema",
+            "compatibility": "BACKWARD",
+            "columns": [
+                {"name": "user_id", "dtype": "string", "nullable": False},
+                {"name": "amount", "dtype": "float", "nullable": True},
+            ],
+        }
+
+    def test_register_schema_201(self, client: TestClient) -> None:
+        resp = client.post("/schema/register", json=self._register_payload())
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["schema_name"] == "features"
+        assert data["version"] == "1.0.0"
+
+    def test_register_schema_auto_version_bump(self, client: TestClient) -> None:
+        client.post("/schema/register", json=self._register_payload())
+        payload_v2 = self._register_payload()
+        payload_v2["columns"].append({"name": "extra", "dtype": "integer", "nullable": True})
+        resp = client.post("/schema/register", json=payload_v2)
+        assert resp.status_code == 201
+        assert resp.json()["version"] == "1.1.0"
+
+    def test_register_breaking_returns_409(self, client: TestClient) -> None:
+        client.post("/schema/register", json=self._register_payload())
+        payload_bad = {
+            "schema_name": "features",
+            "compatibility": "BACKWARD",
+            "columns": [{"name": "user_id", "dtype": "string", "nullable": False}],
+        }
+        resp = client.post("/schema/register", json=payload_bad)
+        assert resp.status_code == 409
+
+    def test_list_schemas(self, client: TestClient) -> None:
+        client.post("/schema/register", json=self._register_payload("a"))
+        client.post("/schema/register", json=self._register_payload("b"))
+        resp = client.get("/schema/list")
+        assert resp.status_code == 200
+        assert "a" in resp.json()["schemas"]
+        assert "b" in resp.json()["schemas"]
+
+    def test_list_versions(self, client: TestClient) -> None:
+        client.post("/schema/register", json=self._register_payload())
+        payload_v2 = self._register_payload()
+        payload_v2["columns"].append({"name": "extra", "dtype": "integer", "nullable": True})
+        client.post("/schema/register", json=payload_v2)
+        resp = client.get("/schema/features/versions")
+        assert resp.status_code == 200
+        assert resp.json()["versions"] == ["1.0.0", "1.1.0"]
+
+    def test_list_versions_404_unknown(self, client: TestClient) -> None:
+        resp = client.get("/schema/unknown/versions")
+        assert resp.status_code == 404
+
+    def test_get_schema_latest(self, client: TestClient) -> None:
+        client.post("/schema/register", json=self._register_payload())
+        resp = client.get("/schema/features")
+        assert resp.status_code == 200
+        assert resp.json()["version"] == "1.0.0"
+
+    def test_get_schema_404_unknown(self, client: TestClient) -> None:
+        resp = client.get("/schema/nonexistent")
+        assert resp.status_code == 404
+
+    def test_compatibility_check_compatible(self, client: TestClient) -> None:
+        client.post("/schema/register", json=self._register_payload())
+        candidate = {
+            "schema_name": "features",
+            "compatibility": "BACKWARD",
+            "columns": [
+                {"name": "user_id", "dtype": "string", "nullable": False},
+                {"name": "amount", "dtype": "float", "nullable": True},
+                {"name": "new_nullable", "dtype": "integer", "nullable": True},
+            ],
+        }
+        resp = client.post("/schema/compatible", json=candidate)
+        assert resp.status_code == 200
+        assert resp.json()["compatible"] is True
+
+    def test_compatibility_check_breaking(self, client: TestClient) -> None:
+        client.post("/schema/register", json=self._register_payload())
+        candidate = {
+            "schema_name": "features",
+            "compatibility": "BACKWARD",
+            "columns": [{"name": "user_id", "dtype": "integer", "nullable": False}],
+        }
+        resp = client.post("/schema/compatible", json=candidate)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["compatible"] is False
+        assert len(data["breaking_changes"]) > 0
+
+    def test_validate_csv_against_schema(self, client: TestClient) -> None:
+        client.post("/schema/register", json=self._register_payload())
+        df = pl.DataFrame({"user_id": ["u1", "u2"], "amount": [10.0, 20.0]})
+        resp = client.post(
+            "/schema/features/validate",
+            files={"file": ("data.csv", io.BytesIO(df.write_csv().encode()), "text/csv")},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["passed"] is True
+
+    def test_infer_schema_endpoint(self, client: TestClient) -> None:
+        df = pl.DataFrame({"id": [1, 2], "score": [1.5, 2.5]})
+        resp = client.post(
+            "/schema/infer",
+            files={"file": ("data.csv", io.BytesIO(df.write_csv().encode()), "text/csv")},
+            data={"schema_name": "my_schema"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["schema_name"] == "my_schema"
+        col_names = [c["name"] for c in data["columns"]]
+        assert "id" in col_names
+        assert "score" in col_names

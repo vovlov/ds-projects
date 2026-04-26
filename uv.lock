@@ -1270,6 +1270,11 @@ ner = [
     { name = "transformers" },
     { name = "uvicorn" },
 ]
+orchestration = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "uvicorn" },
+]
 pricing = [
     { name = "catboost" },
     { name = "fastapi" },
@@ -1338,6 +1343,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'cv'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'fraud'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'ner'", specifier = ">=0.115" },
+    { name = "fastapi", marker = "extra == 'orchestration'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'pricing'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'quality'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'rag'", specifier = ">=0.115" },
@@ -1347,6 +1353,7 @@ requires-dist = [
     { name = "gradio", marker = "extra == 'review'", specifier = ">=5.0" },
     { name = "great-expectations", marker = "extra == 'churn'", specifier = ">=1.3" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'orchestration'", specifier = ">=0.27" },
     { name = "kafka-python", marker = "extra == 'anomaly'", specifier = ">=2.0" },
     { name = "langchain", marker = "extra == 'rag'", specifier = ">=0.3" },
     { name = "langchain-anthropic", marker = "extra == 'rag'", specifier = ">=0.3" },
@@ -1409,13 +1416,14 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'cv'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'fraud'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'ner'", specifier = ">=0.34" },
+    { name = "uvicorn", marker = "extra == 'orchestration'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'pricing'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'quality'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'rag'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'recsys'", specifier = ">=0.34" },
     { name = "uvicorn", marker = "extra == 'review'", specifier = ">=0.34" },
 ]
-provides-extras = ["dev", "docs", "churn", "rag", "ner", "fraud", "anomaly", "pricing", "cv", "recsys", "quality", "review"]
+provides-extras = ["dev", "docs", "churn", "rag", "ner", "fraud", "anomaly", "pricing", "cv", "recsys", "quality", "review", "orchestration"]
 
 [[package]]
 name = "duckdb"

@@ -1,11 +1,11 @@
 """
 FastAPI-приложение для Data Quality Platform / FastAPI app.
 
-Предоставляет HTTP-эндпоинты для профилирования, валидации качества
-и проверки дрифта. Все данные принимаются как CSV-файлы.
+Предоставляет HTTP-эндпоинты для профилирования, валидации качества,
+проверки дрифта и управления реестром схем (data contracts).
 
-Exposes endpoints for profiling, quality validation, and drift detection.
-Data is uploaded as CSV files.
+Exposes endpoints for profiling, quality validation, drift detection,
+and schema registry management (data contracts).
 """
 
 from __future__ import annotations
@@ -16,13 +16,20 @@ from typing import Any
 
 import polars as pl
 import yaml
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from quality.alerts.alerting import AlertManager, LogAlertChannel, WebhookAlertChannel
 from quality.data.profiler import profile_dataframe
 from quality.quality.drift import detect_drift
 from quality.quality.expectations import run_suite
+from quality.schema_registry.registry import get_registry
+from quality.schema_registry.schema import ColumnSchema, ColumnType, Compatibility, DataSchema
+from quality.schema_registry.validator import (
+    infer_schema_from_dataframe,
+    validate_dataframe_against_schema,
+)
 
 app = FastAPI(
     title="Data Quality Platform",
@@ -184,3 +191,204 @@ async def drift_alert_endpoint(
         "alert_sent": alert is not None,
     }
     return JSONResponse(content=response_body)
+
+
+# ---------------------------------------------------------------------------
+# Schema Registry — Pydantic request/response models
+# ---------------------------------------------------------------------------
+
+
+class ColumnSchemaRequest(BaseModel):
+    """Описание столбца в теле запроса / Column descriptor in request body."""
+
+    name: str
+    dtype: str = "string"
+    nullable: bool = True
+    description: str = ""
+    allowed_values: list[Any] | None = None
+    min_value: float | None = None
+    max_value: float | None = None
+
+
+class RegisterSchemaRequest(BaseModel):
+    """Запрос регистрации схемы / Schema registration request."""
+
+    schema_name: str
+    description: str = ""
+    compatibility: str = "BACKWARD"
+    columns: list[ColumnSchemaRequest]
+    version: str | None = None
+    allow_breaking: bool = False
+
+
+class CompatibilityCheckRequest(BaseModel):
+    """Запрос проверки совместимости / Compatibility check request."""
+
+    schema_name: str
+    description: str = ""
+    compatibility: str = "BACKWARD"
+    columns: list[ColumnSchemaRequest]
+
+
+# ---------------------------------------------------------------------------
+# Schema Registry — helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_data_schema(
+    req_columns: list[ColumnSchemaRequest],
+    name: str,
+    compatibility: str,
+    description: str,
+) -> DataSchema:
+    """Собрать DataSchema из Pydantic-запроса / Build DataSchema from Pydantic request."""
+    cols = [
+        ColumnSchema(
+            name=c.name,
+            dtype=ColumnType(c.dtype),
+            nullable=c.nullable,
+            description=c.description,
+            allowed_values=c.allowed_values,
+            min_value=c.min_value,
+            max_value=c.max_value,
+        )
+        for c in req_columns
+    ]
+    compat = Compatibility(compatibility.upper())
+    return DataSchema(name=name, columns=cols, compatibility=compat, description=description)
+
+
+# ---------------------------------------------------------------------------
+# Schema Registry — endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/schema/register")
+def register_schema_endpoint(req: RegisterSchemaRequest) -> JSONResponse:
+    """
+    Зарегистрировать схему данных (data contract) / Register a data schema.
+
+    Первая регистрация: версия 1.0.0.
+    Последующие: автоматический bump (breaking → major, non-breaking → minor).
+    allow_breaking=true обходит BACKWARD-проверку (используйте с осторожностью).
+
+    First registration: version 1.0.0.
+    Subsequent: auto-bump (breaking → major, non-breaking → minor).
+    allow_breaking=true bypasses BACKWARD check (use with caution).
+    """
+    try:
+        schema = _build_data_schema(
+            req.columns, req.schema_name, req.compatibility, req.description
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    registry = get_registry()
+    try:
+        sv = registry.register(schema, version=req.version, allow_breaking=req.allow_breaking)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return JSONResponse(content=sv.to_dict(), status_code=201)
+
+
+@app.get("/schema/list")
+def list_schemas_endpoint() -> JSONResponse:
+    """
+    Список всех зарегистрированных схем / List all registered schema names.
+    """
+    return JSONResponse(content={"schemas": get_registry().list_schemas()})
+
+
+@app.get("/schema/{name}/versions")
+def list_versions_endpoint(name: str) -> JSONResponse:
+    """
+    Список версий конкретной схемы / List versions of a specific schema.
+    """
+    versions = get_registry().list_versions(name)
+    if not versions:
+        raise HTTPException(status_code=404, detail=f"Schema not found: '{name}'")
+    return JSONResponse(content={"schema_name": name, "versions": versions})
+
+
+@app.get("/schema/{name}")
+def get_schema_endpoint(name: str, version: str | None = None) -> JSONResponse:
+    """
+    Получить схему (последнюю или конкретную версию).
+    Get a schema — latest or a specific version.
+    """
+    sv = get_registry().get(name, version)
+    if sv is None:
+        detail = f"Schema '{name}'" + (f" version '{version}'" if version else "") + " not found"
+        raise HTTPException(status_code=404, detail=detail)
+    return JSONResponse(content=sv.to_dict())
+
+
+@app.post("/schema/{name}/validate")
+async def validate_against_schema_endpoint(
+    name: str,
+    file: UploadFile = File(..., description="CSV для проверки / CSV to validate"),
+    version: str | None = Form(
+        None, description="Версия схемы / Schema version (optional, latest if omitted)"
+    ),
+) -> JSONResponse:
+    """
+    Проверить CSV-файл на соответствие зарегистрированной схеме.
+    Validate a CSV file against a registered schema.
+
+    Проверяет: наличие столбцов, nullable, диапазоны, допустимые значения.
+    Checks: column presence, nullable, value ranges, allowed values.
+    """
+    sv = get_registry().get(name, version)
+    if sv is None:
+        raise HTTPException(status_code=404, detail=f"Schema not found: '{name}'")
+
+    df = _read_upload_csv(file)
+    report = validate_dataframe_against_schema(df, sv.schema)
+    report["schema_name"] = name
+    report["schema_version"] = sv.version
+    return JSONResponse(content=_make_serializable(report))
+
+
+@app.post("/schema/compatible")
+def check_compatibility_endpoint(req: CompatibilityCheckRequest) -> JSONResponse:
+    """
+    Проверить, совместима ли новая схема с текущей зарегистрированной версией.
+    Check if a candidate schema is backward-compatible with the registered version.
+
+    Возвращает список breaking changes (если есть).
+    Returns list of breaking changes (if any).
+    """
+    try:
+        candidate = _build_data_schema(
+            req.columns, req.schema_name, req.compatibility, req.description
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    result = get_registry().check_compatibility(req.schema_name, candidate)
+    return JSONResponse(content=result)
+
+
+@app.post("/schema/infer")
+async def infer_schema_endpoint(
+    file: UploadFile = File(..., description="CSV для инференса схемы / CSV to infer schema from"),
+    schema_name: str = Form("inferred", description="Имя схемы / Schema name"),
+) -> JSONResponse:
+    """
+    Автоматически вывести схему из CSV / Auto-infer schema from a CSV file.
+
+    Удобно для начального onboarding: загрузите данные → получите черновик схемы
+    → зарегистрируйте через /schema/register.
+    Useful for initial onboarding: upload data → get schema draft → register via /schema/register.
+    """
+    df = _read_upload_csv(file)
+    schema = infer_schema_from_dataframe(df, name=schema_name)
+    sv_dict = {
+        "schema_name": schema.name,
+        "description": schema.description,
+        "compatibility": schema.compatibility.value,
+        "columns": [c.to_dict() for c in schema.columns],
+        "inferred_from_rows": df.height,
+    }
+    return JSONResponse(content=_make_serializable(sv_dict))

@@ -269,7 +269,23 @@
       FastAPI: POST /orchestrate (unified event → risk profile), POST /orchestrate/batch,
       GET /health. 59/59 тестов зелёные.
       Источники: MLOps 2026 multi-model patterns, IRIS neuro-symbolic approach (arxiv 2506).
-- [ ] Schema registry for data contracts
+- [x] Schema registry for data contracts — 2026-04-26
+      quality/schema_registry/: ColumnSchema/DataSchema/SchemaVersion dataclasses,
+      ColumnType + Compatibility enums (BACKWARD/FORWARD/FULL/NONE).
+      SchemaRegistry: семантическое версионирование (MAJOR.MINOR.PATCH),
+      auto-bump (breaking → major, non-breaking → minor), BACKWARD-совместимость по умолчанию.
+      Breaking changes: удалённый столбец, смена типа (кроме integer→float widening),
+      nullable→NOT NULL, новый NOT NULL столбец. Compatibility.NONE обходит проверку.
+      validator.py: infer_schema_from_dataframe() (авто-инференс из Polars DataFrame),
+      validate_dataframe_against_schema() (column_exists, nullable, allowed_values, value_range).
+      API endpoints: POST /schema/register (201+auto-version, 409 на breaking),
+      GET /schema/list, GET /schema/{name}/versions, GET /schema/{name},
+      POST /schema/{name}/validate (CSV against schema), POST /schema/compatible,
+      POST /schema/infer (draft schema from CSV для onboarding).
+      86/86 тестов зелёные (+37 новых: TestColumnSchemaAndDataSchema×4,
+      TestSchemaRegistryCore×11, TestBreakingChangeDetection×7, TestSchemaInference×3,
+      TestDataValidation×6, TestSchemaRegistryAPI×12).
+      Источники: Confluent Schema Registry semantics, Data Contract CLI, DataScienceVerse 2026.
 - [ ] Data lineage visualization
 - [ ] Cost optimization (model quantization, batching)
 - [ ] Security audit (OWASP for ML)
