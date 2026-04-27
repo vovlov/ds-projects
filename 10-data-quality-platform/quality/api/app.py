@@ -2,10 +2,11 @@
 FastAPI-приложение для Data Quality Platform / FastAPI app.
 
 Предоставляет HTTP-эндпоинты для профилирования, валидации качества,
-проверки дрифта и управления реестром схем (data contracts).
+проверки дрифта, управления реестром схем (data contracts)
+и отслеживания родословной данных (data lineage).
 
 Exposes endpoints for profiling, quality validation, drift detection,
-and schema registry management (data contracts).
+schema registry management (data contracts), and data lineage tracking.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from pydantic import BaseModel
 
 from quality.alerts.alerting import AlertManager, LogAlertChannel, WebhookAlertChannel
 from quality.data.profiler import profile_dataframe
+from quality.lineage.tracker import RunState, get_tracker
 from quality.quality.drift import detect_drift
 from quality.quality.expectations import run_suite
 from quality.schema_registry.registry import get_registry
@@ -392,3 +394,188 @@ async def infer_schema_endpoint(
         "inferred_from_rows": df.height,
     }
     return JSONResponse(content=_make_serializable(sv_dict))
+
+
+# ---------------------------------------------------------------------------
+# Data Lineage — Pydantic request models
+# ---------------------------------------------------------------------------
+
+
+class DatasetRef(BaseModel):
+    """Ссылка на датасет в lineage-событии / Dataset reference in a lineage event."""
+
+    namespace: str = "default"
+    name: str
+    facets: dict[str, Any] = {}
+
+
+class LineageEventRequest(BaseModel):
+    """
+    Запрос записи lineage-события / Lineage event record request.
+
+    Соответствует OpenLineage RunEvent формату.
+    Corresponds to the OpenLineage RunEvent format.
+    """
+
+    job_namespace: str
+    job_name: str
+    event_type: str = "COMPLETE"
+    run_id: str | None = None
+    inputs: list[DatasetRef] = []
+    outputs: list[DatasetRef] = []
+    facets: dict[str, Any] = {}
+
+
+# ---------------------------------------------------------------------------
+# Data Lineage — endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/lineage/event")
+def record_lineage_event(req: LineageEventRequest) -> JSONResponse:
+    """
+    Записать событие родословной данных / Record a data lineage event.
+
+    Принимает OpenLineage RunEvent: job + его входные/выходные датасеты.
+    Обновляет граф родословной для визуализации.
+
+    Accepts an OpenLineage RunEvent: job + input/output datasets.
+    Updates the lineage graph for subsequent visualization queries.
+
+    Пример (Example):
+        POST /lineage/event
+        {
+          "job_namespace": "churn-service",
+          "job_name": "train_model",
+          "event_type": "COMPLETE",
+          "inputs": [{"namespace": "postgres", "name": "customers"}],
+          "outputs": [{"namespace": "mlflow", "name": "churn_model_v1"}]
+        }
+    """
+    try:
+        event_type = RunState(req.event_type.upper())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid event_type '{req.event_type}'. Must be one of: {[s.value for s in RunState]}",  # noqa: E501
+        ) from exc
+
+    tracker = get_tracker()
+    event = tracker.record(
+        job_namespace=req.job_namespace,
+        job_name=req.job_name,
+        event_type=event_type,
+        inputs=[{"namespace": d.namespace, "name": d.name, **d.facets} for d in req.inputs],
+        outputs=[{"namespace": d.namespace, "name": d.name, **d.facets} for d in req.outputs],
+        run_id=req.run_id,
+        **req.facets,
+    )
+    return JSONResponse(content=event.to_dict(), status_code=201)
+
+
+@app.get("/lineage/graph")
+def get_lineage_graph() -> JSONResponse:
+    """
+    Получить полный граф родословной в формате D3.js / Get the full lineage graph (D3.js format).
+
+    Возвращает все узлы (Dataset + Job) и рёбра потока данных.
+    Формат совместим с D3 force-directed simulation.
+
+    Returns all nodes (Dataset + Job) and data-flow edges.
+    Format is compatible with D3 force-directed simulation.
+    """
+    graph = get_tracker().get_graph()
+    return JSONResponse(content=graph.to_dict())
+
+
+@app.get("/lineage/dataset/{namespace}/{name}")
+def get_dataset_lineage(namespace: str, name: str) -> JSONResponse:
+    """
+    Родословная конкретного датасета (вверх и вниз) / Dataset lineage (upstream + downstream).
+
+    Возвращает подграф, связанный с указанным датасетом.
+    Returns the subgraph connected to the specified dataset.
+    """
+    tracker = get_tracker()
+    dataset_id = f"{namespace}/{name}"
+    graph = tracker.get_graph()
+
+    if dataset_id not in graph.nodes:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Dataset '{dataset_id}' not found in lineage graph.",
+        )
+
+    lineage = graph.lineage_for_dataset(dataset_id)
+    return JSONResponse(content=lineage)
+
+
+@app.get("/lineage/upstream/{namespace}/{name}")
+def get_upstream_lineage(namespace: str, name: str, max_depth: int = 10) -> JSONResponse:
+    """
+    Получить все узлы выше по потоку для датасета / Get upstream lineage for a dataset.
+
+    Полезно для impact analysis: какие источники влияют на этот датасет?
+    Useful for impact analysis: which sources feed into this dataset?
+    """
+    node_id = f"{namespace}/{name}"
+    graph = get_tracker().get_graph()
+    upstream_ids = graph.upstream(node_id, max_depth=max_depth)
+    upstream_nodes = [graph.nodes[nid].to_dict() for nid in upstream_ids if nid in graph.nodes]
+    return JSONResponse(  # noqa: E501
+        content={"node_id": node_id, "upstream": upstream_nodes, "depth": len(upstream_nodes)}
+    )
+
+
+@app.get("/lineage/downstream/{namespace}/{name}")
+def get_downstream_lineage(namespace: str, name: str, max_depth: int = 10) -> JSONResponse:
+    """
+    Получить все узлы ниже по потоку для датасета / Get downstream lineage for a dataset.
+
+    Полезно для impact analysis: что сломается если изменить этот датасет?
+    Useful for impact analysis: what breaks if this dataset changes?
+    """
+    node_id = f"{namespace}/{name}"
+    graph = get_tracker().get_graph()
+    downstream_ids = graph.downstream(node_id, max_depth=max_depth)
+    downstream_nodes = [graph.nodes[nid].to_dict() for nid in downstream_ids if nid in graph.nodes]
+    return JSONResponse(
+        content={"node_id": node_id, "downstream": downstream_nodes, "depth": len(downstream_nodes)}
+    )
+
+
+@app.get("/lineage/events")
+def list_lineage_events(
+    job_name: str | None = None,
+    event_type: str | None = None,
+    limit: int = 50,
+) -> JSONResponse:
+    """
+    Список последних lineage-событий / List recent lineage events.
+
+    Поддерживает фильтрацию по имени задачи и типу события.
+    Supports filtering by job name and event type.
+    """
+    tracker = get_tracker()
+    run_state = None
+    if event_type:
+        try:
+            run_state = RunState(event_type.upper())
+        except ValueError as exc:
+            raise HTTPException(  # noqa: B904
+                status_code=422, detail=f"Invalid event_type: '{event_type}'"
+            ) from exc
+
+    events = tracker.get_events(job_name=job_name, event_type=run_state, limit=limit)
+    return JSONResponse(content={"events": [e.to_dict() for e in events], "total": len(events)})
+
+
+@app.get("/lineage/summary")
+def get_lineage_summary() -> JSONResponse:
+    """
+    Краткая статистика lineage-трекера / Lineage tracker summary statistics.
+
+    Возвращает число событий, узлов, рёбер и типов событий.
+    Returns event counts, node/edge counts, and event type breakdown.
+    """
+    return JSONResponse(content=get_tracker().summary())

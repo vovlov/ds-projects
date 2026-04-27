@@ -286,7 +286,26 @@
       TestSchemaRegistryCore×11, TestBreakingChangeDetection×7, TestSchemaInference×3,
       TestDataValidation×6, TestSchemaRegistryAPI×12).
       Источники: Confluent Schema Registry semantics, Data Contract CLI, DataScienceVerse 2026.
-- [ ] Data lineage visualization
+- [x] Data lineage visualization — 2026-04-27
+      quality/lineage/graph.py: LineageNode (Dataset/Job), LineageEdge, LineageGraph (DAG).
+      OpenLineage-совместимая модель: NodeType(StrEnum), upstream/downstream BFS-обход,
+      D3.js-совместимый JSON export (nodes+links+stats), дедупликация рёбер.
+      quality/lineage/tracker.py: RunState(StrEnum) START/COMPLETE/FAIL/ABORT/RUNNING,
+      LineageEvent (OpenLineage RunEvent формат, ISO 8601 UTC timestamp, event_id UUID),
+      LineageTracker: record() → авто-обновление графа, фильтрация get_events(),
+      get_run_history(), summary(); singleton get_tracker() / reset_tracker() для тестов.
+      quality/api/app.py: 6 новых endpoints:
+        POST /lineage/event (OpenLineage RunEvent, 201 Created),
+        GET  /lineage/graph (полный D3.js граф),
+        GET  /lineage/dataset/{namespace}/{name} (upstream+downstream субграф),
+        GET  /lineage/upstream/{namespace}/{name} (impact analysis вверх),
+        GET  /lineage/downstream/{namespace}/{name} (impact analysis вниз),
+        GET  /lineage/events (фильтрация по job_name/event_type/limit),
+        GET  /lineage/summary (статистика трекера).
+      37 новых тестов: TestLineageNode×4, TestLineageEdge×3, TestLineageGraph×7,
+        TestLineageTracker×10, TestLineageAPIEndpoints×13 (включая multi-hop chain).
+      229/229 тестов зелёных (было 192). Без внешних зависимостей (CI-friendly).
+      Источники: OpenLineage spec openlineage.io, Marquez GitHub, Deloitte Medium 2025.
 - [ ] Cost optimization (model quantization, batching)
 - [ ] Security audit (OWASP for ML)
 - [ ] SLA monitoring
