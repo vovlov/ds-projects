@@ -306,7 +306,21 @@
         TestLineageTracker×10, TestLineageAPIEndpoints×13 (включая multi-hop chain).
       229/229 тестов зелёных (было 192). Без внешних зависимостей (CI-friendly).
       Источники: OpenLineage spec openlineage.io, Marquez GitHub, Deloitte Medium 2025.
-- [ ] Cost optimization (model quantization, batching)
+- [x] Cost optimization (model quantization, batching) — 2026-04-28
+      churn/optimization/quantizer.py: INT8 post-training quantization для sklearn линейных моделей
+      (_quantize_array → симметричная PTQ с per-tensor min/max calibration, QuantizedWeights INT8,
+      QuantizedModel wrapper с proxied predict_proba/predict), quantize_tree_ensemble() (GBDT-прунинг
+      keep_fraction), estimate_inference_speedup() (теоретический 2-4x speedup по NVIDIA 2022).
+      churn/optimization/cost_tracker.py: CostTracker (rolling window 1000 req, deque+numpy percentiles,
+      track() context manager для авто-измерения latency), estimate_monthly_cost() (AWS c6i.large/xlarge +
+      GCP + Azure pricing 2026, авто-sizing по RPS, стоимость /1M req), optimize_batch_size()
+      (throughput = batch/latency, SLA-фильтр, recommendations).
+      churn/api/app.py: GET /optimize/stats (p50/p95/p99 latency, throughput, cost_estimate_10rps,
+      cost_estimate_observed_rps, model_quantization_estimate), POST /optimize/batch (batch profiling).
+      Predict endpoint обёрнут в _cost_tracker.track() для авто-измерения каждого запроса.
+      30 новых тестов: TestQuantizer×12, TestCostTracker×13, TestOptimizeAPIEndpoints×5.
+      131/131 тестов зелёные (было 101).
+      Источники: Jacob et al. 2018 CVPR, NVIDIA INT8 benchmarks 2022, Intel Neural Compressor.
 - [ ] Security audit (OWASP for ML)
 - [ ] SLA monitoring
 

@@ -19,9 +19,18 @@ from ..evaluation.model_comparison import (
     generate_json_report,
     generate_markdown_report,
 )
+from ..optimization.cost_tracker import CostTracker, estimate_monthly_cost
+from ..optimization.quantizer import (
+    estimate_inference_speedup,
+    quantize_tree_ensemble,
+)
 from ..retraining.trigger import PSI_YELLOW
 
 logger = logging.getLogger(__name__)
+
+# Скользящее окно 1000 запросов — достаточно для оценки производительности
+# без накопления памяти (deque с maxlen).
+_cost_tracker = CostTracker(window_size=1000)
 
 # Глобальный эксперимент: control (v1) vs treatment (v2).
 # В production заменяется на Redis-backed store для горизонтального масштабирования.
@@ -250,7 +259,8 @@ def predict(customer: CustomerInput):
                 X[col] = 0
         X = X[model_cols]
 
-    proba = float(model.predict_proba(X)[0][1])
+    with _cost_tracker.track():
+        proba = float(model.predict_proba(X)[0][1])
     prediction = proba >= 0.5
 
     if proba >= 0.7:
@@ -570,4 +580,149 @@ def get_leaderboard() -> dict[str, Any]:
     return {
         "leaderboard": _last_comparison_report.get("leaderboard", []),
         "timestamp": _last_comparison_report.get("timestamp"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cost optimization endpoints
+# ---------------------------------------------------------------------------
+
+
+class OptimizeStatsResponse(BaseModel):
+    """Статистика производительности и стоимости инференса.
+
+    Inference performance and cost statistics.
+    """
+
+    n_requests_in_window: int = Field(..., description="Запросов в окне наблюдения")
+    total_requests: int = Field(..., description="Всего запросов с запуска API")
+    latency_p50_ms: float = Field(..., description="Медианная задержка инференса (мс)")
+    latency_p95_ms: float = Field(..., description="P95 задержка инференса (мс)")
+    latency_p99_ms: float = Field(..., description="P99 задержка инференса (мс)")
+    latency_mean_ms: float = Field(..., description="Средняя задержка (мс)")
+    throughput_rps: float = Field(..., description="Текущий throughput (запросов/сек)")
+    cost_estimate_10rps: dict[str, Any] = Field(..., description="Оценка стоимости при 10 RPS")
+    cost_estimate_observed_rps: dict[str, Any] | None = Field(
+        None, description="Оценка стоимости при наблюдаемом throughput"
+    )
+    model_quantization_estimate: dict[str, Any] = Field(
+        ..., description="Оценка экономии от квантизации модели"
+    )
+
+
+@app.get("/optimize/stats", response_model=OptimizeStatsResponse)
+def optimize_stats() -> OptimizeStatsResponse:
+    """Вернуть статистику производительности и оценку стоимости инференса в облаке.
+
+    Return inference performance stats and cloud cost estimates.
+
+    Собирает данные из скользящего окна трекера:
+    - Перцентили задержки инференса (p50/p95/p99)
+    - Throughput (запросов/сек)
+    - Оценку месячной стоимости при текущем и целевом RPS
+    - Теоретическую экономию от INT8-квантизации модели
+
+    Collects data from rolling-window tracker:
+    - Inference latency percentiles (p50/p95/p99)
+    - Throughput (requests/sec)
+    - Monthly cost estimate at current and target RPS
+    - Theoretical savings from INT8 model quantization
+    """
+    stats = _cost_tracker.get_stats()
+
+    # Базовая оценка при 10 RPS (типичный старт)
+    cost_10rps = estimate_monthly_cost(rps=10.0)
+    cost_10rps_dict: dict[str, Any] = {
+        "rps": cost_10rps.rps,
+        "instance_type": cost_10rps.instance_type,
+        "cost_per_month_usd": cost_10rps.cost_per_month_usd,
+        "cost_per_million_requests_usd": cost_10rps.cost_per_million_requests_usd,
+        "n_instances": cost_10rps.n_instances_recommended,
+        "notes": cost_10rps.notes,
+    }
+
+    # Оценка при наблюдаемом throughput (только если есть данные)
+    cost_observed_dict: dict[str, Any] | None = None
+    if stats.throughput_rps > 0.01:
+        cost_obs = estimate_monthly_cost(rps=max(stats.throughput_rps, 0.1))
+        cost_observed_dict = {
+            "rps": cost_obs.rps,
+            "instance_type": cost_obs.instance_type,
+            "cost_per_month_usd": cost_obs.cost_per_month_usd,
+            "cost_per_million_requests_usd": cost_obs.cost_per_million_requests_usd,
+            "n_instances": cost_obs.n_instances_recommended,
+            "notes": cost_obs.notes,
+        }
+
+    # Теоретическая оценка квантизации для LightGBM (n_estimators=100 default)
+    class _MockLGBM:
+        n_estimators = 100
+
+    _, quant_result = quantize_tree_ensemble(_MockLGBM(), keep_fraction=0.5)
+    speedup = estimate_inference_speedup(quant_result)
+    quantization_estimate: dict[str, Any] = {
+        "method": "tree_pruning_50pct",
+        "description": "Prune 50% of GBDT trees — fastest PTQ for LightGBM without retraining",
+        **speedup,
+        "warning": "Accuracy impact must be validated on holdout set before production deploy",
+    }
+
+    return OptimizeStatsResponse(
+        n_requests_in_window=stats.n_requests,
+        total_requests=_cost_tracker.total_requests,
+        latency_p50_ms=round(stats.p50_ms, 3),
+        latency_p95_ms=round(stats.p95_ms, 3),
+        latency_p99_ms=round(stats.p99_ms, 3),
+        latency_mean_ms=round(stats.mean_ms, 3),
+        throughput_rps=stats.throughput_rps,
+        cost_estimate_10rps=cost_10rps_dict,
+        cost_estimate_observed_rps=cost_observed_dict,
+        model_quantization_estimate=quantization_estimate,
+    )
+
+
+class BatchOptimizeRequest(BaseModel):
+    """Запрос для оптимизации размера батча / Batch size optimization request."""
+
+    latencies_by_batch: dict[int, float] = Field(
+        ...,
+        description="Профиль {batch_size → median_latency_ms} из нагрузочного тестирования",
+    )
+    sla_p95_ms: float = Field(
+        default=200.0,
+        ge=1.0,
+        description="SLA на P95 задержку (мс) — батчи выше исключаются",
+    )
+
+
+@app.post("/optimize/batch")
+def optimize_batch(request: BatchOptimizeRequest) -> dict[str, Any]:
+    """Найти оптимальный размер батча из профиля throughput/latency.
+
+    Find optimal batch size from a throughput/latency profile.
+
+    Принимает результаты нагрузочного тестирования (batch_size → latency)
+    и возвращает оптимальный batch_size, максимизирующий throughput
+    при соблюдении SLA на P95 задержку.
+
+    Takes load-testing results (batch_size → latency) and returns
+    the optimal batch_size maximizing throughput within the P95 SLA.
+    """
+    from ..optimization.cost_tracker import optimize_batch_size
+
+    try:
+        result = optimize_batch_size(
+            latencies_by_batch=request.latencies_by_batch,
+            sla_p95_ms=request.sla_p95_ms,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return {
+        "optimal_batch_size": result.optimal_batch_size,
+        "throughput_rps": result.throughput_rps,
+        "latency_p95_ms": result.latency_p95_ms,
+        "efficiency_score": result.efficiency_score,
+        "recommendations": result.recommendations,
+        "sla_p95_ms": request.sla_p95_ms,
     }

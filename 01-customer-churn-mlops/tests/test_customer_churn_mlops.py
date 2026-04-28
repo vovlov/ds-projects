@@ -1496,3 +1496,376 @@ class TestComparisonAPIEndpoints:
         resp = client.post("/compare/models", json=payload)
         data = resp.json()
         assert data["leaderboard"][0]["run_id"] == "abc123"
+
+
+# ---------------------------------------------------------------------------
+# TestQuantizer — post-training quantization utilities
+# ---------------------------------------------------------------------------
+
+
+class TestQuantizer:
+    """Тесты для churn/optimization/quantizer.py."""
+
+    def test_is_available(self):
+        """numpy всегда доступен в тестовом окружении."""
+        from churn.optimization.quantizer import is_available
+
+        assert is_available() is True
+
+    def test_quantize_array_shape(self):
+        """Квантованный массив имеет ту же форму, что и оригинальный."""
+        from churn.optimization.quantizer import _quantize_array
+
+        weights = np.random.randn(10, 5).astype(np.float64)
+        qw = _quantize_array(weights)
+        assert qw.weights_int8.shape == weights.shape
+
+    def test_quantize_array_dtype_is_int8(self):
+        """Квантованные веса имеют тип int8."""
+        from churn.optimization.quantizer import _quantize_array
+
+        weights = np.random.randn(20).astype(np.float64)
+        qw = _quantize_array(weights)
+        assert qw.weights_int8.dtype == np.int8
+
+    def test_quantize_array_dequantize_accuracy(self):
+        """Деквантизация восстанавливает значения с точностью ~1% от диапазона."""
+        from churn.optimization.quantizer import _quantize_array
+
+        np.random.seed(42)
+        weights = np.random.randn(100).astype(np.float64)
+        qw = _quantize_array(weights)
+        reconstructed = qw.dequantize()
+
+        # Максимальная ошибка <= 1/256 от диапазона весов
+        w_range = weights.max() - weights.min()
+        max_error = np.abs(weights - reconstructed).max()
+        assert max_error <= w_range / 100.0, f"max_error={max_error:.6f}, range={w_range:.6f}"
+
+    def test_quantize_linear_model_logistic_regression(self):
+        """Квантизация sklearn LogisticRegression возвращает QuantizedModel."""
+        from sklearn.linear_model import LogisticRegression
+
+        from churn.optimization.quantizer import QuantizedModel, quantize_linear_model
+
+        model = LogisticRegression()
+        # Минимальное обучение на синтетических данных
+        X = np.random.randn(100, 5)
+        y = (X[:, 0] > 0).astype(int)
+        model.fit(X, y)
+
+        qmodel, result = quantize_linear_model(model)
+        assert isinstance(qmodel, QuantizedModel)
+        assert result.compression_ratio > 1.0
+        assert result.n_params > 0
+        assert result.dtype_quantized == "int8"
+
+    def test_quantize_linear_model_compression_ratio(self):
+        """INT8 даёт ~8x сжатие для float64 весов (float64=8b → int8=1b)."""
+        from sklearn.linear_model import LogisticRegression
+
+        from churn.optimization.quantizer import quantize_linear_model
+
+        model = LogisticRegression()
+        X = np.random.randn(50, 10)
+        y = (X[:, 0] > 0).astype(int)
+        model.fit(X, y)
+
+        _, result = quantize_linear_model(model)
+        # float64 → int8: теоретически 8x, реально 4-8x
+        assert result.compression_ratio >= 4.0
+
+    def test_quantize_linear_model_predict_proba_preserved(self):
+        """QuantizedModel.predict_proba() даёт те же результаты, что и оригинал."""
+        from sklearn.linear_model import LogisticRegression
+
+        from churn.optimization.quantizer import quantize_linear_model
+
+        model = LogisticRegression()
+        X = np.random.randn(200, 5)
+        y = (X[:, 0] > 0).astype(int)
+        model.fit(X, y)
+
+        qmodel, _ = quantize_linear_model(model)
+        X_test = np.random.randn(10, 5)
+        np.testing.assert_array_equal(
+            model.predict_proba(X_test),
+            qmodel.predict_proba(X_test),
+        )
+
+    def test_quantize_linear_model_no_coef_raises(self):
+        """Модель без coef_ вызывает ValueError."""
+        from churn.optimization.quantizer import quantize_linear_model
+
+        class FakeModel:
+            pass
+
+        with pytest.raises(ValueError, match="no coef_"):
+            quantize_linear_model(FakeModel())
+
+    def test_quantize_tree_ensemble_compression(self):
+        """Прунинг 50% деревьев даёт compression_ratio=2."""
+        from churn.optimization.quantizer import quantize_tree_ensemble
+
+        class MockLGBM:
+            n_estimators = 100
+
+        _, result = quantize_tree_ensemble(MockLGBM(), keep_fraction=0.5)
+        assert result.compression_ratio == pytest.approx(2.0)
+        assert result.metadata["n_estimators_kept"] == 50
+
+    def test_quantize_tree_ensemble_invalid_raises(self):
+        """Не-ансамблевая модель вызывает ValueError."""
+        from churn.optimization.quantizer import quantize_tree_ensemble
+
+        class NotAnEnsemble:
+            pass
+
+        with pytest.raises(ValueError, match="not a tree ensemble"):
+            quantize_tree_ensemble(NotAnEnsemble())
+
+    def test_estimate_inference_speedup_int8(self):
+        """Оценка speedup для INT8 возвращает положительные значения."""
+        from churn.optimization.quantizer import (
+            QuantizationResult,
+            estimate_inference_speedup,
+        )
+
+        result = QuantizationResult(
+            original_size_bytes=8000,
+            quantized_size_bytes=1000,
+            compression_ratio=8.0,
+            weight_error_l2=0.01,
+            n_params=1000,
+            dtype_original="float64",
+            dtype_quantized="int8",
+        )
+        speedup = estimate_inference_speedup(result)
+        assert speedup["theoretical_speedup"] > 1.0
+        assert speedup["practical_speedup_estimate"] > 1.0
+        assert 0.0 < speedup["memory_reduction_pct"] <= 100.0
+
+    def test_quantization_result_size_reduction_pct(self):
+        """size_reduction_pct корректно вычисляется из compression_ratio."""
+        from churn.optimization.quantizer import QuantizationResult
+
+        result = QuantizationResult(
+            original_size_bytes=8000,
+            quantized_size_bytes=1000,
+            compression_ratio=8.0,
+            weight_error_l2=0.0,
+            n_params=1000,
+            dtype_original="float64",
+            dtype_quantized="int8",
+        )
+        assert result.size_reduction_pct == pytest.approx(87.5, abs=0.1)
+
+
+# ---------------------------------------------------------------------------
+# TestCostTracker — inference cost tracking
+# ---------------------------------------------------------------------------
+
+
+class TestCostTracker:
+    """Тесты для churn/optimization/cost_tracker.py."""
+
+    def test_track_context_manager(self):
+        """track() записывает задержку > 0."""
+        from churn.optimization.cost_tracker import CostTracker
+
+        tracker = CostTracker(window_size=100)
+        with tracker.track():
+            _ = sum(range(1000))
+
+        stats = tracker.get_stats()
+        assert stats.n_requests == 1
+        assert stats.p50_ms >= 0.0
+
+    def test_total_requests_increments(self):
+        """total_requests растёт с каждым track()."""
+        from churn.optimization.cost_tracker import CostTracker
+
+        tracker = CostTracker()
+        for _ in range(5):
+            with tracker.track():
+                pass
+        assert tracker.total_requests == 5
+
+    def test_record_latency_direct(self):
+        """record_latency() добавляет значение в окно."""
+        from churn.optimization.cost_tracker import CostTracker
+
+        tracker = CostTracker()
+        tracker.record_latency(42.0)
+        tracker.record_latency(10.0)
+        stats = tracker.get_stats()
+        assert stats.n_requests == 2
+        assert stats.mean_ms == pytest.approx(26.0, abs=0.1)
+
+    def test_window_size_respected(self):
+        """Окно не превышает window_size записей."""
+        from churn.optimization.cost_tracker import CostTracker
+
+        tracker = CostTracker(window_size=5)
+        for i in range(10):
+            tracker.record_latency(float(i))
+        stats = tracker.get_stats()
+        assert stats.n_requests == 5
+
+    def test_stats_empty_tracker(self):
+        """Пустой трекер возвращает нулевую статистику."""
+        from churn.optimization.cost_tracker import CostTracker
+
+        tracker = CostTracker()
+        stats = tracker.get_stats()
+        assert stats.n_requests == 0
+        assert stats.p50_ms == 0.0
+        assert stats.throughput_rps == 0.0
+
+    def test_reset_clears_window(self):
+        """reset() очищает окно наблюдений."""
+        from churn.optimization.cost_tracker import CostTracker
+
+        tracker = CostTracker()
+        tracker.record_latency(10.0)
+        tracker.reset()
+        stats = tracker.get_stats()
+        assert stats.n_requests == 0
+
+    def test_percentiles_order(self):
+        """p50 <= p95 <= p99."""
+        from churn.optimization.cost_tracker import CostTracker
+
+        tracker = CostTracker()
+        for v in range(1, 101):
+            tracker.record_latency(float(v))
+        stats = tracker.get_stats()
+        assert stats.p50_ms <= stats.p95_ms <= stats.p99_ms
+
+    def test_estimate_monthly_cost_basic(self):
+        """estimate_monthly_cost возвращает положительную стоимость."""
+        from churn.optimization.cost_tracker import estimate_monthly_cost
+
+        cost = estimate_monthly_cost(rps=10.0)
+        assert cost.cost_per_month_usd > 0
+        assert cost.cost_per_million_requests_usd > 0
+        assert cost.n_instances_recommended >= 1
+
+    def test_estimate_monthly_cost_scales_with_rps(self):
+        """Высокий RPS требует больше инстансов."""
+        from churn.optimization.cost_tracker import estimate_monthly_cost
+
+        low = estimate_monthly_cost(rps=1.0)
+        high = estimate_monthly_cost(rps=200.0)
+        assert high.cost_per_month_usd > low.cost_per_month_usd
+
+    def test_estimate_monthly_cost_invalid_rps(self):
+        """rps <= 0 вызывает ValueError."""
+        from churn.optimization.cost_tracker import estimate_monthly_cost
+
+        with pytest.raises(ValueError, match="rps must be positive"):
+            estimate_monthly_cost(rps=0.0)
+
+    def test_optimize_batch_size_finds_optimum(self):
+        """optimize_batch_size находит батч с максимальным throughput в рамках SLA."""
+        from churn.optimization.cost_tracker import optimize_batch_size
+
+        # batch=32 нарушает SLA.
+        # throughput: 1→100, 8→200, 16→177 req/s — оптимум batch=8
+        profile = {1: 10.0, 8: 40.0, 16: 90.0, 32: 250.0}
+        result = optimize_batch_size(profile, sla_p95_ms=200.0)
+        assert result.optimal_batch_size == 8
+        assert result.throughput_rps > 0
+
+    def test_optimize_batch_size_empty_raises(self):
+        """Пустой профиль вызывает ValueError."""
+        from churn.optimization.cost_tracker import optimize_batch_size
+
+        with pytest.raises(ValueError):
+            optimize_batch_size({})
+
+    def test_optimize_batch_size_no_sla_compliant(self):
+        """Если все батчи нарушают SLA — выбирается наименее медленный."""
+        from churn.optimization.cost_tracker import optimize_batch_size
+
+        profile = {1: 300.0, 2: 500.0}
+        result = optimize_batch_size(profile, sla_p95_ms=100.0)
+        assert result.optimal_batch_size == 1
+        assert len(result.recommendations) > 0
+
+
+# ---------------------------------------------------------------------------
+# TestOptimizeAPIEndpoints — /optimize/* endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestOptimizeAPIEndpoints:
+    """Тесты для /optimize/stats и /optimize/batch endpoints."""
+
+    def test_optimize_stats_returns_200(self):
+        """GET /optimize/stats возвращает 200 с обязательными полями."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.get("/optimize/stats")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "latency_p50_ms" in data
+        assert "latency_p95_ms" in data
+        assert "throughput_rps" in data
+        assert "cost_estimate_10rps" in data
+        assert "model_quantization_estimate" in data
+
+    def test_optimize_stats_cost_estimate_structure(self):
+        """cost_estimate_10rps содержит все обязательные поля."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.get("/optimize/stats")
+        data = resp.json()
+        cost = data["cost_estimate_10rps"]
+        assert "rps" in cost
+        assert "instance_type" in cost
+        assert "cost_per_month_usd" in cost
+        assert cost["cost_per_month_usd"] > 0
+
+    def test_optimize_stats_quantization_estimate_structure(self):
+        """model_quantization_estimate содержит speedup и рекомендации."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.get("/optimize/stats")
+        data = resp.json()
+        quant = data["model_quantization_estimate"]
+        assert "compression_ratio" in quant
+        assert "memory_reduction_pct" in quant
+        assert quant["compression_ratio"] > 1.0
+
+    def test_optimize_batch_valid_profile(self):
+        """POST /optimize/batch с валидным профилем возвращает optimal_batch_size."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = {
+            "latencies_by_batch": {"1": 10.0, "8": 50.0, "16": 120.0, "32": 300.0},
+            "sla_p95_ms": 200.0,
+        }
+        resp = client.post("/optimize/batch", json=payload)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "optimal_batch_size" in data
+        assert data["optimal_batch_size"] in [1, 8, 16]
+
+    def test_optimize_batch_empty_raises_422(self):
+        """POST /optimize/batch с пустым профилем возвращает 422."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        payload = {"latencies_by_batch": {}, "sla_p95_ms": 200.0}
+        resp = client.post("/optimize/batch", json=payload)
+        assert resp.status_code == 422
