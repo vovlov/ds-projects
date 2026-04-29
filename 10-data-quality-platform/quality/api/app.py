@@ -2,11 +2,12 @@
 FastAPI-приложение для Data Quality Platform / FastAPI app.
 
 Предоставляет HTTP-эндпоинты для профилирования, валидации качества,
-проверки дрифта, управления реестром схем (data contracts)
-и отслеживания родословной данных (data lineage).
+проверки дрифта, управления реестром схем (data contracts),
+отслеживания родословной данных (data lineage) и аудита безопасности ML.
 
 Exposes endpoints for profiling, quality validation, drift detection,
-schema registry management (data contracts), and data lineage tracking.
+schema registry management (data contracts), data lineage tracking,
+and OWASP ML security audits.
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ from quality.schema_registry.validator import (
     infer_schema_from_dataframe,
     validate_dataframe_against_schema,
 )
+from quality.security.owasp import OWASPMLAudit
+from quality.security.pii_detector import detect_pii
 
 app = FastAPI(
     title="Data Quality Platform",
@@ -579,3 +582,202 @@ def get_lineage_summary() -> JSONResponse:
     Returns event counts, node/edge counts, and event type breakdown.
     """
     return JSONResponse(content=get_tracker().summary())
+
+
+# ---------------------------------------------------------------------------
+# Security endpoints — OWASP ML Top 10 + PII detection
+# ---------------------------------------------------------------------------
+
+
+class SecurityAuditRequest(BaseModel):
+    """Request body for OWASP ML security audit / Запрос аудита безопасности."""
+
+    numeric_columns: dict[str, list[float]] = {}
+    all_columns: dict[str, list[Any]] = {}
+    label_column: list[Any] | None = None
+    output_fields: list[str] = []
+    has_rate_limiting: bool = False
+    exposes_probabilities: bool = True
+
+
+class PIIRequest(BaseModel):
+    """Request body for PII scan / Запрос сканирования PII."""
+
+    columns: dict[str, list[Any]]
+    max_examples: int = 3
+
+
+@app.post("/security/audit", status_code=200)
+def security_audit(request: SecurityAuditRequest) -> JSONResponse:
+    """
+    Аудит безопасности ML по OWASP ML Top 10 / OWASP ML Top 10 security audit.
+
+    Принимает метаданные датасета и конфигурацию API, возвращает отчёт
+    с найденными проблемами, оценкой (0-100) и рекомендациями.
+
+    Accepts dataset metadata and API config, returns a prioritised finding
+    report with a 0-100 security score and actionable recommendations.
+
+    Checks performed:
+    - ML01: Input manipulation (adversarial outliers)
+    - ML02: Data poisoning (label imbalance)
+    - ML03: Model inversion (exposed internal fields)
+    - ML04: Membership inference (high-cardinality columns)
+    - ML05: Model theft (missing rate limits)
+    - ML08: Model skewing (high missing-value rates)
+    - ML09: Output integrity (missing signature)
+    """
+    auditor = OWASPMLAudit()
+    report = auditor.run_audit(
+        numeric_columns=request.numeric_columns,
+        all_columns=request.all_columns,
+        label_column=request.label_column,
+        output_fields=request.output_fields,
+        has_rate_limiting=request.has_rate_limiting,
+        exposes_probabilities=request.exposes_probabilities,
+    )
+    return JSONResponse(content=report.to_dict())
+
+
+@app.post("/security/pii", status_code=200)
+def pii_scan(request: PIIRequest) -> JSONResponse:
+    """
+    Сканирование датасета на наличие персональных данных (PII).
+
+    Scan a dataset for Personally Identifiable Information (PII).
+
+    Detects: email, phone, SSN, credit card, IP address, passport,
+    IBAN, date of birth, full names.
+
+    Returns GDPR compliance flag and masked examples for each finding.
+    """
+    report = detect_pii(request.columns, max_examples=request.max_examples)
+    return JSONResponse(content=report.to_dict())
+
+
+@app.post("/security/audit/csv", status_code=200)
+async def security_audit_csv(
+    file: UploadFile = File(..., description="CSV-файл для аудита безопасности"),
+    has_rate_limiting: bool = Form(False),
+    exposes_probabilities: bool = Form(True),
+    label_col: str | None = Form(None, description="Имя столбца с метками (опционально)"),
+) -> JSONResponse:
+    """
+    Аудит безопасности CSV-датасета / CSV dataset security audit.
+
+    Загрузите CSV — получите полный OWASP ML аудит + PII-сканирование.
+    Upload a CSV to run a combined OWASP + PII security audit.
+    """
+    df = _read_upload_csv(file)
+
+    # Build column dicts from Polars DataFrame
+    numeric_cols: dict[str, list[float]] = {}
+    all_cols: dict[str, list[Any]] = {}
+    label_column: list[Any] | None = None
+
+    for col in df.columns:
+        values = df[col].to_list()
+        all_cols[col] = values
+        if df[col].dtype in (pl.Float32, pl.Float64, pl.Int32, pl.Int64, pl.Int16, pl.Int8):
+            numeric_cols[col] = [float(v) for v in values if v is not None]
+        if label_col and col == label_col:
+            label_column = values
+
+    auditor = OWASPMLAudit()
+    audit_report = auditor.run_audit(
+        numeric_columns=numeric_cols,
+        all_columns=all_cols,
+        label_column=label_column,
+        has_rate_limiting=has_rate_limiting,
+        exposes_probabilities=exposes_probabilities,
+    )
+
+    pii_report = detect_pii(all_cols)
+
+    return JSONResponse(
+        content={
+            "owasp_audit": audit_report.to_dict(),
+            "pii_scan": pii_report.to_dict(),
+            "rows": len(df),
+            "columns": len(df.columns),
+        }
+    )
+
+
+@app.get("/security/checklist")
+def security_checklist() -> JSONResponse:
+    """
+    OWASP ML Top 10 справочник / OWASP ML Top 10 reference checklist.
+
+    Возвращает список всех 10 рисков с описаниями и рекомендациями.
+    Returns all 10 OWASP ML risks with descriptions and mitigations.
+    """
+    checklist = [
+        {
+            "id": "ML01",
+            "title": "Input Manipulation Attack",
+            "description": "Adversarial examples crafted to fool model predictions",
+            "mitigation": "Input validation, adversarial training, outlier pre-filtering",
+        },
+        {
+            "id": "ML02",
+            "title": "Data Poisoning Attack",
+            "description": "Injecting malicious samples into training data",
+            "mitigation": "Data provenance tracking, anomaly detection on labels, audit trails",
+        },
+        {
+            "id": "ML03",
+            "title": "Model Inversion Attack",
+            "description": "Reconstructing training data from model outputs/gradients",
+            "mitigation": (
+                "Limit output to top-1 class, apply output perturbation, avoid exposing logits"
+            ),
+        },
+        {
+            "id": "ML04",
+            "title": "Membership Inference Attack",
+            "description": "Determining if a record was in the training set",
+            "mitigation": (
+                "Differential privacy, k-anonymity, remove quasi-identifiers from training"
+            ),
+        },
+        {
+            "id": "ML05",
+            "title": "Model Theft",
+            "description": "Cloning a model via API queries (model extraction)",
+            "mitigation": "Rate limiting, prediction rounding, query budgets, watermarking",
+        },
+        {
+            "id": "ML06",
+            "title": "AI Supply Chain Attack",
+            "description": "Compromised pretrained models, datasets, or ML libraries",
+            "mitigation": (
+                "Verify model checksums, pin library versions, use private model registry"
+            ),
+        },
+        {
+            "id": "ML07",
+            "title": "Transfer Learning Attack",
+            "description": "Backdoors injected via poisoned pretrained base models",
+            "mitigation": "Fine-tune on trusted data only, audit base model provenance",
+        },
+        {
+            "id": "ML08",
+            "title": "Model Skewing",
+            "description": "Manipulating inference inputs to bias model behaviour",
+            "mitigation": "Enforce feature constraints at inference, monitor feature distributions",
+        },
+        {
+            "id": "ML09",
+            "title": "Output Integrity Attack",
+            "description": "Tampering with predictions in transit between model and consumer",
+            "mitigation": "Sign outputs with HMAC-SHA256, TLS end-to-end, prediction IDs",
+        },
+        {
+            "id": "ML10",
+            "title": "Model Poisoning",
+            "description": "Poisoning the model itself during training or fine-tuning",
+            "mitigation": "Secure training infrastructure, model checksums, reproducible builds",
+        },
+    ]
+    return JSONResponse(content={"owasp_ml_top_10": checklist, "version": "2023"})

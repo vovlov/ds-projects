@@ -321,7 +321,24 @@
       30 новых тестов: TestQuantizer×12, TestCostTracker×13, TestOptimizeAPIEndpoints×5.
       131/131 тестов зелёные (было 101).
       Источники: Jacob et al. 2018 CVPR, NVIDIA INT8 benchmarks 2022, Intel Neural Compressor.
-- [ ] Security audit (OWASP for ML)
+- [x] Security audit (OWASP for ML) — 2026-04-29
+      quality/security/owasp.py: OWASPMLAudit — 7 автоматизированных проверок из OWASP ML Top 10:
+        ML01 (adversarial inputs: IQR-outlier ratio >15%), ML02 (data poisoning: Shannon entropy <0.3),
+        ML03 (model inversion: logit/embedding fields exposed), ML04 (membership inference: unique ratio >95%),
+        ML05 (model theft: no rate limiting), ML08 (model skewing: missing >30%), ML09 (output integrity: no HMAC).
+        AuditReport: score 0-100 (penalty per severity), passed_checks, high_risk_count, to_dict().
+      quality/security/pii_detector.py: detect_pii() — 9 типов PII (email, phone, SSN, credit card,
+        IP address, passport, IBAN, DOB, full name) через regex + masking для audit logs.
+        PIIReport: gdpr_compliant flag (no critical/high PII), affected_columns, critical_columns.
+      quality/api/app.py: 4 новых endpoint:
+        POST /security/audit (JSON-запрос с column dicts → OWASP report),
+        POST /security/pii (column dict → PII scan + GDPR flag),
+        POST /security/audit/csv (CSV upload → combined OWASP+PII audit),
+        GET  /security/checklist (OWASP ML Top 10 reference с mitigations).
+      48 новых тестов: TestHelperFunctions×8, TestOWASPChecks×16, TestAuditReport×5,
+        TestPIIDetector×10, TestSecurityAuditAPIEndpoint×3, TestPIIScanAPIEndpoint×3,
+        TestSecurityChecklistEndpoint×3. 277/277 тестов зелёные (было 229).
+      Источники: OWASP ML Security Top 10 v2023, EU AI Act Article 10, GDPR Article 4.
 - [ ] SLA monitoring
 
 ---
