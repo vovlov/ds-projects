@@ -10,7 +10,7 @@ Inspired by Confluent Schema Registry and Data Contract CLI, but dependency-free
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -90,7 +90,7 @@ class SchemaVersion:
     schema_name: str
     version: str  # семантическая версия / semantic: "1.0.0"
     schema: DataSchema
-    registered_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    registered_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     is_latest: bool = True
 
     def to_dict(self) -> dict[str, Any]:
