@@ -35,6 +35,8 @@ from quality.schema_registry.validator import (
 )
 from quality.security.owasp import OWASPMLAudit
 from quality.security.pii_detector import detect_pii
+from quality.sla.monitor import get_monitor, reset_monitor
+from quality.sla.slo import SLIObservation, SLIType, SLODefinition
 
 app = FastAPI(
     title="Data Quality Platform",
@@ -781,3 +783,213 @@ def security_checklist() -> JSONResponse:
         },
     ]
     return JSONResponse(content={"owasp_ml_top_10": checklist, "version": "2023"})
+
+
+# ---------------------------------------------------------------------------
+# SLA Monitoring — Pydantic request/response models
+# ---------------------------------------------------------------------------
+
+
+class SLODefineRequest(BaseModel):
+    """Запрос регистрации SLO / SLO registration request."""
+
+    service: str
+    sli_type: str = "availability"
+    target: float
+    window_days: int = 30
+    latency_threshold_ms: float | None = None
+    description: str = ""
+
+
+class SLIObserveRequest(BaseModel):
+    """Запрос записи SLI-наблюдения / SLI observation record request."""
+
+    service: str
+    sli_type: str = "availability"
+    good: int
+    total: int
+    metadata: dict[str, Any] = {}
+
+
+# ---------------------------------------------------------------------------
+# SLA Monitoring — endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/sla/define", status_code=201)
+def sla_define(req: SLODefineRequest) -> JSONResponse:
+    """
+    Зарегистрировать SLO для сервиса / Register an SLO for a service.
+
+    Первая регистрация создаёт трекер бюджета ошибок.
+    Повторная регистрация перезаписывает существующий SLO и сбрасывает трекер.
+
+    First registration creates an error budget tracker.
+    Re-registration overwrites the existing SLO and resets its tracker.
+
+    Example:
+        POST /sla/define
+        {"service": "churn-api", "sli_type": "availability", "target": 0.999}
+    """
+    try:
+        sli_type = SLIType(req.sli_type)
+        slo = SLODefinition(
+            service=req.service,
+            sli_type=sli_type,
+            target=req.target,
+            window_days=req.window_days,
+            latency_threshold_ms=req.latency_threshold_ms,
+            description=req.description,
+        )
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    result = get_monitor().define_slo(slo)
+    return JSONResponse(content=result.to_dict(), status_code=201)
+
+
+@app.post("/sla/observe", status_code=201)
+def sla_observe(req: SLIObserveRequest) -> JSONResponse:
+    """
+    Записать SLI-наблюдение / Record an SLI observation batch.
+
+    Обновляет трекер бюджета ошибок для соответствующего SLO.
+    Updates the error budget tracker for the matching SLO.
+
+    Args:
+        good: количество успешных событий (запросов, ответов < порога latency)
+        total: общее количество событий
+
+    Example:
+        POST /sla/observe
+        {"service": "churn-api", "sli_type": "availability", "good": 998, "total": 1000}
+    """
+    try:
+        sli_type = SLIType(req.sli_type)
+        obs = SLIObservation(
+            service=req.service,
+            sli_type=sli_type,
+            good=req.good,
+            total=req.total,
+            metadata=req.metadata,
+        )
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        result = get_monitor().observe(obs)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return JSONResponse(content=result.to_dict(), status_code=201)
+
+
+@app.get("/sla/status")
+def sla_status_all() -> JSONResponse:
+    """
+    Статус бюджета ошибок для всех сервисов / Error budget status for all services.
+
+    Возвращает burn rates (1h / 6h / 3d), оставшийся бюджет и активные алерты.
+    Returns burn rates (1h / 6h / 3d), remaining budget, and active alerts.
+    """
+    statuses = get_monitor().get_all_statuses()
+    return JSONResponse(  # noqa: E501
+        content={"services": [s.to_dict() for s in statuses], "total": len(statuses)}
+    )
+
+
+@app.get("/sla/status/{service}")
+def sla_status_service(service: str, sli_type: str | None = None) -> JSONResponse:
+    """
+    Статус бюджета для конкретного сервиса / Error budget status for a specific service.
+
+    Args:
+        service: имя сервиса (как зарегистрировано в /sla/define)
+        sli_type: фильтр по типу SLI (опционально)
+    """
+    try:
+        sli = SLIType(sli_type) if sli_type else None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    statuses = get_monitor().get_status(service, sli_type=sli)
+    if not statuses:
+        raise HTTPException(status_code=404, detail=f"No SLO found for service '{service}'")
+
+    return JSONResponse(content={"service": service, "slos": [s.to_dict() for s in statuses]})
+
+
+@app.get("/sla/burn-rate/{service}")
+def sla_burn_rate(service: str) -> JSONResponse:
+    """
+    Burn rate и прогноз исчерпания бюджета / Burn rate and budget exhaustion forecast.
+
+    Возвращает multi-window burn rates и прогнозируемое время до исчерпания бюджета.
+    Returns multi-window burn rates and projected time until budget exhaustion.
+    Используется для Grafana-дашбордов и alerting-интеграций.
+    """
+    statuses = get_monitor().get_status(service)
+    if not statuses:
+        raise HTTPException(status_code=404, detail=f"No SLO found for service '{service}'")
+
+    result = []
+    for s in statuses:
+        result.append(
+            {
+                "service": s.service,
+                "sli_type": s.slo.sli_type.value,
+                "burn_rates": s.to_dict()["burn_rates"],
+                "budget_remaining_pct": round(s.budget_remaining_pct, 2),
+                "budget_consumed_pct": round(s.budget_consumed_pct, 2),
+                "projected_exhaustion_hours": s.projected_exhaustion_hours,
+                "active_alerts": [a.to_dict() for a in s.active_alerts],
+            }
+        )
+    return JSONResponse(content={"service": service, "burn_rates": result})
+
+
+@app.post("/sla/report")
+def sla_report() -> JSONResponse:
+    """
+    Сводный отчёт о соответствии SLA / Aggregate SLA compliance report.
+
+    Охватывает все зарегистрированные SLO: статус compliance, число нарушений,
+    критических и высоких алертов.
+
+    Covers all registered SLOs: compliance status, violation count,
+    critical and high alert counts.
+    """
+    report = get_monitor().generate_report()
+    return JSONResponse(content=report.to_dict())
+
+
+@app.get("/sla/slos")
+def sla_list_slos() -> JSONResponse:
+    """
+    Список всех зарегистрированных SLO / List all registered SLO definitions.
+    """
+    slos = get_monitor().list_slos()
+    return JSONResponse(content={"slos": slos, "total": len(slos)})
+
+
+@app.get("/sla/observations")
+def sla_observations(service: str | None = None, limit: int = 50) -> JSONResponse:
+    """
+    Последние SLI-наблюдения / Recent SLI observations.
+
+    Полезно для отладки и аудита измерений.
+    Useful for debugging and auditing SLI measurements.
+    """
+    obs = get_monitor().get_recent_observations(service=service, limit=limit)
+    return JSONResponse(content={"observations": obs, "total": len(obs)})
+
+
+@app.post("/sla/reset")
+def sla_reset() -> JSONResponse:
+    """
+    Сбросить все SLO и наблюдения / Reset all SLOs and observations.
+
+    Полезно для тестирования / Useful for testing and demos.
+    """
+    reset_monitor()
+    return JSONResponse(content={"status": "reset", "message": "All SLOs and observations cleared"})

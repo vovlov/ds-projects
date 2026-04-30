@@ -339,7 +339,28 @@
         TestPIIDetector×10, TestSecurityAuditAPIEndpoint×3, TestPIIScanAPIEndpoint×3,
         TestSecurityChecklistEndpoint×3. 277/277 тестов зелёные (было 229).
       Источники: OWASP ML Security Top 10 v2023, EU AI Act Article 10, GDPR Article 4.
-- [ ] SLA monitoring
+- [x] SLA monitoring — 2026-04-30
+      quality/sla/slo.py: SLIType(StrEnum) + SLODefinition (target, error_budget_fraction,
+      error_budget_minutes) + SLIObservation (good/total → sli_value).
+      quality/sla/budget.py: ErrorBudgetTracker — rolling deque (10K cap), multi-window
+      burn rate (_burn_rate за 1h/6h/72h/168h). Google SRE Table 5.1 burn rate rules:
+      critical≥14.4 (1h, 2% budget), high≥6.0 (6h, 5%), medium≥3.0 (3d, 10%), low≥1.0.
+      BurnRateAlert (severity, response_time, projected_exhaustion_hours). ErrorBudgetStatus
+      с полным to_dict() для Grafana-совместимого ответа.
+      quality/sla/monitor.py: SLAMonitor singleton (get_monitor/reset_monitor),
+      define_slo() / observe() / get_status() / generate_report(). SLAComplianceReport.
+      quality/api/app.py: 8 новых endpoint:
+        POST /sla/define (201, SLO registration с валидацией),
+        POST /sla/observe (201, SLI batch observation),
+        GET  /sla/status (все сервисы), GET /sla/status/{service} (фильтр по sli_type),
+        GET  /sla/burn-rate/{service} (multi-window burn + projected exhaustion),
+        POST /sla/report (aggregate compliance report),
+        GET  /sla/slos (list), GET /sla/observations (аудит), POST /sla/reset.
+      44 новых тестов: TestSLODefinition×6, TestSLIObservation×4, TestErrorBudgetTracker×9,
+        TestSLAMonitor×9, TestSLAAPIEndpoints×16.
+      321/321 тестов зелёные (было 277).
+      Источники: Google SRE Workbook Ch.5 (sre.google/workbook/alerting-on-slos/),
+        nobl9.com SLO Best Practices 2026, Uptrace SLA/SLO Monitoring 2025.
 
 ---
 
