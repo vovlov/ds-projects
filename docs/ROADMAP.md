@@ -361,6 +361,18 @@
       321/321 тестов зелёные (было 277).
       Источники: Google SRE Workbook Ch.5 (sre.google/workbook/alerting-on-slos/),
         nobl9.com SLO Best Practices 2026, Uptrace SLA/SLO Monitoring 2025.
+- [x] H3 геопространственные признаки для оценки недвижимости (Project 07) — 2026-05-01
+      pricing/data/geo.py: NEIGHBORHOOD_COORDS (15 районов Москвы, WGS84),
+      generate_neighborhood_coordinates() с шумом ~350–400 м (реалистичный разброс квартир),
+      lat_lng_to_h3() с graceful fallback (mock-сетка без h3 в CI), is_available().
+      compute_h3_market_stats() — медиана цен + count по H3-ячейке (медиана устойчива к outliers).
+      add_h3_features() — h3_r7 (район ~5 км²) + h3_r8 (микрорайон ~0.74 км²) + price_vs_district
+        (price / hex_median: >1 = дороже рынка, <1 = дешевле).
+      enrich_with_geo() — обёртка neighborhood → lat/lng → H3 → market stats.
+      GEO_FEATURES + GEO_MARKET_FEATURES для интеграции с train.py.
+      h3==4.4.2 добавлен в [pricing] extras pyproject.toml.
+      14 новых тестов TestH3GeoFeatures (33/33 зелёных, было 19).
+      Источники: Uber H3 blog 2018, Zillow AVM research 2024, h3geo.org docs.
 
 ---
 

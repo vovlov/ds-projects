@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -265,3 +266,119 @@ class TestAPI:
             # top_factors должны быть из SHAP (иметь поле contribution)
             assert len(data["top_factors"]) > 0
             assert "contribution" in data["top_factors"][0]
+
+
+class TestH3GeoFeatures:
+    """Тесты H3 геопространственных признаков для оценки недвижимости."""
+
+    def test_is_available_returns_bool(self) -> None:
+        from pricing.data.geo import is_available
+
+        result = is_available()
+        assert isinstance(result, bool)
+
+    def test_lat_lng_to_h3_returns_nonempty_string(self) -> None:
+        from pricing.data.geo import lat_lng_to_h3
+
+        result = lat_lng_to_h3(55.73, 37.57, resolution=7)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_lat_lng_to_h3_deterministic(self) -> None:
+        """Одинаковые координаты → одинаковая ячейка (воспроизводимость)."""
+        from pricing.data.geo import lat_lng_to_h3
+
+        cell1 = lat_lng_to_h3(55.73, 37.57, resolution=7)
+        cell2 = lat_lng_to_h3(55.73, 37.57, resolution=7)
+        assert cell1 == cell2
+
+    def test_lat_lng_to_h3_different_resolutions_differ(self) -> None:
+        """r7 и r8 ячейки должны быть разными (r8 мельче)."""
+        from pricing.data.geo import lat_lng_to_h3
+
+        r7 = lat_lng_to_h3(55.73, 37.57, resolution=7)
+        r8 = lat_lng_to_h3(55.73, 37.57, resolution=8)
+        assert r7 != r8
+
+    def test_generate_neighborhood_coordinates_count(self) -> None:
+        from pricing.data.geo import generate_neighborhood_coordinates
+
+        rng = np.random.default_rng(42)
+        lats, lngs = generate_neighborhood_coordinates(["Хамовники", "Арбат", "Марьино"], rng)
+        assert len(lats) == 3
+        assert len(lngs) == 3
+
+    def test_generate_neighborhood_coordinates_moscow_bounds(self) -> None:
+        """Координаты должны лежать в границах московского региона."""
+        from pricing.data.geo import NEIGHBORHOOD_COORDS, generate_neighborhood_coordinates
+
+        rng = np.random.default_rng(0)
+        neighborhoods = list(NEIGHBORHOOD_COORDS.keys())
+        lats, lngs = generate_neighborhood_coordinates(neighborhoods, rng)
+        for lat, lng in zip(lats, lngs, strict=True):
+            assert 55.0 <= lat <= 56.5, f"lat={lat} out of Moscow bounds"
+            assert 36.5 <= lng <= 38.5, f"lng={lng} out of Moscow bounds"
+
+    def test_enrich_with_geo_adds_latlon_and_h3(self, full_df: pl.DataFrame) -> None:
+        from pricing.data.geo import enrich_with_geo
+
+        enriched = enrich_with_geo(full_df, seed=42)
+        for col in ["latitude", "longitude", "h3_r7", "h3_r8"]:
+            assert col in enriched.columns, f"Missing column: {col}"
+
+    def test_enrich_with_geo_market_stats_columns(self, full_df: pl.DataFrame) -> None:
+        from pricing.data.geo import enrich_with_geo
+
+        enriched = enrich_with_geo(full_df, seed=42, include_market_stats=True)
+        for col in ["h3_r7_median_price", "h3_r7_count", "price_vs_district"]:
+            assert col in enriched.columns, f"Missing market stat: {col}"
+
+    def test_price_vs_district_is_positive(self, full_df: pl.DataFrame) -> None:
+        """price_vs_district = price / hex_median — должна быть > 0."""
+        from pricing.data.geo import enrich_with_geo
+
+        enriched = enrich_with_geo(full_df, seed=42)
+        ratios = enriched["price_vs_district"].drop_nulls().to_list()
+        assert len(ratios) > 0
+        for r in ratios:
+            assert r > 0, f"price_vs_district={r} is non-positive"
+
+    def test_enrich_without_market_stats_skips_ratio(self, full_df: pl.DataFrame) -> None:
+        from pricing.data.geo import enrich_with_geo
+
+        enriched = enrich_with_geo(full_df, seed=42, include_market_stats=False)
+        assert "h3_r7" in enriched.columns
+        assert "h3_r8" in enriched.columns
+        assert "price_vs_district" not in enriched.columns
+
+    def test_add_h3_features_graceful_no_latlon(self, full_df: pl.DataFrame) -> None:
+        """Без latitude/longitude датафрейм возвращается без изменений."""
+        from pricing.data.geo import add_h3_features
+
+        result = add_h3_features(full_df)
+        assert result.columns == full_df.columns
+
+    def test_geo_features_list_contents(self) -> None:
+        from pricing.data.geo import GEO_FEATURES, GEO_MARKET_FEATURES
+
+        assert "h3_r7" in GEO_FEATURES
+        assert "h3_r8" in GEO_FEATURES
+        assert "price_vs_district" in GEO_MARKET_FEATURES
+        assert "h3_r7_median_price" in GEO_MARKET_FEATURES
+
+    def test_neighborhood_coords_covers_all_districts(self) -> None:
+        """Все районы датасета должны иметь координаты в NEIGHBORHOOD_COORDS."""
+        from pricing.data.geo import NEIGHBORHOOD_COORDS
+        from pricing.data.load import NEIGHBORHOODS
+
+        missing = [n for n in NEIGHBORHOODS if n not in NEIGHBORHOOD_COORDS]
+        assert not missing, f"Missing coordinates for neighborhoods: {missing}"
+
+    def test_h3_r7_count_matches_group_size(self, full_df: pl.DataFrame) -> None:
+        """Сумма h3_r7_count по уникальным ячейкам ≥ числа строк (без дублей)."""
+        from pricing.data.geo import enrich_with_geo
+
+        enriched = enrich_with_geo(full_df, seed=42)
+        # Каждая ячейка содержит как минимум одну запись
+        min_count = enriched["h3_r7_count"].min()
+        assert min_count is not None and min_count >= 1

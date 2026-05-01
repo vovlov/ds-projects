@@ -87,6 +87,7 @@ pricing = [
     "uvicorn>=0.34",
     "streamlit>=1.40",
     "plotly>=5.24",
+    "h3>=4.4.2",
 ]
 cv = [
     "polars>=1.0",
