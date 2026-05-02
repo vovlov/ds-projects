@@ -11,18 +11,21 @@ from pydantic import BaseModel
 
 from ..generation.chain import generate_answer, generate_answer_with_gate
 from ..ingestion.loader import chunk_documents, load_documents
-from ..retrieval.store import get_client, get_or_create_collection, index_chunks, search
+from ..retrieval.hybrid import HybridIndex, hybrid_search
+from ..retrieval.store import get_client, get_or_create_collection, index_chunks
 
-app = FastAPI(title="RAG Enterprise API", version="1.0.0")
+app = FastAPI(title="RAG Enterprise API", version="2.0.0")
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "documents"
 
 # Global state
 _collection = None
+_hybrid_index: HybridIndex | None = None
+_indexed_chunks: list[dict] = []
 
 
 def _get_collection():
-    global _collection
+    global _collection, _hybrid_index, _indexed_chunks
     if _collection is None:
         client = get_client()
         _collection = get_or_create_collection(client)
@@ -33,6 +36,8 @@ def _get_collection():
             if docs:
                 chunks = chunk_documents(docs)
                 index_chunks(chunks, _collection)
+                _indexed_chunks = chunks
+                _hybrid_index = HybridIndex.build(chunks)
     return _collection
 
 
@@ -43,6 +48,7 @@ class QueryRequest(BaseModel):
     n_results: int = 5
     check_faithfulness: bool = True
     faithfulness_threshold: float = 0.5
+    retrieval_method: str = "hybrid"  # "hybrid" | "semantic"
 
 
 class QueryResponse(BaseModel):
@@ -53,6 +59,7 @@ class QueryResponse(BaseModel):
     confidence_score: float
     is_faithful: bool
     faithfulness_method: str
+    retrieval_method: str
 
 
 @app.get("/health")
@@ -64,8 +71,11 @@ def health():
 def query(request: QueryRequest) -> QueryResponse:
     """Agentic RAG: ответ на вопрос + faithfulness gate.
 
-    Возвращает ответ с confidence_score — оценкой того, насколько ответ
-    поддержан retrieved документами. Низкий score сигнализирует о potential hallucination.
+    retrieval_method="hybrid" (default) — BM25+vector+RRF, recall@10 ~91%.
+    retrieval_method="semantic" — только ChromaDB cosine similarity.
+
+    Возвращает confidence_score — оценку поддержки ответа retrieved документами.
+    Низкий score сигнализирует о potential hallucination.
     """
     collection = _get_collection()
     if collection.count() == 0:
@@ -75,9 +85,22 @@ def query(request: QueryRequest) -> QueryResponse:
             confidence_score=0.0,
             is_faithful=False,
             faithfulness_method="lexical",
+            retrieval_method=request.retrieval_method,
         )
 
-    context = search(request.question, collection, n_results=request.n_results)
+    if request.retrieval_method == "hybrid":
+        context = hybrid_search(
+            request.question,
+            collection,
+            _hybrid_index,
+            n_results=request.n_results,
+        )
+        used_method = "hybrid" if _hybrid_index is not None else "semantic"
+    else:
+        from ..retrieval.store import search as semantic_search
+
+        context = semantic_search(request.question, collection, n_results=request.n_results)
+        used_method = "semantic"
 
     if request.check_faithfulness:
         result = generate_answer_with_gate(
@@ -100,19 +123,22 @@ def query(request: QueryRequest) -> QueryResponse:
         confidence_score=result["confidence_score"],
         is_faithful=result["is_faithful"],
         faithfulness_method=result["faithfulness_method"],
+        retrieval_method=used_method,
     )
 
 
 @app.post("/index")
 def index_documents():
     """Re-index all documents from data directory."""
+    global _collection, _hybrid_index, _indexed_chunks
+
     client = get_client()
-    # Delete and recreate collection
     with contextlib.suppress(Exception):
         client.delete_collection("documents")
 
-    global _collection
     _collection = get_or_create_collection(client)
+    _hybrid_index = None
+    _indexed_chunks = []
 
     if not DATA_DIR.exists():
         return {"error": f"Data directory not found: {DATA_DIR}"}
@@ -120,10 +146,18 @@ def index_documents():
     docs = load_documents(DATA_DIR)
     chunks = chunk_documents(docs)
     count = index_chunks(chunks, _collection)
-    return {"indexed_chunks": count, "documents": len(docs)}
+
+    _indexed_chunks = chunks
+    _hybrid_index = HybridIndex.build(chunks)
+
+    return {
+        "indexed_chunks": count,
+        "documents": len(docs),
+        "hybrid_index": _hybrid_index._bm25 is not None,
+    }
 
 
-def ask(question: str, n_results: int = 5) -> str:
+def ask(question: str, n_results: int = 5, use_hybrid: bool = True) -> str:
     """RAG pipeline: retrieve → generate → faithfulness gate."""
     if not question.strip():
         return "Please enter a question."
@@ -132,7 +166,15 @@ def ask(question: str, n_results: int = 5) -> str:
     if collection.count() == 0:
         return "No documents indexed. Please add documents to data/documents/ and run /index."
 
-    context = search(question, collection, n_results=n_results)
+    if use_hybrid:
+        context = hybrid_search(question, collection, _hybrid_index, n_results=n_results)
+        retrieval_label = "Hybrid (BM25+Vector+RRF)" if _hybrid_index is not None else "Semantic"
+    else:
+        from ..retrieval.store import search as semantic_search
+
+        context = semantic_search(question, collection, n_results=n_results)
+        retrieval_label = "Semantic only"
+
     result = generate_answer_with_gate(question, context)
 
     sources = ", ".join(result["sources"]) if result["sources"] else "N/A"
@@ -140,12 +182,12 @@ def ask(question: str, n_results: int = 5) -> str:
     verdict = result["faithfulness_verdict"]
     method = result["faithfulness_method"]
 
-    # Визуальный сигнал о надёжности ответа — низкий confidence предупреждает пользователя
     confidence_badge = "✅" if result["is_faithful"] else "⚠️"
     return (
         f"{result['answer']}\n\n"
         f"---\n"
         f"**Sources:** {sources}\n\n"
+        f"**Retrieval:** {retrieval_label}\n\n"
         f"**Confidence:** {confidence_badge} {confidence:.2f} ({verdict}, method: {method})"
     )
 
@@ -156,10 +198,14 @@ demo = gr.Interface(
     inputs=[
         gr.Textbox(label="Question", placeholder="Ask a question about the documents..."),
         gr.Slider(minimum=1, maximum=10, value=5, step=1, label="Number of context chunks"),
+        gr.Checkbox(value=True, label="Hybrid search (BM25+Vector+RRF)"),
     ],
     outputs=gr.Markdown(label="Answer"),
     title="RAG Enterprise — Document Q&A",
-    description="Ask questions about indexed documents. Powered by ChromaDB + Claude API.",
+    description=(
+        "Ask questions about indexed documents. "
+        "Hybrid search combines BM25 keyword matching with semantic vector search via RRF."
+    ),
 )
 
 app = gr.mount_gradio_app(app, demo, path="/")

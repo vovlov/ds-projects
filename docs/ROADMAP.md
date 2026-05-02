@@ -373,6 +373,19 @@
       h3==4.4.2 добавлен в [pricing] extras pyproject.toml.
       14 новых тестов TestH3GeoFeatures (33/33 зелёных, было 19).
       Источники: Uber H3 blog 2018, Zillow AVM research 2024, h3geo.org docs.
+- [x] Hybrid Search BM25+Vector+RRF для RAG (Project 02) — 2026-05-02
+      rag/retrieval/hybrid.py: HybridIndex (BM25Okapi + tokenized corpus),
+      _tokenize() (regex \w+, lowercase), bm25_search() с graceful fallback без rank_bm25,
+      reciprocal_rank_fusion() (RRF k=60, Cormack et al. 2009, ключ идентичности = text),
+      hybrid_search() — semantic (2×n_results кандидатов) + BM25 → RRF → top-n.
+      Graceful degradation: без rank_bm25 → pure semantic search.
+      rag/api/app.py: _hybrid_index + _indexed_chunks global state, QueryRequest.retrieval_method
+      ("hybrid"|"semantic"), QueryResponse.retrieval_method, auto-build BM25 индекса при indexing,
+      Gradio UI: checkbox "Hybrid search (BM25+Vector+RRF)".
+      rank-bm25>=0.2.2 добавлен в [rag] extras pyproject.toml.
+      14 новых тестов TestHybridRetrieval (54/54 + 1 skipped зелёных, было 40).
+      Recall@10: semantic ~65-78% → hybrid ~91% (Ashutosh Kumar Singh, Medium 2026).
+      Источники: Cormack et al. 2009 (RRF), Elastic Hybrid Search docs, GoPenAI Mar 2026.
 
 ---
 

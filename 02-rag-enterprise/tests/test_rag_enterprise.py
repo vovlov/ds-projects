@@ -431,3 +431,201 @@ class TestFaithfulnessGate:
         assert "is_faithful" in data
         assert "faithfulness_method" in data
         assert isinstance(data["confidence_score"], float)
+
+
+class TestHybridRetrieval:
+    """Тесты гибридного поиска: BM25 + ChromaDB + Reciprocal Rank Fusion.
+
+    Все тесты работают без rank_bm25 в CI — graceful fallback к semantic search.
+    Тесты с BM25 проверяются через is_available() и пропускаются при его отсутствии.
+    """
+
+    CHUNKS = [
+        {
+            "text": "VPN is required for all remote work. Use company VPN always.",
+            "metadata": {"source": "policy.txt"},
+        },
+        {
+            "text": "Onboarding schedule: week 1 orientation, week 2 team meetings.",
+            "metadata": {"source": "onboarding.txt"},
+        },
+        {
+            "text": "Code review process: every PR needs 2 approvals before merge.",
+            "metadata": {"source": "engineering.txt"},
+        },
+        {
+            "text": "GDPR data retention: personal data deleted after 3 years.",
+            "metadata": {"source": "governance.txt"},
+        },
+        {
+            "text": "Remote work allowed up to 3 days per week with manager approval.",
+            "metadata": {"source": "policy.txt"},
+        },
+    ]
+
+    def test_tokenize_basic(self):
+        from rag.retrieval.hybrid import _tokenize
+
+        tokens = _tokenize("Hello World! VPN required.")
+        assert "hello" in tokens
+        assert "world" in tokens
+        assert "vpn" in tokens
+        assert "required" in tokens
+
+    def test_tokenize_empty_string(self):
+        from rag.retrieval.hybrid import _tokenize
+
+        assert _tokenize("") == []
+
+    def test_hybrid_index_build(self):
+        from rag.retrieval.hybrid import HybridIndex
+
+        idx = HybridIndex.build(self.CHUNKS)
+        assert idx.chunks == self.CHUNKS
+        assert len(idx.tokenized_corpus) == len(self.CHUNKS)
+
+    def test_hybrid_index_tokenized_corpus(self):
+        from rag.retrieval.hybrid import HybridIndex
+
+        idx = HybridIndex.build(self.CHUNKS)
+        # Первый чанк должен содержать токен "vpn"
+        assert "vpn" in idx.tokenized_corpus[0]
+
+    def test_bm25_search_returns_empty_without_library(self):
+        """Без rank_bm25 bm25_search возвращает пустой список, не падает."""
+        from rag.retrieval.hybrid import HybridIndex, _is_available
+
+        if _is_available():
+            pytest.skip("rank_bm25 installed — testing fallback not applicable")
+
+        idx = HybridIndex.build(self.CHUNKS)
+        results = idx.bm25_search("VPN policy", k=3)
+        assert results == []
+
+    def test_bm25_search_with_library(self):
+        """С rank_bm25 bm25_search возвращает чанки по ключевым словам."""
+        from rag.retrieval.hybrid import HybridIndex, _is_available
+
+        if not _is_available():
+            pytest.skip("rank_bm25 not installed")
+
+        idx = HybridIndex.build(self.CHUNKS)
+        results = idx.bm25_search("VPN remote work", k=3)
+        assert len(results) > 0
+        # Первый результат содержит VPN
+        assert "vpn" in results[0]["text"].lower() or "remote" in results[0]["text"].lower()
+
+    def test_bm25_search_keyword_relevance(self):
+        """BM25 должен поднять чанк с GDPR выше по запросу про GDPR."""
+        from rag.retrieval.hybrid import HybridIndex, _is_available
+
+        if not _is_available():
+            pytest.skip("rank_bm25 not installed")
+
+        idx = HybridIndex.build(self.CHUNKS)
+        results = idx.bm25_search("GDPR retention", k=5)
+        texts = [r["text"].lower() for r in results]
+        assert any("gdpr" in t for t in texts), "GDPR chunk should appear in results"
+
+    def test_reciprocal_rank_fusion_combines_lists(self):
+        from rag.retrieval.hybrid import reciprocal_rank_fusion
+
+        list_a = [
+            {"text": "doc1", "metadata": {}},
+            {"text": "doc2", "metadata": {}},
+        ]
+        list_b = [
+            {"text": "doc2", "metadata": {}},
+            {"text": "doc3", "metadata": {}},
+        ]
+        fused = reciprocal_rank_fusion([list_a, list_b], k=60, n_results=3)
+        texts = [r["text"] for r in fused]
+        # doc2 в обоих списках — должен быть выше
+        assert texts[0] == "doc2", f"doc2 должен быть первым (консенсус), получили: {texts}"
+
+    def test_reciprocal_rank_fusion_single_list(self):
+        from rag.retrieval.hybrid import reciprocal_rank_fusion
+
+        ranked = [{"text": f"doc{i}", "metadata": {}} for i in range(5)]
+        fused = reciprocal_rank_fusion([ranked], k=60, n_results=3)
+        assert len(fused) == 3
+        assert fused[0]["text"] == "doc0"  # Первый в единственном ранкере
+
+    def test_reciprocal_rank_fusion_empty_lists(self):
+        from rag.retrieval.hybrid import reciprocal_rank_fusion
+
+        assert reciprocal_rank_fusion([], n_results=5) == []
+        assert reciprocal_rank_fusion([[]], n_results=5) == []
+
+    def test_reciprocal_rank_fusion_has_rrf_score(self):
+        from rag.retrieval.hybrid import reciprocal_rank_fusion
+
+        ranked = [{"text": "alpha", "metadata": {}}, {"text": "beta", "metadata": {}}]
+        fused = reciprocal_rank_fusion([ranked], k=60, n_results=2)
+        assert "rrf_score" in fused[0]
+        assert fused[0]["rrf_score"] > fused[1]["rrf_score"]
+
+    def test_reciprocal_rank_fusion_respects_n_results(self):
+        from rag.retrieval.hybrid import reciprocal_rank_fusion
+
+        ranked = [{"text": f"doc{i}", "metadata": {}} for i in range(10)]
+        fused = reciprocal_rank_fusion([ranked], k=60, n_results=4)
+        assert len(fused) == 4
+
+    def test_hybrid_search_fallback_to_semantic(self, indexed_collection):
+        """Без HybridIndex hybrid_search возвращает семантические результаты."""
+        from rag.retrieval.hybrid import hybrid_search
+
+        results = hybrid_search("VPN policy", indexed_collection, hybrid_index=None, n_results=3)
+        assert len(results) == 3
+        assert all("text" in r for r in results)
+
+    def test_hybrid_search_with_index(self, indexed_collection):
+        from rag.retrieval.hybrid import HybridIndex, _is_available, hybrid_search
+
+        if not _is_available():
+            pytest.skip("rank_bm25 not installed — hybrid path requires it")
+
+        docs = load_documents(DATA_DIR)
+        chunks = chunk_documents(docs)
+        idx = HybridIndex.build(chunks)
+
+        results = hybrid_search(
+            "VPN remote work policy", indexed_collection, hybrid_index=idx, n_results=3
+        )
+        assert len(results) == 3
+        texts = " ".join(r["text"].lower() for r in results)
+        assert "vpn" in texts or "remote" in texts or "policy" in texts
+
+    def test_query_endpoint_returns_retrieval_method(self):
+        """POST /query включает retrieval_method в ответе."""
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
+
+        with patch("rag.api.app._get_collection", return_value=mock_collection):
+            client = TestClient(app)
+            resp = client.post(
+                "/query",
+                json={"question": "What is the VPN policy?", "retrieval_method": "hybrid"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "retrieval_method" in data
+
+    @pytest.fixture
+    def indexed_collection(self):
+        # Reuse the same ChromaDB client path as TestRetrieval to avoid singleton conflicts
+        client = get_client(Path("/tmp/test_chroma_rag"))
+        with contextlib.suppress(Exception):
+            client.delete_collection("test_hybrid_docs")
+        collection = get_or_create_collection(client, name="test_hybrid_docs")
+        docs = load_documents(DATA_DIR)
+        chunks = chunk_documents(docs)
+        index_chunks(chunks, collection)
+        return collection
