@@ -386,6 +386,18 @@
       14 новых тестов TestHybridRetrieval (54/54 + 1 skipped зелёных, было 40).
       Recall@10: semantic ~65-78% → hybrid ~91% (Ashutosh Kumar Singh, Medium 2026).
       Источники: Cormack et al. 2009 (RRF), Elastic Hybrid Search docs, GoPenAI Mar 2026.
+- [x] SSE Streaming ответов для RAG (Project 02) — 2026-05-03
+      rag/generation/stream.py: stream_answer() async SSE generator — yields token/sources/done events.
+      _sse() хелпер: dict → "data: {json}\n\n" format. Anthropic client.messages.stream()
+      для production; word-by-word mock для CI без API ключа.
+      Faithfulness gate ПОСЛЕ стрима (на полном ответе) — не блокирует UX.
+      rag/api/app.py: POST /query/stream → StreamingResponse(media_type="text/event-stream"),
+      Cache-Control: no-cache + X-Accel-Buffering: no headers.
+      Пустая коллекция → inline async generator с token+done events.
+      14 новых тестов TestStreamingRAG: SSE-формат, порядок событий (token→sources→done),
+        endpoint headers, no-documents case, with-documents mock.
+      68/68 тестов зелёных (+14, было 54).
+      Источники: FastAPI SSE docs, Anthropic streaming API, dasroot.net Streaming RAG 2026.
 
 ---
 

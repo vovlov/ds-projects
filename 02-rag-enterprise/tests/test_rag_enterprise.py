@@ -629,3 +629,228 @@ class TestHybridRetrieval:
         chunks = chunk_documents(docs)
         index_chunks(chunks, collection)
         return collection
+
+
+class TestStreamingRAG:
+    """Тесты SSE streaming для RAG (Project 02).
+
+    Проверяют async генератор stream_answer() и endpoint /query/stream.
+    Без ANTHROPIC_API_KEY — mock-режим (CI-friendly).
+    """
+
+    def _collect_events(self, gen) -> list[dict]:
+        """Синхронно собирает события из async генератора через asyncio.run."""
+        import asyncio
+        import json
+
+        async def _drain():
+            events = []
+            async for sse_line in gen:
+                if sse_line.startswith("data: "):
+                    events.append(json.loads(sse_line[len("data: ") :]))
+            return events
+
+        return asyncio.run(_drain())
+
+    def test_stream_answer_yields_events(self):
+        """stream_answer() возвращает хотя бы один event без API ключа."""
+        from rag.generation.stream import stream_answer
+
+        chunks = [
+            {"text": "VPN policy allows remote access.", "metadata": {"source": "policy.txt"}}
+        ]  # noqa: E501
+        events = self._collect_events(stream_answer("What is the VPN policy?", chunks))
+        assert len(events) > 0
+
+    def test_stream_answer_has_token_events(self):
+        """stream_answer() генерирует events с type='token'."""
+        from rag.generation.stream import stream_answer
+
+        chunks = [{"text": "Remote work is allowed.", "metadata": {"source": "policy.txt"}}]
+        events = self._collect_events(stream_answer("Can I work remotely?", chunks))
+        token_events = [e for e in events if e["type"] == "token"]
+        assert len(token_events) > 0
+
+    def test_stream_answer_token_has_text_field(self):
+        """Каждый token event содержит поле 'text' с непустым значением."""
+        from rag.generation.stream import stream_answer
+
+        chunks = [{"text": "Vacation policy: 20 days.", "metadata": {"source": "hr.txt"}}]
+        events = self._collect_events(stream_answer("How many vacation days?", chunks))
+        for e in events:
+            if e["type"] == "token":
+                assert "text" in e
+                assert isinstance(e["text"], str)
+                assert len(e["text"]) > 0
+
+    def test_stream_answer_has_sources_event(self):
+        """stream_answer() генерирует event type='sources' с именами источников."""
+        from rag.generation.stream import stream_answer
+
+        chunks = [{"text": "Security policy.", "metadata": {"source": "security.txt"}}]
+        events = self._collect_events(stream_answer("What is the security policy?", chunks))
+        sources_events = [e for e in events if e["type"] == "sources"]
+        assert len(sources_events) == 1
+        assert "sources" in sources_events[0]
+        assert "security.txt" in sources_events[0]["sources"]
+
+    def test_stream_answer_has_done_event(self):
+        """stream_answer() завершается event type='done'."""
+        from rag.generation.stream import stream_answer
+
+        chunks = [{"text": "HR policy document.", "metadata": {"source": "hr.txt"}}]
+        events = self._collect_events(stream_answer("Tell me about HR.", chunks))
+        done_events = [e for e in events if e["type"] == "done"]
+        assert len(done_events) == 1
+
+    def test_stream_answer_done_event_has_confidence(self):
+        """Event type='done' содержит confidence (float 0-1)."""
+        from rag.generation.stream import stream_answer
+
+        chunks = [{"text": "Expenses policy.", "metadata": {"source": "expenses.txt"}}]
+        events = self._collect_events(stream_answer("What about expenses?", chunks))
+        done = next(e for e in events if e["type"] == "done")
+        assert "confidence" in done
+        assert 0.0 <= done["confidence"] <= 1.0
+
+    def test_stream_answer_done_event_has_is_faithful(self):
+        """Event type='done' содержит is_faithful (bool)."""
+        from rag.generation.stream import stream_answer
+
+        chunks = [{"text": "Travel policy.", "metadata": {"source": "travel.txt"}}]
+        events = self._collect_events(stream_answer("Tell me about travel.", chunks))
+        done = next(e for e in events if e["type"] == "done")
+        assert "is_faithful" in done
+        assert isinstance(done["is_faithful"], bool)
+
+    def test_stream_answer_event_order(self):
+        """Порядок событий: токены → sources → done."""
+        from rag.generation.stream import stream_answer
+
+        chunks = [{"text": "IT policy.", "metadata": {"source": "it.txt"}}]
+        events = self._collect_events(stream_answer("What is IT policy?", chunks))
+        types = [e["type"] for e in events]
+        # Все токены идут до sources
+        if "sources" in types and "token" in types:
+            last_token_idx = max(i for i, t in enumerate(types) if t == "token")
+            sources_idx = types.index("sources")
+            assert last_token_idx < sources_idx
+        # done — последний
+        assert types[-1] == "done"
+
+    def test_stream_answer_sse_format(self):
+        """Каждая строка от генератора начинается с 'data: ' и кончается '\\n\\n'."""
+        import asyncio
+
+        from rag.generation.stream import stream_answer
+
+        chunks = [{"text": "Policy text.", "metadata": {"source": "policy.txt"}}]
+
+        async def _raw():
+            lines = []
+            async for line in stream_answer("Test question?", chunks):
+                lines.append(line)
+            return lines
+
+        raw_lines = asyncio.run(_raw())
+        for line in raw_lines:
+            assert line.startswith("data: "), f"Bad SSE prefix: {line!r}"
+            assert line.endswith("\n\n"), f"Bad SSE suffix: {line!r}"
+
+    def test_stream_answer_empty_chunks(self):
+        """stream_answer() корректно обрабатывает пустой список чанков."""
+        from rag.generation.stream import stream_answer
+
+        events = self._collect_events(stream_answer("Any question?", []))
+        # Должен завершиться без исключений и вернуть done
+        done_events = [e for e in events if e["type"] == "done"]
+        assert len(done_events) == 1
+
+    def test_stream_query_endpoint_returns_200(self):
+        """POST /query/stream возвращает HTTP 200."""
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
+
+        with patch("rag.api.app._get_collection", return_value=mock_collection):
+            client = TestClient(app)
+            resp = client.post("/query/stream", json={"question": "What is VPN?"})
+
+        assert resp.status_code == 200
+
+    def test_stream_query_endpoint_content_type(self):
+        """POST /query/stream возвращает Content-Type: text/event-stream."""
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
+
+        with patch("rag.api.app._get_collection", return_value=mock_collection):
+            client = TestClient(app)
+            resp = client.post("/query/stream", json={"question": "Test?"})
+
+        assert "text/event-stream" in resp.headers.get("content-type", "")
+
+    def test_stream_query_endpoint_no_documents_returns_done(self):
+        """С пустой коллекцией /query/stream стримит done с is_faithful=False."""
+        import json
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
+
+        with patch("rag.api.app._get_collection", return_value=mock_collection):
+            client = TestClient(app)
+            resp = client.post("/query/stream", json={"question": "Any question?"})
+
+        events = []
+        for line in resp.text.splitlines():
+            if line.startswith("data: "):
+                events.append(json.loads(line[len("data: ") :]))
+
+        done_events = [e for e in events if e["type"] == "done"]
+        assert len(done_events) == 1
+        assert done_events[0]["is_faithful"] is False
+
+    def test_stream_query_endpoint_with_documents(self):
+        """С проиндексированными документами /query/stream возвращает токены."""
+        import json
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_context = [
+            {"text": "VPN allows secure remote access.", "metadata": {"source": "vpn.txt"}}
+        ]
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 5
+
+        with (
+            patch("rag.api.app._get_collection", return_value=mock_collection),
+            patch("rag.api.app.hybrid_search", return_value=mock_context),
+        ):
+            client = TestClient(app)
+            resp = client.post(
+                "/query/stream",
+                json={"question": "What is VPN?", "retrieval_method": "hybrid"},
+            )
+
+        assert resp.status_code == 200
+        events = []
+        for line in resp.text.splitlines():
+            if line.startswith("data: "):
+                events.append(json.loads(line[len("data: ") :]))
+
+        token_events = [e for e in events if e["type"] == "token"]
+        assert len(token_events) > 0

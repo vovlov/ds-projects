@@ -7,9 +7,11 @@ from pathlib import Path
 
 import gradio as gr
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..generation.chain import generate_answer, generate_answer_with_gate
+from ..generation.stream import stream_answer
 from ..ingestion.loader import chunk_documents, load_documents
 from ..retrieval.hybrid import HybridIndex, hybrid_search
 from ..retrieval.store import get_client, get_or_create_collection, index_chunks
@@ -124,6 +126,65 @@ def query(request: QueryRequest) -> QueryResponse:
         is_faithful=result["is_faithful"],
         faithfulness_method=result["faithfulness_method"],
         retrieval_method=used_method,
+    )
+
+
+@app.post("/query/stream")
+async def query_stream(request: QueryRequest) -> StreamingResponse:
+    """Streaming RAG: токен-за-токеном через Server-Sent Events.
+
+    Возвращает SSE-поток с событиями:
+    - ``{"type": "token", "text": "..."}`` — фрагмент ответа
+    - ``{"type": "sources", "sources": [...]}`` — список источников
+    - ``{"type": "done", "confidence": 0.8, "is_faithful": True, ...}`` — финал
+    - ``{"type": "error", "message": "..."}`` — при ошибке
+
+    Используйте ``EventSource`` на клиенте или ``curl -N http://host/query/stream``.
+
+    Без ANTHROPIC_API_KEY возвращает mock-стрим (CI-friendly).
+    """
+    collection = _get_collection()
+
+    if collection.count() == 0:
+        import json
+
+        async def _empty_stream():
+            yield f"data: {json.dumps({'type': 'token', 'text': 'No documents indexed.'})}\n\n"
+            done = {
+                "type": "done",
+                "confidence": 0.0,
+                "is_faithful": False,
+                "faithfulness_method": "none",
+                "faithfulness_verdict": "no_documents",
+            }
+            yield f"data: {json.dumps(done)}\n\n"
+
+        return StreamingResponse(
+            _empty_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    if request.retrieval_method == "hybrid":
+        context = hybrid_search(
+            request.question,
+            collection,
+            _hybrid_index,
+            n_results=request.n_results,
+        )
+    else:
+        from ..retrieval.store import search as semantic_search
+
+        context = semantic_search(request.question, collection, n_results=request.n_results)
+
+    return StreamingResponse(
+        stream_answer(
+            query=request.question,
+            context_chunks=context,
+            faithfulness_threshold=request.faithfulness_threshold,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
