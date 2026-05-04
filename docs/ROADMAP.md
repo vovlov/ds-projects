@@ -398,6 +398,22 @@
         endpoint headers, no-documents case, with-documents mock.
       68/68 тестов зелёных (+14, было 54).
       Источники: FastAPI SSE docs, Anthropic streaming API, dasroot.net Streaming RAG 2026.
+- [x] Temporal graph features для fraud detection (Project 04) — 2026-05-04
+      fraud/models/temporal.py: TemporalConfig dataclass (time_window=30d, decay_factor, min_edges_for_burst),
+      NodeTemporalFeatures (6 признаков: velocity_ratio, burst_score, amount_hhi,
+        recent_amount_ratio, neighbor_fraud_ratio, hub_proximity) + to_array() → float32.
+      TemporalFeatureExtractor: _build_adjacency(), compute_node_features() (velocity/burst/HHI/recency),
+        compute_neighborhood_features() (fraud_ratio + log hub-proximity),
+        extract() → (n_nodes, 6), augment_features() → hstack с базовыми признаками.
+      explain_temporal_features(): EU AI Act Article 13 compliance — текстовые объяснения уровней риска.
+      fraud/api/app.py: GraphTransactionInput (3 base + 6 temporal поля), GraphFraudScore
+        (fraud_probability + temporal_flags + feature_contributions), _ensure_temporal_model()
+        обучает CatBoost на 9 признаках (3+6). POST /score/graph endpoint с интерпретируемыми
+        temporal-объяснениями. /health расширен temporal_model_loaded.
+      23 новых теста: TestTemporalFeatures×17 (unit: defaults, shapes, bounds, isolated node,
+        burst/HHI/velocity invariants, fraud cluster validation), TestAPI×6 (temporal endpoint).
+      47/47 passed, 3 skipped (PyTorch) — было 24/27.
+      Источники: temporal GNN survey (arxiv 2302.01018), FinGuard-GNN 2025, Gretton et al. 2012.
 
 ---
 

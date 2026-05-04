@@ -20,6 +20,13 @@ from fraud.data.elliptic import (
 )
 from fraud.models.baseline.tabular import train_baseline
 from fraud.models.baseline.vae import is_available as vae_available
+from fraud.models.temporal import (
+    TEMPORAL_FEATURE_NAMES,
+    NodeTemporalFeatures,
+    TemporalConfig,
+    TemporalFeatureExtractor,
+    explain_temporal_features,
+)
 
 
 class TestDataGeneration:
@@ -204,6 +211,169 @@ class TestVAEModule:
             FraudVAE(input_dim=10)
 
 
+class TestTemporalFeatures:
+    """Тесты для TemporalFeatureExtractor и NodeTemporalFeatures."""
+
+    def _make_data(self, n_nodes: int = 50, n_transactions: int = 200) -> dict:
+        return generate_synthetic_transactions(
+            n_nodes=n_nodes, n_transactions=n_transactions, fraud_rate=0.1, seed=42
+        )
+
+    def test_node_temporal_features_defaults(self):
+        feat = NodeTemporalFeatures()
+        assert feat.velocity_ratio == 0.0
+        assert feat.burst_score == 0.0
+        assert feat.amount_hhi == 0.0
+        assert feat.recent_amount_ratio == 0.0
+        assert feat.neighbor_fraud_ratio == 0.0
+        assert feat.hub_proximity == 0.0
+
+    def test_node_temporal_features_to_array_shape(self):
+        feat = NodeTemporalFeatures(velocity_ratio=0.5, burst_score=1.2)
+        arr = feat.to_array()
+        assert arr.shape == (6,)
+        assert arr.dtype == np.float32
+
+    def test_node_temporal_features_to_array_values(self):
+        feat = NodeTemporalFeatures(
+            velocity_ratio=0.8,
+            burst_score=2.5,
+            amount_hhi=0.4,
+            recent_amount_ratio=0.6,
+            neighbor_fraud_ratio=0.15,
+            hub_proximity=1.3,
+        )
+        arr = feat.to_array()
+        assert arr[0] == pytest.approx(0.8, abs=1e-5)
+        assert arr[1] == pytest.approx(2.5, abs=1e-5)
+        assert arr[4] == pytest.approx(0.15, abs=1e-5)
+
+    def test_feature_names_count(self):
+        assert len(TEMPORAL_FEATURE_NAMES) == 6
+
+    def test_extract_output_shape(self):
+        data = self._make_data(n_nodes=50)
+        extractor = TemporalFeatureExtractor()
+        result = extractor.extract(data)
+        assert result.shape == (50, 6)
+        assert result.dtype == np.float32
+
+    def test_augment_features_shape(self):
+        data = self._make_data(n_nodes=50)
+        X, _ = get_feature_matrix(data)
+        extractor = TemporalFeatureExtractor()
+        X_aug = extractor.augment_features(X, data)
+        assert X_aug.shape == (50, 9)  # 3 base + 6 temporal
+
+    def test_velocity_ratio_in_unit_interval(self):
+        data = self._make_data()
+        extractor = TemporalFeatureExtractor()
+        result = extractor.extract(data)
+        assert (result[:, 0] >= 0.0).all()
+        assert (result[:, 0] <= 1.0).all()
+
+    def test_burst_score_non_negative(self):
+        data = self._make_data()
+        extractor = TemporalFeatureExtractor()
+        result = extractor.extract(data)
+        assert (result[:, 1] >= 0.0).all()
+
+    def test_amount_hhi_in_unit_interval(self):
+        data = self._make_data()
+        extractor = TemporalFeatureExtractor()
+        result = extractor.extract(data)
+        assert (result[:, 2] >= 0.0).all()
+        assert (result[:, 2] <= 1.0 + 1e-5).all()
+
+    def test_neighbor_fraud_ratio_in_unit_interval(self):
+        data = self._make_data()
+        extractor = TemporalFeatureExtractor()
+        result = extractor.extract(data)
+        assert (result[:, 4] >= 0.0).all()
+        assert (result[:, 4] <= 1.0 + 1e-5).all()
+
+    def test_hub_proximity_non_negative(self):
+        data = self._make_data()
+        extractor = TemporalFeatureExtractor()
+        result = extractor.extract(data)
+        assert (result[:, 5] >= 0.0).all()
+
+    def test_isolated_node_returns_zeros(self):
+        # Узел без рёбер → все velocity-признаки = 0
+        data = {
+            "nodes": [
+                {
+                    "id": 0,
+                    "avg_amount": 100.0,
+                    "n_transactions": 1,
+                    "account_age_days": 100.0,
+                    "is_fraud": 0,
+                }
+            ],
+            "edges": [],
+        }
+        extractor = TemporalFeatureExtractor()
+        result = extractor.extract(data)
+        assert result.shape == (1, 6)
+        # Без рёбер velocity_ratio = 0
+        assert result[0, 0] == pytest.approx(0.0, abs=1e-5)
+
+    def test_custom_config(self):
+        config = TemporalConfig(time_window=7.0, decay_factor=0.5, min_edges_for_burst=3)
+        extractor = TemporalFeatureExtractor(config=config)
+        data = self._make_data()
+        result = extractor.extract(data)
+        assert result.shape[1] == 6
+
+    def test_compute_node_features_returns_dataclass(self):
+        data = self._make_data()
+        extractor = TemporalFeatureExtractor()
+        node_id = data["nodes"][0]["id"]
+        feat = extractor.compute_node_features(data, node_id)
+        assert isinstance(feat, NodeTemporalFeatures)
+
+    def test_explain_temporal_features_high_risk(self):
+        feat = NodeTemporalFeatures(
+            velocity_ratio=0.9,
+            burst_score=4.0,
+            amount_hhi=0.8,
+            neighbor_fraud_ratio=0.5,
+        )
+        explanations = explain_temporal_features(feat)
+        assert "velocity_ratio" in explanations
+        assert "HIGH" in explanations["velocity_ratio"]
+        assert "burst_score" in explanations
+        assert "HIGH" in explanations["burst_score"]
+
+    def test_explain_temporal_features_low_risk(self):
+        feat = NodeTemporalFeatures(
+            velocity_ratio=0.1,
+            burst_score=0.3,
+            amount_hhi=0.1,
+            neighbor_fraud_ratio=0.02,
+        )
+        explanations = explain_temporal_features(feat)
+        assert "LOW" in explanations["velocity_ratio"]
+        assert "LOW" in explanations["burst_score"]
+
+    def test_fraud_nodes_higher_neighbor_fraud_ratio(self):
+        # Мошеннические узлы образуют кластеры → сосед-мошенник чаще
+        data = generate_synthetic_transactions(
+            n_nodes=200, n_transactions=1000, fraud_rate=0.15, seed=99
+        )
+        extractor = TemporalFeatureExtractor()
+        result = extractor.extract(data)
+
+        fraud_mask = np.array([n["is_fraud"] for n in data["nodes"]], dtype=bool)
+        legit_mask = ~fraud_mask
+
+        if fraud_mask.sum() > 0 and legit_mask.sum() > 0:
+            fraud_neighbor_ratio = result[fraud_mask, 4].mean()
+            legit_neighbor_ratio = result[legit_mask, 4].mean()
+            # Мошенники должны иметь в среднем больше соседей-мошенников
+            assert fraud_neighbor_ratio >= legit_neighbor_ratio
+
+
 class TestAPI:
     def test_health_endpoint(self):
         from fastapi.testclient import TestClient
@@ -213,6 +383,14 @@ class TestAPI:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "healthy"
+
+    def test_health_shows_temporal_model_field(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        resp = client.get("/health")
+        assert "temporal_model_loaded" in resp.json()
 
     def test_score_endpoint(self):
         from fastapi.testclient import TestClient
@@ -247,3 +425,113 @@ class TestAPI:
         )
         assert resp.status_code == 200
         assert len(resp.json()) == 2
+
+    def test_score_graph_endpoint_returns_200(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/score/graph",
+            json={
+                "avg_amount": 500.0,
+                "n_transactions": 8,
+                "account_age_days": 15.0,
+                "velocity_ratio": 0.85,
+                "burst_score": 3.2,
+                "amount_hhi": 0.6,
+                "recent_amount_ratio": 0.9,
+                "neighbor_fraud_ratio": 0.4,
+                "hub_proximity": 1.5,
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_score_graph_response_has_temporal_flags(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/score/graph",
+            json={
+                "avg_amount": 500.0,
+                "n_transactions": 8,
+                "account_age_days": 15.0,
+                "velocity_ratio": 0.9,
+                "burst_score": 4.0,
+                "amount_hhi": 0.8,
+                "recent_amount_ratio": 0.95,
+                "neighbor_fraud_ratio": 0.5,
+                "hub_proximity": 2.0,
+            },
+        )
+        data = resp.json()
+        assert "temporal_flags" in data
+        assert "feature_contributions" in data
+
+    def test_score_graph_response_feature_contributions_keys(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/score/graph",
+            json={
+                "avg_amount": 150.0,
+                "n_transactions": 3,
+                "account_age_days": 200.0,
+                "velocity_ratio": 0.1,
+                "burst_score": 0.2,
+                "amount_hhi": 0.1,
+                "recent_amount_ratio": 0.1,
+                "neighbor_fraud_ratio": 0.0,
+                "hub_proximity": 0.5,
+            },
+        )
+        data = resp.json()
+        for name in TEMPORAL_FEATURE_NAMES:
+            assert name in data["feature_contributions"]
+
+    def test_score_graph_probability_in_range(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/score/graph",
+            json={
+                "avg_amount": 200.0,
+                "n_transactions": 4,
+                "account_age_days": 90.0,
+                "velocity_ratio": 0.5,
+                "burst_score": 1.5,
+                "amount_hhi": 0.3,
+                "recent_amount_ratio": 0.5,
+                "neighbor_fraud_ratio": 0.1,
+                "hub_proximity": 1.0,
+            },
+        )
+        data = resp.json()
+        assert 0.0 <= data["fraud_probability"] <= 1.0
+
+    def test_score_graph_risk_level_valid(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/score/graph",
+            json={
+                "avg_amount": 150.0,
+                "n_transactions": 5,
+                "account_age_days": 180.0,
+                "velocity_ratio": 0.0,
+                "burst_score": 0.0,
+                "amount_hhi": 0.0,
+                "recent_amount_ratio": 0.0,
+                "neighbor_fraud_ratio": 0.0,
+                "hub_proximity": 0.0,
+            },
+        )
+        assert resp.json()["risk_level"] in ("low", "medium", "high")
