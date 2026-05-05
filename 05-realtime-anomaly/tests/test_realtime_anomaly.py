@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -950,3 +951,317 @@ class TestDashboardReferenceCurrentData:
         ref_mean_cpu = float(np.mean(ref[:, 0]))
         cur_mean_cpu = float(np.mean(cur_drift[:, 0]))
         assert cur_mean_cpu > ref_mean_cpu, "Drift injection should raise CPU mean"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LSTM / ESN Autoencoder Tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestESNAutoencoderCore:
+    """Unit-тесты Echo State Network автоэнкодера."""
+
+    def _make_normal_data(self, n: int = 200, seed: int = 0) -> np.ndarray:
+        """Синтетический нормальный временной ряд [cpu, latency, requests]."""
+        rng = np.random.RandomState(seed)
+        cpu = 40 + 10 * np.sin(np.linspace(0, 4 * np.pi, n)) + rng.randn(n) * 2
+        latency = 50 + 5 * np.cos(np.linspace(0, 4 * np.pi, n)) + rng.randn(n) * 1
+        requests = 1000 + 100 * np.sin(np.linspace(0, 2 * np.pi, n)) + rng.randn(n) * 5
+        return np.column_stack([cpu, latency, requests])
+
+    def test_fit_returns_train_result(self):
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        cfg = LSTMConfig(reservoir_size=50, window_size=20, n_features=3)
+        model = EchoStateAutoencoder(cfg)
+        X = self._make_normal_data(100)
+        result = model.fit(X)
+        assert result.n_samples == 100
+        assert result.n_windows == 100 - 20 + 1
+        assert result.train_mse >= 0
+        assert result.threshold > 0
+
+    def test_is_fitted_after_fit(self):
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        model = EchoStateAutoencoder(LSTMConfig(reservoir_size=30, window_size=15))
+        assert not model.is_fitted
+        model.fit(self._make_normal_data(80))
+        assert model.is_fitted
+
+    def test_detect_returns_correct_shape(self):
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        cfg = LSTMConfig(reservoir_size=50, window_size=20)
+        model = EchoStateAutoencoder(cfg)
+        X = self._make_normal_data(100)
+        model.fit(X)
+        result = model.detect(X)
+        assert result.scores.shape == (100,)
+        assert result.predictions.shape == (100,)
+
+    def test_detect_predictions_binary(self):
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        model = EchoStateAutoencoder(LSTMConfig(reservoir_size=50, window_size=20))
+        X = self._make_normal_data(100)
+        model.fit(X)
+        result = model.detect(X)
+        assert set(result.predictions.tolist()).issubset({0, 1})
+
+    def test_detect_scores_nonnegative(self):
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        model = EchoStateAutoencoder(LSTMConfig(reservoir_size=50, window_size=20))
+        X = self._make_normal_data(100)
+        model.fit(X)
+        result = model.detect(X)
+        assert (result.scores >= 0).all()
+
+    def test_anomaly_has_higher_score(self):
+        """Аномальная точка должна получить более высокий score чем нормальные."""
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        cfg = LSTMConfig(reservoir_size=80, window_size=20, anomaly_percentile=90.0)
+        model = EchoStateAutoencoder(cfg)
+
+        # Обучаем на нормальных данных
+        normal = self._make_normal_data(200, seed=0)
+        model.fit(normal)
+
+        # Создаём данные с явной аномалией в центре
+        test_data = self._make_normal_data(100, seed=1)
+        test_data[50, :] = [200.0, 1000.0, 50000.0]  # экстремальный выброс
+
+        result = model.detect(test_data)
+        # Score вокруг аномалии должен быть выше среднего нормального
+        anomaly_region_scores = result.scores[45:55]
+        normal_region_scores = result.scores[10:40]
+        assert anomaly_region_scores.max() > normal_region_scores.mean()
+
+    def test_model_name_in_result(self):
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        model = EchoStateAutoencoder(LSTMConfig(reservoir_size=30, window_size=15))
+        model.fit(self._make_normal_data(80))
+        result = model.detect(self._make_normal_data(50))
+        assert result.model == "esn_autoencoder"
+
+    def test_get_config_before_fit(self):
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        model = EchoStateAutoencoder(LSTMConfig(reservoir_size=50))
+        cfg = model.get_config()
+        assert cfg["fitted"] is False
+        assert cfg["threshold"] is None
+        assert cfg["type"] == "echo_state_autoencoder"
+
+    def test_get_config_after_fit(self):
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        model = EchoStateAutoencoder(LSTMConfig(reservoir_size=50, window_size=20))
+        model.fit(self._make_normal_data(100))
+        cfg = model.get_config()
+        assert cfg["fitted"] is True
+        assert cfg["threshold"] is not None and cfg["threshold"] > 0
+
+    def test_create_autoencoder_factory(self):
+        from anomaly.models.lstm_autoencoder import LSTMConfig, create_autoencoder
+
+        model = create_autoencoder()
+        assert not model.is_fitted
+        model2 = create_autoencoder(LSTMConfig(reservoir_size=30))
+        assert model2.cfg.reservoir_size == 30
+
+    def test_sequence_scaler_fit_transform(self):
+        from anomaly.models.lstm_autoencoder import SequenceScaler
+
+        scaler = SequenceScaler()
+        X = np.array([[0.0, 0.0], [10.0, 100.0]])
+        X_scaled = scaler.fit_transform(X)
+        assert X_scaled.min() == pytest.approx(0.0, abs=1e-9)
+        assert X_scaled.max() == pytest.approx(1.0, abs=1e-9)
+
+    def test_sequence_scaler_constant_feature(self):
+        """Константная фича не должна вызывать деление на ноль."""
+        from anomaly.models.lstm_autoencoder import SequenceScaler
+
+        scaler = SequenceScaler()
+        X = np.array([[5.0, 0.0], [5.0, 1.0], [5.0, 2.0]])
+        result = scaler.fit_transform(X)
+        # Константная колонка → 0 после нормализации (clamp в scaler)
+        assert np.isfinite(result).all()
+
+    def test_train_result_threshold_positive(self):
+        from anomaly.models.lstm_autoencoder import LSTMConfig, create_autoencoder
+
+        model = create_autoencoder(LSTMConfig(reservoir_size=40, window_size=15))
+        X = self._make_normal_data(80)
+        tr = model.fit(X)
+        assert tr.threshold > 0
+
+    def test_reconstruction_errors_match_scores(self):
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        model = EchoStateAutoencoder(LSTMConfig(reservoir_size=50, window_size=20))
+        X = self._make_normal_data(100)
+        model.fit(X)
+        result = model.detect(X)
+        # reconstruction_errors и scores должны совпадать
+        np.testing.assert_array_equal(result.reconstruction_errors, result.scores)
+
+    def test_normal_data_low_anomaly_rate(self):
+        """На нормальных данных аномальность не должна превышать (100 - percentile)%."""
+        from anomaly.models.lstm_autoencoder import EchoStateAutoencoder, LSTMConfig
+
+        cfg = LSTMConfig(reservoir_size=80, window_size=20, anomaly_percentile=95.0)
+        model = EchoStateAutoencoder(cfg)
+        X = self._make_normal_data(200, seed=7)
+        model.fit(X)
+        result = model.detect(X)
+        # На обучающих данных должно быть ~5% аномалий (percentile threshold)
+        anomaly_rate = result.predictions.mean()
+        assert anomaly_rate <= 0.15  # допуск 15% из-за граничных эффектов окна
+
+
+class TestLSTMAPIEndpoints:
+    """Тесты API endpoints /lstm/*."""
+
+    def _client(self):
+        from anomaly.api.app import app
+        from fastapi.testclient import TestClient
+
+        return TestClient(app)
+
+    def _normal_data(self, n: int = 150) -> list[list[float]]:
+        rng = np.random.RandomState(0)
+        cpu = (40 + rng.randn(n) * 3).tolist()
+        lat = (50 + rng.randn(n) * 2).tolist()
+        req = (1000 + rng.randn(n) * 20).tolist()
+        return [[c, lat_v, r] for c, lat_v, r in zip(cpu, lat, req, strict=True)]
+
+    def test_lstm_status_before_train(self):
+        client = self._client()
+        resp = client.get("/lstm/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "fitted" in data
+
+    def test_lstm_train_success(self):
+        client = self._client()
+        payload = {"data": self._normal_data(150), "reservoir_size": 50, "window_size": 20}
+        resp = client.post("/lstm/train", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["n_samples"] == 150
+        assert body["threshold"] > 0
+
+    def test_lstm_train_returns_model_config(self):
+        client = self._client()
+        payload = {"data": self._normal_data(150), "reservoir_size": 60, "window_size": 25}
+        resp = client.post("/lstm/train", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "model_config" in body
+        assert body["model_config"]["fitted"] is True
+
+    def test_lstm_detect_requires_training(self):
+        """До обучения /lstm/detect должен возвращать 400."""
+        from anomaly.api import app as app_module
+
+        # Сбрасываем модель в unfitted состояние
+        from anomaly.models.lstm_autoencoder import create_autoencoder
+
+        original = app_module.app  # noqa: F841
+        import anomaly.api.app as api_app
+
+        api_app._lstm_model = create_autoencoder()
+
+        client = self._client()
+        payload = {"data": self._normal_data(50)}
+        resp = client.post("/lstm/detect", json=payload)
+        assert resp.status_code == 400
+        assert "train" in resp.json()["detail"].lower()
+
+    def test_lstm_detect_after_train(self):
+        client = self._client()
+
+        # Обучаем
+        train_payload = {
+            "data": self._normal_data(150),
+            "reservoir_size": 50,
+            "window_size": 20,
+        }
+        client.post("/lstm/train", json=train_payload)
+
+        # Детектируем
+        detect_payload = {"data": self._normal_data(60)}
+        resp = client.post("/lstm/detect", json=detect_payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["scores"]) == 60
+        assert len(body["predictions"]) == 60
+        assert "n_anomalies" in body
+        assert "anomaly_rate" in body
+
+    def test_lstm_detect_scores_length_matches_input(self):
+        client = self._client()
+        n = 80
+        client.post(
+            "/lstm/train",
+            json={"data": self._normal_data(150), "reservoir_size": 50, "window_size": 20},
+        )
+        resp = client.post("/lstm/detect", json={"data": self._normal_data(n)})
+        assert resp.status_code == 200
+        assert len(resp.json()["scores"]) == n
+
+    def test_lstm_status_after_train(self):
+        client = self._client()
+        client.post(
+            "/lstm/train",
+            json={"data": self._normal_data(150), "reservoir_size": 50, "window_size": 20},
+        )
+        resp = client.get("/lstm/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["fitted"] is True
+        assert "train_metrics" in body
+        assert body["train_metrics"]["threshold"] > 0
+
+    def test_lstm_anomaly_rate_float(self):
+        client = self._client()
+        client.post(
+            "/lstm/train",
+            json={"data": self._normal_data(150), "reservoir_size": 50, "window_size": 20},
+        )
+        resp = client.post("/lstm/detect", json={"data": self._normal_data(50)})
+        assert resp.status_code == 200
+        rate = resp.json()["anomaly_rate"]
+        assert 0.0 <= rate <= 1.0
+
+    def test_lstm_model_name_in_response(self):
+        client = self._client()
+        client.post(
+            "/lstm/train",
+            json={"data": self._normal_data(150), "reservoir_size": 50, "window_size": 20},
+        )
+        resp = client.post("/lstm/detect", json={"data": self._normal_data(50)})
+        assert resp.status_code == 200
+        assert resp.json()["model"] == "esn_autoencoder"
+
+    def test_lstm_train_minimum_data(self):
+        """50 точек — минимально допустимый объём для обучения."""
+        client = self._client()
+        data_50 = self._normal_data(50)
+        resp = client.post(
+            "/lstm/train",
+            json={"data": data_50, "reservoir_size": 30, "window_size": 10},
+        )
+        assert resp.status_code == 200
+
+    def test_lstm_train_too_little_data(self):
+        """Меньше 50 точек — validation error (422)."""
+        client = self._client()
+        data_10 = self._normal_data(10)
+        resp = client.post("/lstm/train", json={"data": data_10})
+        assert resp.status_code == 422

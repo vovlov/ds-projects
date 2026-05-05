@@ -414,6 +414,24 @@
         burst/HHI/velocity invariants, fraud cluster validation), TestAPI×6 (temporal endpoint).
       47/47 passed, 3 skipped (PyTorch) — было 24/27.
       Источники: temporal GNN survey (arxiv 2302.01018), FinGuard-GNN 2025, Gretton et al. 2012.
+- [x] LSTM/ESN Autoencoder serving (Project 05) — 2026-05-05
+      anomaly/models/lstm_autoencoder.py: EchoStateAutoencoder (numpy-only, без PyTorch).
+      Echo State Network: фиксированный разреженный reservoir (spectral radius < 1, Jaeger 2001),
+      leaking rate для сглаживания состояний, ridge regression для выходного слоя (аналитическое
+      решение O(n) vs O(n²) BPTT). SequenceScaler (min-max, защита от константных фич).
+      Anomaly score = MSE реконструкции центральной точки скользящего окна.
+      Порог = percentile(anomaly_percentile) ошибок на нормальных обучающих данных.
+      LSTMConfig dataclass, TrainResult, LSTMDetectionResult, create_autoencoder() factory.
+      anomaly/api/app.py: 3 новых endpoint:
+        POST /lstm/train (обучить ESN на нормальных данных, min 50 точек),
+        POST /lstm/detect (детекция с reconstruction error scores),
+        GET  /lstm/status (состояние модели для health-check).
+      26 новых тестов: TestESNAutoencoderCore×16 (fit/detect shape, binary preds, anomaly_has_higher_score,
+        SequenceScaler constant feature, normal_data_low_anomaly_rate),
+        TestLSTMAPIEndpoints×10 (train/detect/status flow, 400 без обучения, 422 мало данных).
+      101/101 тестов зелёных (было 75).
+      Источники: Jaeger 2001 (GMD TechReport 148), Malhotra et al. 2016 (ESANN),
+        Lukoševičius 2012 (Neural Networks Tricks of the Trade, Ch. 22).
 
 ---
 

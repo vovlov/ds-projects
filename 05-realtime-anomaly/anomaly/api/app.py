@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from ..metrics.prometheus_exporter import AnomalyMetrics, is_available
 from ..models.detector import MultiMetricDetector
+from ..models.lstm_autoencoder import LSTMConfig, create_autoencoder
 
 app = FastAPI(
     title="Realtime Anomaly Detection API",
-    description="Detect anomalies in metric time series with Prometheus observability "
-    "and MMD drift detection",
-    version="3.0.0",
+    description="Detect anomalies in metric time series with Prometheus observability, "
+    "MMD drift detection, and LSTM/ESN autoencoder serving",
+    version="4.0.0",
 )
 
 detector = MultiMetricDetector(window_size=50, threshold_sigma=3.0)
@@ -34,6 +35,11 @@ if is_available():
 _drift_trigger = None
 _last_drift_result: dict | None = None
 _DRIFT_FEATURES = ["cpu", "latency", "requests"]
+
+# LSTM/ESN автоэнкодер — инициализируется при /lstm/train.
+# Глобальный стейт: один model per service (production pattern).
+_lstm_model = create_autoencoder()
+_lstm_train_result: dict | None = None
 
 
 class MetricPoint(BaseModel):
@@ -241,3 +247,141 @@ def drift_status() -> dict:
         "status": "drift_detected" if _last_drift_result["is_drift"] else "stable",
         **_last_drift_result,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LSTM / ESN Autoencoder endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class LSTMTrainRequest(BaseModel):
+    """Обучить ESN-автоэнкодер на нормальных данных.
+
+    data: временной ряд нормального поведения — список точек [cpu, latency, requests].
+    Рекомендуется минимум 200 точек (~30 мин при 10s-интервале).
+    """
+
+    data: list[list[float]] = Field(
+        ...,
+        description="Normal time series: list of [cpu, latency, requests] points",
+        min_length=50,
+    )
+    reservoir_size: int = Field(default=100, ge=20, le=500)
+    window_size: int = Field(default=30, ge=10, le=100)
+    anomaly_percentile: float = Field(default=95.0, ge=80.0, le=99.9)
+
+
+class LSTMTrainResponse(BaseModel):
+    n_samples: int
+    n_windows: int
+    train_mse: float
+    threshold: float
+    model_config_: dict = Field(alias="model_config")
+
+    model_config = {"populate_by_name": True}
+
+
+class LSTMDetectRequest(BaseModel):
+    """Обнаружить аномалии через ESN-автоэнкодер.
+
+    data: список точек [cpu, latency, requests] для анализа.
+    """
+
+    data: list[list[float]] = Field(
+        ...,
+        description="Time series to analyze: list of [cpu, latency, requests] points",
+        min_length=2,
+    )
+
+
+class LSTMDetectResponse(BaseModel):
+    scores: list[float]
+    predictions: list[int]
+    threshold: float
+    n_anomalies: int
+    anomaly_rate: float
+    model: str
+
+
+@app.post("/lstm/train", response_model=LSTMTrainResponse)
+def lstm_train(request: LSTMTrainRequest) -> LSTMTrainResponse:
+    """Обучить ESN-автоэнкодер на нормальных данных.
+
+    Echo State Network захватывает сложные временные паттерны (кросс-метрические
+    корреляции, burst-recovery циклы), которые Z-score пропускает.
+
+    Результат: порог аномальности (percentile reconstruction error на train data).
+    """
+    global _lstm_model, _lstm_train_result
+
+    cfg = LSTMConfig(
+        reservoir_size=request.reservoir_size,
+        window_size=request.window_size,
+        anomaly_percentile=request.anomaly_percentile,
+    )
+    _lstm_model = create_autoencoder(cfg)
+
+    X = np.array(request.data, dtype=float)
+    result = _lstm_model.fit(X)
+
+    _lstm_train_result = {
+        "n_samples": result.n_samples,
+        "n_windows": result.n_windows,
+        "train_mse": result.train_mse,
+        "threshold": result.threshold,
+    }
+
+    return LSTMTrainResponse(
+        n_samples=result.n_samples,
+        n_windows=result.n_windows,
+        train_mse=result.train_mse,
+        threshold=result.threshold,
+        model_config=_lstm_model.get_config(),
+    )
+
+
+@app.post("/lstm/detect", response_model=LSTMDetectResponse)
+def lstm_detect(request: LSTMDetectRequest) -> LSTMDetectResponse:
+    """Обнаружить аномалии через ESN-автоэнкодер.
+
+    Требует предварительного обучения: POST /lstm/train.
+    Возвращает reconstruction error score для каждой точки + бинарные предсказания.
+    """
+    if not _lstm_model.is_fitted:
+        raise HTTPException(
+            status_code=400,
+            detail="Model not trained. Call POST /lstm/train with normal data first.",
+        )
+
+    X = np.array(request.data, dtype=float)
+    result = _lstm_model.detect(X)
+
+    n_anomalies = int(result.predictions.sum())
+    anomaly_rate = n_anomalies / len(result.predictions) if len(result.predictions) > 0 else 0.0
+
+    return LSTMDetectResponse(
+        scores=[float(s) for s in result.scores],
+        predictions=[int(p) for p in result.predictions],
+        threshold=result.threshold,
+        n_anomalies=n_anomalies,
+        anomaly_rate=anomaly_rate,
+        model=result.model,
+    )
+
+
+@app.get("/lstm/status")
+def lstm_status() -> dict:
+    """Статус ESN-модели: обучена / не обучена, конфигурация, метрики.
+
+    Полезно для health-check перед inference.
+    """
+    config = _lstm_model.get_config()
+    status = {
+        "fitted": _lstm_model.is_fitted,
+        "model_config": config,
+    }
+    if _lstm_train_result is not None:
+        status["train_metrics"] = _lstm_train_result
+    else:
+        status["message"] = "Model not trained. Call POST /lstm/train to initialize."
+    return status
