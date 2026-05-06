@@ -15,6 +15,13 @@ from review.models.classifier import (
     classify_comment,
     get_categories,
 )
+from review.models.confidence_router import (
+    RoutingConfig,
+    RoutingDecision,
+    RoutingResult,
+    compute_risk_score,
+    route_review,
+)
 from review.models.multi_review import (
     MultiReviewResult,
     SemgrepFinding,
@@ -438,3 +445,153 @@ class TestMultiModelReview:
         finally:
             if old:
                 os.environ["ANTHROPIC_API_KEY"] = old
+
+
+# ── TestConfidenceRouter ──────────────────────────────────────────────────────
+
+
+class TestRiskScore:
+    """Unit tests for compute_risk_score()."""
+
+    def test_empty_comments_returns_zero(self):
+        assert compute_risk_score([]) == 0.0
+
+    def test_single_suggestion(self):
+        comments = [{"severity": "suggestion", "category": "style", "comment": "x"}]
+        assert compute_risk_score(comments) == pytest.approx(0.3)
+
+    def test_single_minor(self):
+        comments = [{"severity": "minor", "category": "style", "comment": "x"}]
+        assert compute_risk_score(comments) == pytest.approx(1.0)
+
+    def test_single_major(self):
+        comments = [{"severity": "major", "category": "bug", "comment": "x"}]
+        assert compute_risk_score(comments) == pytest.approx(4.0)
+
+    def test_single_critical(self):
+        comments = [{"severity": "critical", "category": "security", "comment": "x"}]
+        assert compute_risk_score(comments) == pytest.approx(10.0)
+
+    def test_additive_across_comments(self):
+        comments = [
+            {"severity": "minor", "category": "style", "comment": "a"},
+            {"severity": "major", "category": "bug", "comment": "b"},
+        ]
+        assert compute_risk_score(comments) == pytest.approx(5.0)
+
+    def test_capped_at_100(self):
+        # 11 critical comments = 110 raw → capped at 100
+        comments = [{"severity": "critical", "category": "bug", "comment": "x"}] * 11
+        assert compute_risk_score(comments) == pytest.approx(100.0)
+
+    def test_unknown_severity_treated_as_suggestion(self):
+        comments = [{"severity": "unknown_level", "category": "style", "comment": "x"}]
+        assert compute_risk_score(comments) == pytest.approx(0.3)
+
+    def test_missing_severity_key(self):
+        comments = [{"category": "style", "comment": "no severity key"}]
+        score = compute_risk_score(comments)
+        assert score >= 0.0
+
+
+class TestRoutingDecisions:
+    """Unit tests for route_review() decision logic."""
+
+    def test_empty_diff_auto_approves(self):
+        result = route_review([])
+        assert result.decision == RoutingDecision.AUTO_APPROVE
+
+    def test_empty_diff_high_confidence(self):
+        result = route_review([])
+        assert result.confidence >= 0.9
+
+    def test_suggestion_only_auto_approves(self):
+        comments = [{"severity": "suggestion", "category": "style", "comment": "rename var"}]
+        result = route_review(comments)
+        assert result.decision == RoutingDecision.AUTO_APPROVE
+
+    def test_critical_security_auto_rejects(self):
+        comments = [
+            {
+                "severity": "critical",
+                "category": "security",
+                "comment": "SQL injection via f-string",
+            }
+        ]
+        result = route_review(comments)
+        assert result.decision == RoutingDecision.AUTO_REJECT
+
+    def test_critical_findings_populated_on_reject(self):
+        comments = [{"severity": "critical", "category": "security", "comment": "RCE via eval()"}]
+        result = route_review(comments)
+        assert len(result.critical_findings) == 1
+        assert result.critical_findings[0]["comment"] == "RCE via eval()"
+
+    def test_high_aggregate_risk_auto_rejects(self):
+        # 3 major = 12.0 > default threshold of 8.0
+        comments = [
+            {"severity": "major", "category": "bug", "comment": f"bug {i}"} for i in range(3)
+        ]
+        result = route_review(comments)
+        assert result.decision == RoutingDecision.AUTO_REJECT
+
+    def test_medium_risk_human_review(self):
+        # 1 major (4.0) is in the ambiguous zone [0.5, 8.0]
+        comments = [{"severity": "major", "category": "performance", "comment": "O(n^2) loop"}]
+        result = route_review(comments)
+        assert result.decision == RoutingDecision.HUMAN_REVIEW
+
+    def test_result_has_reason(self):
+        result = route_review([])
+        assert isinstance(result.reason, str)
+        assert len(result.reason) > 10
+
+    def test_comment_count_matches_input(self):
+        comments = [
+            {"severity": "minor", "category": "style", "comment": f"c{i}"} for i in range(5)
+        ]
+        result = route_review(comments)
+        assert result.comment_count == 5
+
+    def test_confidence_in_valid_range(self):
+        for severity in ("suggestion", "minor", "major", "critical"):
+            comments = [{"severity": severity, "category": "bug", "comment": "x"}]
+            result = route_review(comments)
+            assert 0.0 <= result.confidence <= 1.0, f"confidence out of range for {severity}"
+
+    def test_custom_config_low_threshold(self):
+        # Lower the reject threshold so major triggers auto_reject
+        config = RoutingConfig(auto_reject_min_risk=3.0)
+        comments = [{"severity": "major", "category": "bug", "comment": "logic error"}]
+        result = route_review(comments, config=config)
+        assert result.decision == RoutingDecision.AUTO_REJECT
+
+    def test_custom_config_disable_security_escalation(self):
+        # With security_escalate=False, a 'suggestion'-level security comment should not force
+        # AUTO_REJECT. Score 0.3 ≤ default auto_approve_max_risk 0.5 → AUTO_APPROVE.
+        config = RoutingConfig(
+            security_escalate=False, critical_escalate=False, auto_reject_min_risk=8.0
+        )
+        comments = [{"severity": "suggestion", "category": "security", "comment": "consider HMAC"}]
+        result = route_review(comments, config=config)
+        assert result.decision == RoutingDecision.AUTO_APPROVE
+
+    def test_routing_result_is_dataclass(self):
+        result = route_review([])
+        assert isinstance(result, RoutingResult)
+        assert isinstance(result.decision, RoutingDecision)
+        assert isinstance(result.risk_score, float)
+
+    def test_decision_enum_values(self):
+        assert RoutingDecision.AUTO_APPROVE.value == "auto_approve"
+        assert RoutingDecision.HUMAN_REVIEW.value == "human_review"
+        assert RoutingDecision.AUTO_REJECT.value == "auto_reject"
+
+    def test_multiple_security_findings_all_in_critical_findings(self):
+        comments = [
+            {"severity": "major", "category": "security", "comment": "XSS via innerHTML"},
+            {"severity": "critical", "category": "security", "comment": "SQLi via format"},
+        ]
+        result = route_review(comments)
+        assert result.decision == RoutingDecision.AUTO_REJECT
+        assert len(result.critical_findings) == 2

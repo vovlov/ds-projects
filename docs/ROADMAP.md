@@ -432,6 +432,23 @@
       101/101 тестов зелёных (было 75).
       Источники: Jaeger 2001 (GMD TechReport 148), Malhotra et al. 2016 (ESANN),
         Lukoševičius 2012 (Neural Networks Tricks of the Trade, Ch. 22).
+- [x] Confidence-Based Routing для LLM Code Review (Project 08) — 2026-05-06
+      review/models/confidence_router.py: Human-in-the-Loop (HITL) routing pattern.
+      RoutingDecision enum: AUTO_APPROVE / HUMAN_REVIEW / AUTO_REJECT.
+      RoutingConfig dataclass: настраиваемые пороги (auto_approve_max_risk=0.5,
+        auto_reject_min_risk=8.0, critical_escalate=True, security_escalate=True).
+      RoutingResult dataclass: decision + risk_score + confidence + reason + critical_findings.
+      compute_risk_score(): взвешенная сумма severity (critical=10, major=4, minor=1,
+        suggestion=0.3), capped at 100. Неизвестные severity → suggestion weight.
+      route_review(): приоритетная логика — 1) escalation (critical/security findings),
+        2) high aggregate risk ≥ threshold, 3) low risk ≤ threshold, 4) ambiguous → human.
+      _routing_confidence(): кусочно-линейная функция — высокая уверенность у краёв
+        (чётко безопасно/опасно), низкая в середине зоны (нужен человек).
+      24 новых теста: TestRiskScore×9 (empty, weights, additive, cap, unknown, missing key),
+        TestRoutingDecisions×15 (all 3 paths, escalation, custom config, dataclass checks).
+      60/60 тестов зелёных (было 36).
+      Источники: LLM Code Review Evaluation 2025 (arxiv 2505.20206), OWASP ML Security Top 10,
+        Ericsson Production Code Review 2025.
 
 ---
 
