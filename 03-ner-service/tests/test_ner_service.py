@@ -307,3 +307,231 @@ class TestBatchProcessing:
         result_large = process_texts(texts, chunk_size=100)
         assert result_small.total_texts == result_large.total_texts
         assert result_small.total_entities == result_large.total_entities
+
+
+# ── Conformal Prediction тесты ───────────────────────────────────────────────
+
+
+class TestConformalNERPredictor:
+    """Unit-тесты ConformalNERPredictor — nonconformity scores и калибровка."""
+
+    from ner.model.conformal import ConformalConfig, ConformalNERPredictor
+    from ner.model.ner import Entity
+
+    def _make_entity(self, text: str, label: str) -> "Entity":
+        from ner.model.ner import Entity
+
+        return Entity(text=text, label=label, start=0, end=len(text))
+
+    def test_pattern_score_perfect_match_per(self):
+        """Полное совпадение с PER-паттерном → score = 1.0."""
+        from ner.model.conformal import ConformalNERPredictor
+
+        pred = ConformalNERPredictor()
+        score = pred._pattern_score("Иван Петров", "PER")
+        assert score == 1.0
+
+    def test_pattern_score_no_match(self):
+        """Текст не совпадает ни с одним паттерном → score = 0.0."""
+        from ner.model.conformal import ConformalNERPredictor
+
+        pred = ConformalNERPredictor()
+        assert pred._pattern_score("просто текст", "PER") == 0.0
+
+    def test_nonconformity_score_range(self):
+        """Nonconformity score ∈ [0, 1]."""
+        from ner.model.conformal import ConformalNERPredictor
+
+        pred = ConformalNERPredictor()
+        for label in ["PER", "ORG", "LOC"]:
+            score = pred._nonconformity_score("Газпром нефть", label)
+            assert 0.0 <= score <= 1.0
+
+    def test_nonconformity_lower_for_matching_label(self):
+        """Совпадающий label имеет более низкий nonconformity score."""
+        from ner.model.conformal import ConformalNERPredictor
+
+        pred = ConformalNERPredictor()
+        # "Газпром" матчит ORG, поэтому score(ORG) < score(PER)
+        score_org = pred._nonconformity_score("Газпром", "ORG")
+        score_per = pred._nonconformity_score("Газпром", "PER")
+        assert score_org < score_per
+
+    def test_nonconformity_unknown_text_uniform(self):
+        """Текст без паттернов → равномерное распределение неопределённости."""
+        from ner.model.conformal import ConformalNERPredictor
+
+        pred = ConformalNERPredictor()
+        score = pred._nonconformity_score("абракадабра", "PER")
+        # Равномерно: 1 - 1/3 ≈ 0.667
+        assert abs(score - (1.0 - 1.0 / 3)) < 1e-6
+
+    def test_calibrate_returns_result(self):
+        """calibrate() возвращает CalibrationResult с ожидаемыми полями."""
+        from ner.model.conformal import ConformalNERPredictor
+
+        pred = ConformalNERPredictor()
+        entities = [
+            self._make_entity("Иван Петров", "PER"),
+            self._make_entity("Газпром", "ORG"),
+            self._make_entity("Москва", "LOC"),
+        ] * 5  # 15 сущностей >= min_calibration_samples=10
+        result = pred.calibrate(entities)
+        assert 0.0 <= result.q_hat <= 1.0
+        assert result.n_calibration == 15
+        assert result.alpha == 0.1
+
+    def test_calibrate_too_few_samples_uses_conservative(self):
+        """Меньше min_calibration_samples → q_hat = 1.0 (включить всё)."""
+        from ner.model.conformal import ConformalNERPredictor
+
+        pred = ConformalNERPredictor()
+        entities = [self._make_entity("Иван Петров", "PER")] * 5
+        result = pred.calibrate(entities)
+        assert result.q_hat == 1.0
+
+    def test_calibrate_empirical_coverage_bounded(self):
+        """Эмпирическое покрытие на калибровочных данных ≥ 1-α."""
+        from ner.model.conformal import ConformalNERPredictor
+
+        pred = ConformalNERPredictor()
+        entities = [
+            self._make_entity("Иван Петров", "PER"),
+            self._make_entity("Газпром", "ORG"),
+            self._make_entity("Москва", "LOC"),
+        ] * 5
+        result = pred.calibrate(entities)
+        assert result.coverage_empirical >= 1.0 - result.alpha - 1e-6
+
+    def test_predict_set_contains_predicted_label(self):
+        """prediction_set всегда содержит предсказанный label."""
+        from ner.model.conformal import ConformalNERPredictor
+        from ner.model.ner import predict
+
+        pred = ConformalNERPredictor()
+        entities = predict("Иван Петров из Газпрома приехал в Москву.")
+        for entity in entities:
+            result = pred.predict_set(entity)
+            assert result.label in result.prediction_set
+
+    def test_predict_set_subset_of_all_labels(self):
+        """prediction_set ⊆ {PER, ORG, LOC}."""
+        from ner.model.conformal import ALL_LABELS, ConformalNERPredictor
+        from ner.model.ner import predict
+
+        pred = ConformalNERPredictor()
+        for entity in predict("Яндекс открыл офис в Санкт-Петербурге."):
+            result = pred.predict_set(entity)
+            assert all(lb in ALL_LABELS for lb in result.prediction_set)
+
+    def test_predict_set_is_certain_flag(self):
+        """is_certain=True ↔ len(prediction_set)==1."""
+        from ner.model.conformal import ConformalNERPredictor
+        from ner.model.ner import predict
+
+        pred = ConformalNERPredictor()
+        for entity in predict("Газпром в Москве."):
+            result = pred.predict_set(entity)
+            assert result.is_certain == (len(result.prediction_set) == 1)
+
+    def test_predict_set_coverage_field(self):
+        """coverage = 1 - alpha."""
+        from ner.model.conformal import ConformalConfig, ConformalNERPredictor
+        from ner.model.ner import predict
+
+        pred = ConformalNERPredictor(ConformalConfig(alpha=0.05))
+        entities = predict("Газпром в Москве.")
+        if entities:
+            result = pred.predict_set(entities[0])
+            assert abs(result.coverage - 0.95) < 1e-6
+
+    def test_predict_text_returns_list(self):
+        """predict_text возвращает список ConformalEntityResult."""
+        from ner.model.conformal import ConformalEntityResult, ConformalNERPredictor
+
+        pred = ConformalNERPredictor()
+        results = pred.predict_text("Яндекс в Москве.")
+        assert isinstance(results, list)
+        for r in results:
+            assert isinstance(r, ConformalEntityResult)
+
+    def test_auto_calibration_on_collection5(self):
+        """Калибровка на Collection5 устанавливает разумный q_hat."""
+        from ner.data.collection5 import get_collection5_sample
+        from ner.model.conformal import ConformalNERPredictor
+        from ner.model.ner import extract_entities_from_bio
+
+        pred = ConformalNERPredictor()
+        dataset = get_collection5_sample()
+        entities = []
+        for sent in dataset:
+            tokens = [tok for tok, _ in sent]
+            labels_bio = [lbl for _, lbl in sent]
+            entities.extend(extract_entities_from_bio(tokens, labels_bio))
+        if entities:
+            result = pred.calibrate(entities)
+            assert pred._calibrated is True
+            assert 0.0 <= result.q_hat <= 1.0
+
+
+class TestConformalAPI:
+    """Интеграционные тесты /predict/conformal endpoint."""
+
+    def test_conformal_endpoint_status_200(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/conformal", json={"text": "Газпром в Москве."})
+        assert resp.status_code == 200
+
+    def test_conformal_endpoint_structure(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/conformal", json={"text": "Яндекс в Санкт-Петербурге."})
+        data = resp.json()
+        assert "entities" in data
+        assert "q_hat" in data
+        assert "calibrated" in data
+
+    def test_conformal_entity_has_required_fields(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/conformal", json={"text": "Газпром в Москве."})
+        entities = resp.json()["entities"]
+        assert len(entities) > 0
+        for e in entities:
+            assert "prediction_set" in e
+            assert "nonconformity_score" in e
+            assert "is_certain" in e
+            assert "coverage" in e
+
+    def test_conformal_prediction_set_contains_label(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/conformal", json={"text": "Яндекс в Санкт-Петербурге."})
+        for e in resp.json()["entities"]:
+            assert e["label"] in e["prediction_set"]
+
+    def test_conformal_calibrated_true(self):
+        """После авто-калибровки при старте calibrated=True."""
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        data = client.post("/predict/conformal", json={"text": "Газпром."}).json()
+        assert data["calibrated"] is True
+
+    def test_health_includes_conformal_status(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.get("/health")
+        assert "conformal_calibrated" in resp.json()

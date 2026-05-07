@@ -449,6 +449,38 @@
       60/60 тестов зелёных (было 36).
       Источники: LLM Code Review Evaluation 2025 (arxiv 2505.20206), OWASP ML Security Top 10,
         Ericsson Production Code Review 2025.
+- [x] Conformal Prediction для NER (Project 03) — 2026-05-07
+      Split Conformal Prediction (Angelopoulos & Bates 2022) для калибровки уверенности NER.
+      Статистически валидные множества предсказаний: P(true_label ∈ C(X)) ≥ 1-α.
+      ner/model/conformal.py: ConformalConfig (alpha, min_calibration_samples),
+        ConformalEntityResult (prediction_set, nonconformity_score, is_certain, coverage),
+        CalibrationResult (q_hat, n_calibration, coverage_empirical),
+        ConformalNERPredictor (_pattern_score: full/partial/no match → 1.0/0.6/0.0,
+          _nonconformity_score: 1 - P̂(label|text) через нормализацию паттернов,
+          calibrate: Venn-Abers конечная поправка level=(n+1)(1-α)/n,
+          predict_set: включает label ↔ score ≤ q_hat).
+      ner/api/app.py: авто-калибровка на Collection5 при старте (без ручного шага),
+        POST /predict/conformal → ConformalNERResponse (entities + q_hat + calibrated),
+        GET /health расширен полем conformal_calibrated.
+      20 новых тестов: TestConformalNERPredictor×14 (pattern_score, nonconformity_range,
+        lower_for_matching, uniform_unknown, calibrate_result, conservative_threshold,
+        empirical_coverage, prediction_set_contains_label, subset_of_labels, is_certain,
+        coverage_field, predict_text, auto_calibration_on_collection5),
+        TestConformalAPI×6 (status_200, structure, required_fields, set_contains_label,
+        calibrated_true, health_includes_conformal_status).
+      61/61 тестов зелёных (+20, было 41).
+      Источники: Angelopoulos & Bates 2022 (arxiv 2107.07511), Papadopoulos et al. 2002,
+        EU AI Act Article 13, Shafer & Vovk 2008 (JMLR 9:371-421).
+- [ ] Incremental Learning для Churn (Project 01) — 2026-05-08
+      River (online ML) для обновления модели без полного переобучения.
+      Обработка concept drift: adaptive windowing (ADWIN) + periodic snapshot.
+- [ ] LLM-as-Judge pipeline для Code Review (Project 08) — 2026-05-09
+      Автоматическая оценка качества ревью с помощью Claude claude-sonnet-4-6.
+      Метрики: faithfulness, helpfulness, false_positive_rate.
+      Золотой датасет из 20 аннотированных примеров для regression testing.
+- [ ] Quantile Regression для Real Estate (Project 07) — 2026-05-10
+      Prediction intervals вместо точечных оценок (LightGBM quantile loss).
+      Calibration plot: покрытие 90%/95% на тестовой выборке.
 
 ---
 
