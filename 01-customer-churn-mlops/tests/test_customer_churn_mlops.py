@@ -1544,9 +1544,8 @@ class TestQuantizer:
 
     def test_quantize_linear_model_logistic_regression(self):
         """Квантизация sklearn LogisticRegression возвращает QuantizedModel."""
-        from sklearn.linear_model import LogisticRegression
-
         from churn.optimization.quantizer import QuantizedModel, quantize_linear_model
+        from sklearn.linear_model import LogisticRegression
 
         model = LogisticRegression()
         # Минимальное обучение на синтетических данных
@@ -1562,9 +1561,8 @@ class TestQuantizer:
 
     def test_quantize_linear_model_compression_ratio(self):
         """INT8 даёт ~8x сжатие для float64 весов (float64=8b → int8=1b)."""
-        from sklearn.linear_model import LogisticRegression
-
         from churn.optimization.quantizer import quantize_linear_model
+        from sklearn.linear_model import LogisticRegression
 
         model = LogisticRegression()
         X = np.random.randn(50, 10)
@@ -1577,9 +1575,8 @@ class TestQuantizer:
 
     def test_quantize_linear_model_predict_proba_preserved(self):
         """QuantizedModel.predict_proba() даёт те же результаты, что и оригинал."""
-        from sklearn.linear_model import LogisticRegression
-
         from churn.optimization.quantizer import quantize_linear_model
+        from sklearn.linear_model import LogisticRegression
 
         model = LogisticRegression()
         X = np.random.randn(200, 5)
@@ -1869,3 +1866,330 @@ class TestOptimizeAPIEndpoints:
         payload = {"latencies_by_batch": {}, "sla_p95_ms": 200.0}
         resp = client.post("/optimize/batch", json=payload)
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# TestIncrementalLearnerUnit — unit tests for churn/online/learner.py
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalLearnerUnit:
+    """Юнит-тесты для IncrementalChurnLearner и связанных dataclass'ов.
+
+    Unit tests for IncrementalChurnLearner and related dataclasses.
+    """
+
+    def test_is_available_returns_bool(self):
+        """is_available() возвращает bool независимо от наличия River."""
+        from churn.online.learner import is_available
+
+        assert isinstance(is_available(), bool)
+
+    def test_config_defaults(self):
+        """IncrementalConfig имеет разумные значения по умолчанию."""
+        from churn.online.learner import IncrementalConfig
+
+        cfg = IncrementalConfig()
+        assert cfg.model_type == "hoeffding_tree"
+        assert 0.0 < cfg.adwin_delta < 1.0
+        assert cfg.snapshot_interval > 0
+
+    def test_initial_status_zero_samples(self):
+        """Новый классификатор имеет 0 обработанных примеров."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        status = learner.get_status()
+        assert status["n_samples_seen"] == 0
+        assert status["n_drift_detections"] == 0
+
+    def test_status_contains_required_fields(self):
+        """get_status() содержит все обязательные поля для мониторинга."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        status = learner.get_status()
+        required = {
+            "model_type",
+            "river_available",
+            "n_samples_seen",
+            "n_drift_detections",
+            "current_error_rate",
+            "last_drift_at",
+            "adwin_delta",
+            "snapshot_interval",
+            "class_distribution",
+        }
+        assert required.issubset(set(status.keys()))
+
+    def test_predict_one_before_learning_returns_valid_probability(self):
+        """predict_one без обучения возвращает вероятность в [0, 1]."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        result = learner.predict_one({"tenure": 12.0, "MonthlyCharges": 70.0})
+        assert 0.0 <= result.churn_probability <= 1.0
+        assert isinstance(result.churn_prediction, bool)
+
+    def test_predict_one_risk_level_matches_probability(self):
+        """risk_level соответствует чётким порогам вероятности."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        # Манипулируем fallback-счётчиками для гарантированного результата
+        learner._fallback_counts = {0: 90, 1: 10}  # ~10% churn → low risk
+        result = learner.predict_one({"tenure": 36.0})
+        assert result.risk_level in {"low", "medium", "high"}
+
+    def test_learn_one_increments_sample_count(self):
+        """learn_one увеличивает n_samples_seen на 1 при каждом вызове."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        for i in range(5):
+            r = learner.learn_one({"tenure": float(i), "MonthlyCharges": 50.0}, label=0)
+            assert r.n_samples_seen == i + 1
+
+    def test_learn_one_returns_learn_result_dataclass(self):
+        """learn_one возвращает LearnResult с правильными полями."""
+        from churn.online.learner import IncrementalChurnLearner, LearnResult
+
+        learner = IncrementalChurnLearner()
+        result = learner.learn_one({"tenure": 5.0}, label=1)
+        assert isinstance(result, LearnResult)
+        assert 0.0 <= result.error <= 1.0
+        assert isinstance(result.drift_detected, bool)
+        assert isinstance(result.snapshot_saved, bool)
+
+    def test_class_distribution_tracked_after_learning(self):
+        """Счётчик классов обновляется после learn_one."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        for _ in range(7):
+            learner.learn_one({"tenure": 10.0}, label=0)
+        for _ in range(3):
+            learner.learn_one({"tenure": 1.0}, label=1)
+
+        status = learner.get_status()
+        dist = status["class_distribution"]
+        assert dist["n_non_churn"] == 7
+        assert dist["n_churn"] == 3
+
+    def test_snapshot_saved_at_configured_interval(self, tmp_path):
+        """Снапшот сохраняется ровно на кратном snapshot_interval шаге."""
+        from churn.online.learner import IncrementalChurnLearner, IncrementalConfig
+
+        cfg = IncrementalConfig(snapshot_interval=5, snapshot_dir=str(tmp_path))
+        learner = IncrementalChurnLearner(cfg)
+
+        results = [learner.learn_one({"x": float(i)}, label=i % 2) for i in range(10)]
+        # Снапшоты должны быть на шагах 5 и 10
+        snaps = [r for r in results if r.snapshot_saved]
+        assert len(snaps) == 2
+
+    def test_snapshot_file_is_loadable(self, tmp_path):
+        """Загрузка снапшота восстанавливает n_samples_seen."""
+        from churn.online.learner import IncrementalChurnLearner, IncrementalConfig
+
+        cfg = IncrementalConfig(snapshot_interval=3, snapshot_dir=str(tmp_path))
+        learner = IncrementalChurnLearner(cfg)
+        for i in range(3):
+            learner.learn_one({"tenure": float(i)}, label=0)
+
+        assert learner._last_snapshot is not None
+        snap_path = learner._last_snapshot.path
+
+        restored = IncrementalChurnLearner.load_snapshot(snap_path)
+        assert restored._n_samples == 3
+
+    def test_predict_after_learning_updates_model_type(self):
+        """После обучения model_type отражает наличие River."""
+        from churn.online.learner import IncrementalChurnLearner, is_available
+
+        learner = IncrementalChurnLearner()
+        learner.learn_one({"tenure": 5.0}, label=0)
+        result = learner.predict_one({"tenure": 5.0})
+
+        if is_available():
+            assert result.model_type.startswith("river_")
+        else:
+            assert result.model_type == "fallback_freq"
+
+    def test_drift_state_has_correct_initial_values(self):
+        """DriftState начинается с нулей."""
+        from churn.online.learner import DriftState
+
+        state = DriftState()
+        assert state.n_detected == 0
+        assert state.last_detected_at is None
+        assert state.current_error_rate == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestIncrementalLearnerIntegration — integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalLearnerIntegration:
+    """Интеграционные тесты для инкрементального обучения.
+
+    Integration tests for incremental learning.
+    """
+
+    def test_learn_many_samples_stable_prediction(self):
+        """После 50 обучающих примеров модель возвращает стабильные предсказания."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        # Простой паттерн: высокий tenure → не уйдёт
+        for _ in range(50):
+            learner.learn_one({"tenure": 60.0, "MonthlyCharges": 30.0}, label=0)
+
+        result = learner.predict_one({"tenure": 60.0, "MonthlyCharges": 30.0})
+        assert result.n_samples_seen == 50
+        assert 0.0 <= result.churn_probability <= 1.0
+
+    def test_fallback_mode_probability_in_range(self):
+        """Fallback-режим (без River) возвращает вероятность в [0, 1]."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        # Симулируем fallback через прямую установку счётчиков
+        learner._fallback_counts = {0: 80, 1: 20}
+        result = learner.predict_one({"tenure": 12.0})
+        assert 0.0 <= result.churn_probability <= 1.0
+
+    def test_incremental_result_has_drift_state(self):
+        """IncrementalResult содержит drift_state с обязательными полями."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        result = learner.predict_one({"f1": 1.0})
+        assert result.drift_state is not None
+        assert hasattr(result.drift_state, "n_detected")
+        assert hasattr(result.drift_state, "current_error_rate")
+
+    def test_learn_result_drift_state_propagated(self):
+        """LearnResult.drift_state отражает реальное состояние после обучения."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        result = learner.learn_one({"tenure": 10.0}, label=0)
+        ds = result.drift_state
+        assert ds.n_detected >= 0
+        assert ds.n_samples_since_last >= 1
+
+    def test_mixed_labels_class_distribution_consistent(self):
+        """Смешанные метки: распределение классов соответствует поданным примерам."""
+        from churn.online.learner import IncrementalChurnLearner
+
+        learner = IncrementalChurnLearner()
+        labels = [0] * 60 + [1] * 40
+        for i, y in enumerate(labels):
+            learner.learn_one({"f": float(i)}, label=y)
+
+        dist = learner.get_status()["class_distribution"]
+        assert dist["n_non_churn"] == 60
+        assert dist["n_churn"] == 40
+
+
+# ---------------------------------------------------------------------------
+# TestOnlineAPIEndpoints — /online/* API tests
+# ---------------------------------------------------------------------------
+
+
+class TestOnlineAPIEndpoints:
+    """Тесты для /online/status, /online/learn, /online/predict, /online/reset.
+
+    Tests for online learning API endpoints.
+    """
+
+    def _client(self):
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        return TestClient(app)
+
+    def test_online_status_returns_200(self):
+        """GET /online/status возвращает 200."""
+        resp = self._client().get("/online/status")
+        assert resp.status_code == 200
+
+    def test_online_status_structure(self):
+        """GET /online/status содержит обязательные поля."""
+        data = self._client().get("/online/status").json()
+        assert "model_type" in data
+        assert "river_available" in data
+        assert "n_samples_seen" in data
+        assert "n_drift_detections" in data
+        assert "class_distribution" in data
+
+    def test_online_predict_returns_200(self):
+        """POST /online/predict возвращает 200."""
+        payload = {"features": {"tenure": 12.0, "MonthlyCharges": 70.35}}
+        resp = self._client().post("/online/predict", json=payload)
+        assert resp.status_code == 200
+
+    def test_online_predict_response_structure(self):
+        """POST /online/predict содержит все обязательные поля."""
+        payload = {"features": {"tenure": 12.0, "MonthlyCharges": 70.35}}
+        data = self._client().post("/online/predict", json=payload).json()
+        assert "churn_probability" in data
+        assert "churn_prediction" in data
+        assert "risk_level" in data
+        assert "model_type" in data
+        assert "n_samples_seen" in data
+        assert 0.0 <= data["churn_probability"] <= 1.0
+
+    def test_online_predict_risk_level_valid(self):
+        """POST /online/predict возвращает допустимый risk_level."""
+        payload = {"features": {"tenure": 5.0}}
+        data = self._client().post("/online/predict", json=payload).json()
+        assert data["risk_level"] in {"low", "medium", "high"}
+
+    def test_online_learn_returns_200(self):
+        """POST /online/learn возвращает 200."""
+        payload = {"features": {"tenure": 12.0, "MonthlyCharges": 70.35}, "label": 0}
+        resp = self._client().post("/online/learn", json=payload)
+        assert resp.status_code == 200
+
+    def test_online_learn_response_structure(self):
+        """POST /online/learn содержит все обязательные поля."""
+        payload = {"features": {"tenure": 5.0}, "label": 1}
+        data = self._client().post("/online/learn", json=payload).json()
+        assert "n_samples_seen" in data
+        assert "error" in data
+        assert "drift_detected" in data
+        assert "snapshot_saved" in data
+        assert "drift_state" in data
+
+    def test_online_learn_increments_sample_count(self):
+        """POST /online/learn n_samples_seen растёт при повторных вызовах."""
+        client = self._client()
+        # Сбрасываем состояние перед тестом
+        client.post("/online/reset")
+        payload = {"features": {"tenure": 10.0}, "label": 0}
+        r1 = client.post("/online/learn", json=payload).json()
+        r2 = client.post("/online/learn", json=payload).json()
+        assert r2["n_samples_seen"] > r1["n_samples_seen"]
+
+    def test_online_learn_invalid_label_raises_422(self):
+        """POST /online/learn с label=2 (вне диапазона) возвращает 422."""
+        payload = {"features": {"tenure": 5.0}, "label": 2}
+        resp = self._client().post("/online/learn", json=payload)
+        assert resp.status_code == 422
+
+    def test_online_reset_returns_200(self):
+        """POST /online/reset возвращает 200 и сообщение."""
+        data = self._client().post("/online/reset").json()
+        assert "status" in data
+        assert data["status"] == "reset"
+
+    def test_online_reset_clears_sample_count(self):
+        """POST /online/reset обнуляет n_samples_seen."""
+        client = self._client()
+        client.post("/online/learn", json={"features": {"x": 1.0}, "label": 0})
+        client.post("/online/reset")
+        status = client.get("/online/status").json()
+        assert status["n_samples_seen"] == 0

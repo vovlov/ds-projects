@@ -471,9 +471,23 @@
       61/61 тестов зелёных (+20, было 41).
       Источники: Angelopoulos & Bates 2022 (arxiv 2107.07511), Papadopoulos et al. 2002,
         EU AI Act Article 13, Shafer & Vovk 2008 (JMLR 9:371-421).
-- [ ] Incremental Learning для Churn (Project 01) — 2026-05-08
-      River (online ML) для обновления модели без полного переобучения.
-      Обработка concept drift: adaptive windowing (ADWIN) + periodic snapshot.
+- [x] Incremental Learning для Churn (Project 01) — 2026-05-08
+      churn/online/learner.py: IncrementalChurnLearner (River HoeffdingTreeClassifier +
+        ADWIN drift detector + StandardScaler, predict-then-learn порядок обязателен
+        для честной оценки ошибки). Graceful degradation: SimpleFallbackClassifier
+        (Laplace-сглаженный байесовский счётчик) когда River не установлен.
+        Periodic snapshot каждые N примеров (pickle сериализация model+ADWIN+scaler).
+        load_snapshot() восстанавливает полное состояние.
+      churn/api/app.py: 4 новых endpoint:
+        POST /online/learn (delayed-feedback: предсказать→метка поступает позже),
+        POST /online/predict (предсказание без обновления модели),
+        GET  /online/status (ADWIN state + снапшоты + class distribution),
+        POST /online/reset (сброс к начальному состоянию).
+      river>=0.21 добавлен в [churn] extras pyproject.toml.
+      29 новых тестов: TestIncrementalLearnerUnit×13, TestIncrementalLearnerIntegration×5,
+        TestOnlineAPIEndpoints×11. 160/160 тестов зелёных (было 131).
+      Источники: Bifet & Gavalda 2007 ADWIN (SDM'07), Hulten et al. 2001 Hoeffding Tree (KDD),
+        River docs riverml.xyz/latest/.
 - [ ] LLM-as-Judge pipeline для Code Review (Project 08) — 2026-05-09
       Автоматическая оценка качества ревью с помощью Claude claude-sonnet-4-6.
       Метрики: faithfulness, helpfulness, false_positive_rate.

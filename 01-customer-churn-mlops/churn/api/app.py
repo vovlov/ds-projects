@@ -726,3 +726,169 @@ def optimize_batch(request: BatchOptimizeRequest) -> dict[str, Any]:
         "recommendations": result.recommendations,
         "sla_p95_ms": request.sla_p95_ms,
     }
+
+
+# ---------------------------------------------------------------------------
+# Incremental online learning endpoints (River + ADWIN)
+# ---------------------------------------------------------------------------
+
+from ..online.learner import IncrementalChurnLearner, IncrementalConfig  # noqa: E402
+
+# Глобальный инкрементальный классификатор — обновляется в реальном времени.
+# В production заменяется на Redis-backed store для горизонтального масштабирования.
+_online_learner = IncrementalChurnLearner(
+    IncrementalConfig(snapshot_interval=100, adwin_delta=0.002)
+)
+
+
+class OnlineLearnRequest(BaseModel):
+    """Запрос на обучающий шаг инкрементальной модели.
+
+    Request for one incremental learning step.
+
+    Принимает числовые признаки клиента и истинную метку оттока.
+    Обычно вызывается когда становится известен фактический исход
+    (с задержкой относительно предсказания — delayed feedback pattern).
+    """
+
+    features: dict[str, float] = Field(
+        ...,
+        description="Числовые признаки клиента {feature_name: value}",
+        examples=[{"tenure": 12.0, "MonthlyCharges": 70.35, "TotalCharges": 844.2}],
+    )
+    label: int = Field(
+        ...,
+        ge=0,
+        le=1,
+        description="Истинная метка: 0=остался, 1=ушёл (churn)",
+    )
+
+
+class OnlineLearnResponse(BaseModel):
+    """Результат одного шага инкрементального обучения.
+
+    Result of one incremental learning step.
+    """
+
+    n_samples_seen: int = Field(..., description="Всего примеров обработано моделью")
+    error: float = Field(..., description="Ошибка на этом примере (0.0=верно, 1.0=неверно)")
+    drift_detected: bool = Field(..., description="ADWIN обнаружил дрейф на этом шаге")
+    snapshot_saved: bool = Field(..., description="Снапшот сохранён на этом шаге")
+    drift_state: dict[str, Any] = Field(..., description="Текущее состояние детектора ADWIN")
+
+
+class OnlinePredictRequest(BaseModel):
+    """Запрос предсказания от инкрементальной модели.
+
+    Prediction request to the online incremental model.
+    """
+
+    features: dict[str, float] = Field(
+        ...,
+        description="Числовые признаки клиента",
+        examples=[{"tenure": 12.0, "MonthlyCharges": 70.35, "TotalCharges": 844.2}],
+    )
+
+
+class OnlinePredictResponse(BaseModel):
+    """Ответ инкрементальной модели.
+
+    Online model prediction response.
+    """
+
+    churn_probability: float = Field(..., description="Вероятность оттока [0, 1]")
+    churn_prediction: bool = Field(..., description="True если proba >= 0.5")
+    risk_level: str = Field(..., description="low / medium / high")
+    model_type: str = Field(..., description="river_hoeffding_tree или fallback_freq")
+    n_samples_seen: int = Field(..., description="Обучающих примеров в модели")
+    drift_state: dict[str, Any] = Field(..., description="Состояние ADWIN детектора")
+
+
+@app.post("/online/learn", response_model=OnlineLearnResponse)
+def online_learn(request: OnlineLearnRequest) -> OnlineLearnResponse:
+    """Обновить инкрементальную модель одним размеченным примером.
+
+    Update the incremental model with one labeled example.
+
+    Реализует delayed-feedback паттерн: предсказание делается сразу,
+    а метка (ушёл клиент или нет) поступает позже. Этот endpoint
+    вызывается когда истинная метка становится известна.
+
+    Implements delayed-feedback pattern: prediction happens immediately,
+    but the true label (did customer churn?) arrives later. Call this
+    endpoint when the ground truth becomes available.
+
+    ADWIN автоматически обнаруживает concept drift в потоке ошибок.
+    При drift_detected=True рекомендуется запустить batch-переобучение
+    через существующий /retraining/notify endpoint.
+    """
+    result = _online_learner.learn_one(request.features, request.label)
+    return OnlineLearnResponse(
+        n_samples_seen=result.n_samples_seen,
+        error=result.error,
+        drift_detected=result.drift_detected,
+        snapshot_saved=result.snapshot_saved,
+        drift_state={
+            "n_detected": result.drift_state.n_detected,
+            "n_samples_since_last": result.drift_state.n_samples_since_last,
+            "last_detected_at": result.drift_state.last_detected_at,
+            "current_error_rate": result.drift_state.current_error_rate,
+        },
+    )
+
+
+@app.post("/online/predict", response_model=OnlinePredictResponse)
+def online_predict(request: OnlinePredictRequest) -> OnlinePredictResponse:
+    """Предсказать отток инкрементальной моделью (без обновления).
+
+    Predict churn using the online incremental model (predict only, no update).
+
+    Используйте этот endpoint для получения предсказания.
+    Для обучения на результате — POST /online/learn.
+
+    Use this endpoint to get predictions.
+    To train on the outcome — POST /online/learn.
+    """
+    result = _online_learner.predict_one(request.features)
+    return OnlinePredictResponse(
+        churn_probability=result.churn_probability,
+        churn_prediction=result.churn_prediction,
+        risk_level=result.risk_level,
+        model_type=result.model_type,
+        n_samples_seen=result.n_samples_seen,
+        drift_state={
+            "n_detected": result.drift_state.n_detected if result.drift_state else 0,
+            "current_error_rate": (
+                result.drift_state.current_error_rate if result.drift_state else 0.0
+            ),
+            "last_detected_at": (
+                result.drift_state.last_detected_at if result.drift_state else None
+            ),
+        },
+    )
+
+
+@app.get("/online/status")
+def online_status() -> dict[str, Any]:
+    """Статус инкрементальной модели: ADWIN, снапшоты, распределение классов.
+
+    Online model status: ADWIN state, snapshots, class distribution.
+
+    Используется для мониторинга и health-check инкрементальной модели.
+    Used for monitoring and health-checking the online incremental model.
+    """
+    return _online_learner.get_status()
+
+
+@app.post("/online/reset")
+def online_reset() -> dict[str, str]:
+    """Сбросить инкрементальную модель к начальному состоянию.
+
+    Reset the online model to its initial state.
+    Используется при смене концепции или после batch-переобучения.
+    """
+    global _online_learner
+    _online_learner = IncrementalChurnLearner(
+        IncrementalConfig(snapshot_interval=100, adwin_delta=0.002)
+    )
+    return {"status": "reset", "message": "Online model reset to initial state."}

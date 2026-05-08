@@ -37,6 +37,7 @@ churn = [
     "plotly>=5.24",
     "great-expectations>=1.3",
     "dvc>=3.56",
+    "river>=0.21",
 ]
 rag = [
     "langchain>=0.3",
