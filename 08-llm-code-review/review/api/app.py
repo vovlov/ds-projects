@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+import os
+
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from ..evaluation.golden_dataset import get_golden_dataset
+from ..evaluation.judge import JudgeVerdict, RegressionResult
+from ..evaluation.judge import evaluate_review as _evaluate_review
+from ..evaluation.judge import run_regression_suite as _run_regression_suite
 from ..models.classifier import build_classifier, classify_comment
 from ..models.multi_review import MultiReviewResult as _MultiReviewResult
 from ..models.multi_review import multi_model_review
@@ -49,6 +55,17 @@ class MultiReviewRequest(BaseModel):
     diff: str
     correctness_model: str = "claude-haiku-4-20250414"
     security_model: str = "claude-haiku-4-20250414"
+
+
+class EvaluateReviewRequest(BaseModel):
+    example_id: str
+    review_comments: list[dict]
+    judge_model: str = "claude-haiku-4-20250414"
+
+
+class RegressionRequest(BaseModel):
+    threshold: float = 0.5
+    use_lexical: bool = True  # default True — CI-safe without API key
 
 
 class MultiReviewSummary(BaseModel):
@@ -129,3 +146,60 @@ def post_multi_review(req: MultiReviewRequest) -> MultiReviewResponse:
         consistency_score=result.consistency_score,
         summary=MultiReviewSummary(**result.summary),
     )
+
+
+@app.get("/evaluate/dataset")
+def get_evaluate_dataset() -> dict:
+    """Return metadata about the golden evaluation dataset.
+
+    Возвращает метаданные золотого датасета: число примеров, разбивку по доменам.
+    """
+    examples = get_golden_dataset()
+    by_domain: dict[str, int] = {}
+    for ex in examples:
+        by_domain[ex.domain] = by_domain.get(ex.domain, 0) + 1
+    return {
+        "n_examples": len(examples),
+        "by_domain": by_domain,
+        "ids": [ex.id for ex in examples],
+    }
+
+
+@app.post("/evaluate/review")
+def post_evaluate_review(req: EvaluateReviewRequest) -> dict:
+    """Judge a code review against a golden dataset example.
+
+    Оценивает качество ревью (faithfulness/helpfulness/FPR) по одному примеру
+    из золотого датасета. Использует LLM-as-Judge или лексическую эвристику.
+    """
+    examples = {ex.id: ex for ex in get_golden_dataset()}
+    if req.example_id not in examples:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Example '{req.example_id}' not found. Available IDs: {list(examples.keys())}",
+        )
+    example = examples[req.example_id]
+    # Force lexical judge when no API key (CI-safe)
+    use_lexical = not os.environ.get("ANTHROPIC_API_KEY", "")
+    from ..evaluation.judge import _lexical_judge
+
+    verdict: JudgeVerdict = (
+        _lexical_judge(example, req.review_comments)
+        if use_lexical
+        else _evaluate_review(example, req.review_comments, model=req.judge_model)
+    )
+    return verdict.to_dict()
+
+
+@app.post("/evaluate/regression")
+def post_evaluate_regression(req: RegressionRequest) -> dict:
+    """Run LLM-as-Judge regression suite across all 20 golden examples.
+
+    Запускает регрессионный тест по полному золотому датасету. Возвращает
+    агрегатные метрики и pass/fail по порогу avg_overall_score >= threshold.
+    """
+    result: RegressionResult = _run_regression_suite(
+        threshold=req.threshold,
+        use_lexical=req.use_lexical or not os.environ.get("ANTHROPIC_API_KEY", ""),
+    )
+    return result.to_dict()

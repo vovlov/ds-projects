@@ -595,3 +595,425 @@ class TestRoutingDecisions:
         result = route_review(comments)
         assert result.decision == RoutingDecision.AUTO_REJECT
         assert len(result.critical_findings) == 2
+
+
+# ── TestGoldenDataset ─────────────────────────────────────────────────────────
+
+
+class TestGoldenDataset:
+    """Tests for the curated golden evaluation dataset."""
+
+    from review.evaluation.golden_dataset import GoldenExample, get_golden_dataset
+
+    def test_dataset_has_20_examples(self):
+        from review.evaluation.golden_dataset import get_golden_dataset
+
+        assert len(get_golden_dataset()) == 20
+
+    def test_all_ids_unique(self):
+        from review.evaluation.golden_dataset import get_golden_dataset
+
+        ids = [ex.id for ex in get_golden_dataset()]
+        assert len(ids) == len(set(ids))
+
+    def test_domains_present(self):
+        from review.evaluation.golden_dataset import get_golden_dataset
+
+        domains = {ex.domain for ex in get_golden_dataset()}
+        assert domains == {"security", "correctness", "clean"}
+
+    def test_security_count(self):
+        from review.evaluation.golden_dataset import get_golden_dataset
+
+        n = sum(1 for ex in get_golden_dataset() if ex.domain == "security")
+        assert n == 8
+
+    def test_correctness_count(self):
+        from review.evaluation.golden_dataset import get_golden_dataset
+
+        n = sum(1 for ex in get_golden_dataset() if ex.domain == "correctness")
+        assert n == 8
+
+    def test_clean_count(self):
+        from review.evaluation.golden_dataset import get_golden_dataset
+
+        n = sum(1 for ex in get_golden_dataset() if ex.domain == "clean")
+        assert n == 4
+
+    def test_clean_examples_have_no_issues(self):
+        from review.evaluation.golden_dataset import get_golden_dataset
+
+        for ex in get_golden_dataset():
+            if ex.is_clean:
+                assert ex.ground_truth_issues == []
+
+    def test_non_clean_have_keywords(self):
+        from review.evaluation.golden_dataset import get_golden_dataset
+
+        for ex in get_golden_dataset():
+            if not ex.is_clean:
+                for issue in ex.ground_truth_issues:
+                    assert len(issue.get("keywords", [])) >= 3, (
+                        f"{ex.id} issue has too few keywords"
+                    )
+
+    def test_all_diffs_contain_diff_markers(self):
+        from review.evaluation.golden_dataset import get_golden_dataset
+
+        for ex in get_golden_dataset():
+            assert any(marker in ex.diff for marker in ("---", "++|", "@@")), (
+                f"{ex.id} diff has no markers"
+            )
+
+    def test_golden_example_is_dataclass(self):
+        from review.evaluation.golden_dataset import GoldenExample
+
+        ex = GoldenExample(
+            id="test",
+            diff="+x = 1",
+            domain="clean",
+            is_clean=True,
+        )
+        assert ex.ground_truth_issues == []
+
+
+# ── TestLexicalJudge ──────────────────────────────────────────────────────────
+
+
+class TestLexicalJudge:
+    """Unit tests for the deterministic lexical fallback judge."""
+
+    from review.evaluation.golden_dataset import GoldenExample
+    from review.evaluation.judge import _lexical_judge
+
+    def _make_example(self, domain="correctness", is_clean=False, keywords=None):
+        from review.evaluation.golden_dataset import GoldenExample
+
+        issues = []
+        if not is_clean and keywords:
+            issues = [{"category": "bug", "severity": "major", "keywords": keywords}]
+        return GoldenExample(
+            id="test",
+            diff="--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n+x = 1",
+            domain=domain,
+            ground_truth_issues=issues,
+            is_clean=is_clean,
+        )
+
+    def _make_comment(self, text, severity="major"):
+        return {"line": "1", "category": "bug", "comment": text, "severity": severity}
+
+    def test_no_comments_clean_code_perfect(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(domain="clean", is_clean=True)
+        v = _lexical_judge(ex, [])
+        assert v.faithfulness == 1.0
+        assert v.false_positive_rate == 0.0
+
+    def test_no_comments_buggy_code_zero_faithfulness(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(keywords=["sql injection", "parameterized"])
+        v = _lexical_judge(ex, [])
+        assert v.faithfulness == 0.0
+
+    def test_clean_code_critical_comment_is_fp(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(domain="clean", is_clean=True)
+        comments = [self._make_comment("Critical security flaw!", severity="critical")]
+        v = _lexical_judge(ex, comments)
+        assert v.false_positive_rate == pytest.approx(1.0)
+
+    def test_clean_code_suggestion_only_not_fp(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(domain="clean", is_clean=True)
+        comments = [self._make_comment("Consider renaming for clarity", severity="suggestion")]
+        v = _lexical_judge(ex, comments)
+        assert v.false_positive_rate == pytest.approx(0.0)
+
+    def test_keyword_match_high_faithfulness(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(keywords=["sql injection", "parameterized"])
+        comments = [self._make_comment("This code has sql injection risk, use parameterized query")]
+        v = _lexical_judge(ex, comments)
+        assert v.faithfulness == pytest.approx(1.0)
+
+    def test_no_keyword_match_zero_faithfulness(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(keywords=["sql injection", "parameterized"])
+        comments = [self._make_comment("This is a style issue only")]
+        v = _lexical_judge(ex, comments)
+        assert v.faithfulness == pytest.approx(0.0)
+
+    def test_helpfulness_with_action_words(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(is_clean=True, domain="clean")
+        comments = [
+            self._make_comment("You should fix this", severity="suggestion"),
+            self._make_comment("Consider using a different approach", severity="suggestion"),
+        ]
+        v = _lexical_judge(ex, comments)
+        assert v.helpfulness == pytest.approx(1.0)
+
+    def test_helpfulness_without_action_words(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(is_clean=True, domain="clean")
+        comments = [self._make_comment("There is an issue here.", severity="suggestion")]
+        v = _lexical_judge(ex, comments)
+        assert v.helpfulness == pytest.approx(0.0)
+
+    def test_api_error_comments_filtered(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(domain="clean", is_clean=True)
+        # API error placeholder injected when no key — should be treated as no comments
+        error_comment = self._make_comment(
+            "Error: ANTHROPIC_API_KEY not set. correctness pass skipped."
+        )
+        v = _lexical_judge(ex, [error_comment])
+        # Filtered → treated as clean no-comment case
+        assert v.faithfulness == pytest.approx(1.0)
+        assert v.false_positive_rate == pytest.approx(0.0)
+
+    def test_verdict_is_dataclass(self):
+        from review.evaluation.judge import JudgeVerdict, _lexical_judge
+
+        ex = self._make_example(domain="clean", is_clean=True)
+        v = _lexical_judge(ex, [])
+        assert isinstance(v, JudgeVerdict)
+
+    def test_overall_score_in_range(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(keywords=["null", "check"])
+        comments = [self._make_comment("Use null check here, should add guard")]
+        v = _lexical_judge(ex, comments)
+        assert 0.0 <= v.overall_score <= 1.0
+
+    def test_to_dict_has_required_keys(self):
+        from review.evaluation.judge import _lexical_judge
+
+        ex = self._make_example(domain="clean", is_clean=True)
+        d = _lexical_judge(ex, []).to_dict()
+        for key in (
+            "faithfulness",
+            "helpfulness",
+            "false_positive_rate",
+            "overall_score",
+            "reasoning",
+        ):
+            assert key in d, f"Missing key: {key}"
+
+
+# ── TestJudgeVerdict ──────────────────────────────────────────────────────────
+
+
+class TestJudgeVerdict:
+    """Unit tests for JudgeVerdict dataclass."""
+
+    def test_create_verdict(self):
+        from review.evaluation.judge import JudgeVerdict
+
+        v = JudgeVerdict(
+            faithfulness=0.8,
+            helpfulness=0.7,
+            false_positive_rate=0.2,
+            overall_score=0.72,
+            reasoning="ok",
+            api_key_used=False,
+        )
+        assert v.faithfulness == 0.8
+
+    def test_overall_score_formula(self):
+        from review.evaluation.judge import _compute_overall
+
+        # 0.4*1.0 + 0.3*1.0 + 0.3*(1-0.0) = 1.0
+        assert _compute_overall(1.0, 1.0, 0.0) == pytest.approx(1.0)
+        # 0.4*0 + 0.3*0 + 0.3*0 = 0.0
+        assert _compute_overall(0.0, 0.0, 1.0) == pytest.approx(0.0)
+
+    def test_to_dict_rounds_values(self):
+        from review.evaluation.judge import JudgeVerdict
+
+        v = JudgeVerdict(
+            faithfulness=0.12345,
+            helpfulness=0.67891,
+            false_positive_rate=0.11111,
+            overall_score=0.55555,
+            reasoning="r",
+            api_key_used=False,
+        )
+        d = v.to_dict()
+        assert d["faithfulness"] == 0.123
+        assert d["helpfulness"] == 0.679
+
+    def test_to_dict_api_key_used_field(self):
+        from review.evaluation.judge import JudgeVerdict
+
+        v = JudgeVerdict(0.5, 0.5, 0.5, 0.5, "r", True, "id_x")
+        assert v.to_dict()["api_key_used"] is True
+
+
+# ── TestRegressionResult ──────────────────────────────────────────────────────
+
+
+class TestRegressionResult:
+    """Unit tests for RegressionResult dataclass."""
+
+    def test_passed_when_above_threshold(self):
+        from review.evaluation.judge import RegressionResult
+
+        r = RegressionResult(
+            n_examples=20,
+            avg_faithfulness=0.8,
+            avg_helpfulness=0.7,
+            avg_false_positive_rate=0.2,
+            avg_overall_score=0.74,
+            by_domain={},
+            passed=True,
+            threshold=0.5,
+        )
+        assert r.passed is True
+
+    def test_failed_when_below_threshold(self):
+        from review.evaluation.judge import RegressionResult
+
+        r = RegressionResult(
+            n_examples=20,
+            avg_faithfulness=0.1,
+            avg_helpfulness=0.1,
+            avg_false_positive_rate=0.9,
+            avg_overall_score=0.1,
+            by_domain={},
+            passed=False,
+            threshold=0.5,
+        )
+        assert r.passed is False
+
+    def test_to_dict_has_required_keys(self):
+        from review.evaluation.judge import RegressionResult
+
+        r = RegressionResult(
+            n_examples=5,
+            avg_faithfulness=0.5,
+            avg_helpfulness=0.5,
+            avg_false_positive_rate=0.5,
+            avg_overall_score=0.5,
+            by_domain={"clean": {"n": 2}},
+            passed=True,
+        )
+        d = r.to_dict()
+        for key in (
+            "n_examples",
+            "avg_faithfulness",
+            "avg_helpfulness",
+            "avg_false_positive_rate",
+            "avg_overall_score",
+            "by_domain",
+            "passed",
+            "threshold",
+        ):
+            assert key in d
+
+
+# ── TestEvaluateAPIEndpoints ──────────────────────────────────────────────────
+
+
+class TestEvaluateAPIEndpoints:
+    """Integration tests for /evaluate/* endpoints."""
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        from review.api.app import app
+
+        return TestClient(app)
+
+    def test_dataset_endpoint_returns_200(self):
+        resp = self._client().get("/evaluate/dataset")
+        assert resp.status_code == 200
+
+    def test_dataset_endpoint_n_examples(self):
+        data = self._client().get("/evaluate/dataset").json()
+        assert data["n_examples"] == 20
+
+    def test_dataset_endpoint_by_domain(self):
+        data = self._client().get("/evaluate/dataset").json()
+        assert "security" in data["by_domain"]
+        assert "correctness" in data["by_domain"]
+        assert "clean" in data["by_domain"]
+
+    def test_dataset_endpoint_ids_list(self):
+        data = self._client().get("/evaluate/dataset").json()
+        assert isinstance(data["ids"], list)
+        assert len(data["ids"]) == 20
+
+    def test_evaluate_review_endpoint_200(self):
+        payload = {
+            "example_id": "clean_001_refactor",
+            "review_comments": [],
+        }
+        resp = self._client().post("/evaluate/review", json=payload)
+        assert resp.status_code == 200
+
+    def test_evaluate_review_endpoint_structure(self):
+        payload = {
+            "example_id": "sec_001_sqli",
+            "review_comments": [
+                {
+                    "line": "3",
+                    "category": "security",
+                    "comment": "sql injection risk, use parameterized query",
+                    "severity": "critical",
+                }
+            ],
+        }
+        data = self._client().post("/evaluate/review", json=payload).json()
+        for key in ("faithfulness", "helpfulness", "false_positive_rate", "overall_score"):
+            assert key in data, f"Missing key: {key}"
+
+    def test_evaluate_review_unknown_id_returns_404(self):
+        payload = {"example_id": "nonexistent_id", "review_comments": []}
+        resp = self._client().post("/evaluate/review", json=payload)
+        assert resp.status_code == 404
+
+    def test_evaluate_review_clean_no_comments_perfect(self):
+        payload = {
+            "example_id": "clean_001_refactor",
+            "review_comments": [],
+        }
+        data = self._client().post("/evaluate/review", json=payload).json()
+        assert data["faithfulness"] == pytest.approx(1.0)
+        assert data["false_positive_rate"] == pytest.approx(0.0)
+
+    def test_regression_endpoint_returns_200(self):
+        resp = self._client().post("/evaluate/regression", json={"use_lexical": True})
+        assert resp.status_code == 200
+
+    def test_regression_endpoint_structure(self):
+        data = self._client().post("/evaluate/regression", json={"use_lexical": True}).json()
+        for key in (
+            "n_examples",
+            "avg_faithfulness",
+            "avg_helpfulness",
+            "avg_false_positive_rate",
+            "avg_overall_score",
+            "passed",
+            "threshold",
+        ):
+            assert key in data
+
+    def test_regression_endpoint_n_examples(self):
+        data = self._client().post("/evaluate/regression", json={"use_lexical": True}).json()
+        assert data["n_examples"] == 20
+
+    def test_regression_endpoint_by_domain_keys(self):
+        data = self._client().post("/evaluate/regression", json={"use_lexical": True}).json()
+        assert "security" in data["by_domain"]
+        assert "clean" in data["by_domain"]

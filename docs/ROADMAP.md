@@ -20,7 +20,7 @@
 ### Что у них есть, а у нас нет
 
 | Фича | Made With ML | Наш ds-projects |
-|------|-------------|-----------------|
+|------|-------------|------------------|
 | Pre-commit hooks | ✅ | ✅ (2026-03-29) |
 | Model serving (Ray/BentoML) | ✅ | ❌ (только FastAPI) |
 | Automated retraining (CT) | ✅ | ❌ |
@@ -488,10 +488,22 @@
         TestOnlineAPIEndpoints×11. 160/160 тестов зелёных (было 131).
       Источники: Bifet & Gavalda 2007 ADWIN (SDM'07), Hulten et al. 2001 Hoeffding Tree (KDD),
         River docs riverml.xyz/latest/.
-- [ ] LLM-as-Judge pipeline для Code Review (Project 08) — 2026-05-09
-      Автоматическая оценка качества ревью с помощью Claude claude-sonnet-4-6.
-      Метрики: faithfulness, helpfulness, false_positive_rate.
-      Золотой датасет из 20 аннотированных примеров для regression testing.
+- [x] LLM-as-Judge pipeline для Code Review (Project 08) — 2026-05-09
+      review/evaluation/golden_dataset.py: 20 аннотированных примеров (8 security,
+        8 correctness, 4 clean). GoldenExample dataclass с ground_truth_issues и keywords.
+      review/evaluation/judge.py: JudgeVerdict (faithfulness/helpfulness/false_positive_rate/
+        overall_score), RegressionResult dataclass. _lexical_judge() — детерминированный CI-safe
+        оценщик через пересечение ключевых слов с ground truth + action-word helpfulness.
+        _llm_judge() — Claude-as-Judge с graceful degradation на lexical при отсутствии ключа.
+        evaluate_review() + run_regression_suite() (pass/fail по avg_overall_score >= threshold).
+      review/api/app.py: GET /evaluate/dataset (метаданные датасета), POST /evaluate/review
+        (оценка одного ревью по примеру из датасета), POST /evaluate/regression
+        (регрессионный тест по всем 20 примерам, use_lexical=True для CI).
+      41 новый тест: TestGoldenDataset×10, TestLexicalJudge×12, TestJudgeVerdict×4,
+        TestRegressionResult×3, TestEvaluateAPIEndpoints×12. 101/101 зелёных (+41, было 60).
+      Weighted overall: 0.4×faithfulness + 0.3×helpfulness + 0.3×(1-FPR).
+      Источники: Zheng et al. 2023 MT-Bench (arxiv 2306.05685), LLM Code Review Eval 2025
+        (arxiv 2505.20206), Confident AI LLM Eval Guide 2026, evidentlyai.com LLM-as-Judge 2026.
 - [ ] Quantile Regression для Real Estate (Project 07) — 2026-05-10
       Prediction intervals вместо точечных оценок (LightGBM quantile loss).
       Calibration plot: покрытие 90%/95% на тестовой выборке.
