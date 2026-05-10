@@ -6,9 +6,10 @@
 - top_factors — топ-5 признаков, повлиявших на цену (из SHAP)
 - shap_waterfall — полный SHAP waterfall: базовое значение + вклад каждого признака
 
-Доверительный интервал считаем как +/- MAPE от обучения. Это упрощение —
-в продакшене лучше использовать quantile regression или conformal prediction,
-но для MVP достаточно.
+Эндпоинт /estimate/intervals возвращает статистически обоснованные интервалы:
+- LightGBM quantile regression (pinball loss) для прямых квантильных оценок
+- CQR (Romano et al. 2019): гарантированное покрытие ≥ 1-α без допущений о распределении
+- 90% и 95% интервалы + метрики калибровки
 
 SHAP waterfall — ключевое улучшение над классическими feature importances:
 глобальная важность говорит "площадь важна в среднем", а SHAP говорит
@@ -25,6 +26,9 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from ..models.quantile import QuantileRegressionModel
+from ..models.quantile import is_available as lgbm_available
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -37,6 +41,8 @@ ARTIFACTS_DIR = Path(__file__).resolve().parents[2] / "artifacts"
 
 _model = None
 _results = None
+_quantile_model: QuantileRegressionModel | None = None
+_quantile_calibration: dict | None = None
 
 
 def _load_artifacts() -> tuple:
@@ -52,6 +58,25 @@ def _load_artifacts() -> tuple:
             with open(results_path, "rb") as f:
                 _results = pickle.load(f)
     return _model, _results
+
+
+def _load_quantile_artifacts() -> QuantileRegressionModel:
+    """Загрузить quantile модель из артефактов или поднять 503."""
+    global _quantile_model, _quantile_calibration
+    if _quantile_model is not None:
+        return _quantile_model
+
+    qmodel_path = ARTIFACTS_DIR / "quantile_model.pkl"
+    if not qmodel_path.exists():
+        raise HTTPException(
+            503,
+            detail="Quantile model not found. Run: python train.py --quantile",
+        )
+    with open(qmodel_path, "rb") as f:
+        data = pickle.load(f)
+    _quantile_model = data["model"]
+    _quantile_calibration = data.get("calibration")
+    return _quantile_model
 
 
 class PropertyInput(BaseModel):
@@ -104,9 +129,34 @@ class PriceEstimate(BaseModel):
     )
 
 
+class PriceIntervalEstimate(BaseModel):
+    """Результат оценки с quantile regression интервалами предсказаний."""
+
+    estimated_price: int = Field(..., description="Медианная оценка (q=0.5), руб")
+    interval_90_low: int = Field(..., description="Нижняя граница 90% интервала, руб")
+    interval_90_high: int = Field(..., description="Верхняя граница 90% интервала, руб")
+    interval_95_low: int = Field(..., description="Нижняя граница 95% интервала, руб")
+    interval_95_high: int = Field(..., description="Верхняя граница 95% интервала, руб")
+    width_90: int = Field(..., description="Ширина 90% интервала — мера неопределённости, руб")
+    width_95: int = Field(..., description="Ширина 95% интервала, руб")
+    is_cqr_calibrated: bool = Field(..., description="Применена ли CQR калибровка")
+    calibration_coverage_90: float | None = Field(
+        None, description="Эмпирическое покрытие 90% на тестовой выборке"
+    )
+    calibration_coverage_95: float | None = Field(
+        None, description="Эмпирическое покрытие 95% на тестовой выборке"
+    )
+    lgbm_available: bool = Field(..., description="Доступен ли LightGBM")
+
+
 @app.get("/health")
 def health() -> dict[str, str | bool]:
-    return {"status": "healthy", "model_loaded": _model is not None}
+    return {
+        "status": "healthy",
+        "model_loaded": _model is not None,
+        "quantile_model_loaded": _quantile_model is not None,
+        "lgbm_available": lgbm_available(),
+    }
 
 
 @app.post("/estimate", response_model=PriceEstimate)
@@ -203,4 +253,73 @@ def estimate(prop: PropertyInput) -> PriceEstimate:
         confidence_high=confidence_high,
         top_factors=top_factors,
         shap_waterfall=shap_waterfall,
+    )
+
+
+def _build_feature_array(prop: PropertyInput) -> np.ndarray:
+    """Собрать массив признаков из запроса (для quantile модели, label encoded)."""
+    from ..data.load import CONDITION_MAP, CURRENT_YEAR, NEIGHBORHOODS
+
+    age = CURRENT_YEAR - prop.year_built
+    has_garage_code = 1 if prop.garage == 1 else 0
+
+    neighborhood_names = sorted(NEIGHBORHOODS.keys())
+    condition_names = sorted(CONDITION_MAP.keys())
+
+    neighborhood_code = float(
+        neighborhood_names.index(prop.neighborhood)
+        if prop.neighborhood in neighborhood_names
+        else 0
+    )
+    condition_code = float(
+        condition_names.index(prop.condition) if prop.condition in condition_names else 0
+    )
+
+    return np.array(
+        [
+            float(prop.sqft),
+            float(prop.bedrooms),
+            float(prop.bathrooms),
+            float(prop.year_built),
+            float(prop.lot_size),
+            float(age),
+            neighborhood_code,
+            condition_code,
+            float(has_garage_code),
+        ],
+        dtype=np.float64,
+    ).reshape(1, -1)
+
+
+@app.post("/estimate/intervals", response_model=PriceIntervalEstimate)
+def estimate_with_intervals(prop: PropertyInput) -> PriceIntervalEstimate:
+    """Оценить стоимость квартиры с quantile regression интервалами предсказаний.
+
+    Возвращает 90% и 95% интервалы, откалиброванные через CQR (Romano et al. 2019).
+    Гарантированное покрытие: ≥90% реальных цен попадают в 90%-интервал.
+    """
+    qmodel = _load_quantile_artifacts()
+
+    X = _build_feature_array(prop)
+    intervals = qmodel.predict_interval(X)
+    iv = intervals[0]
+
+    calib_90: float | None = None
+    calib_95: float | None = None
+    if _quantile_calibration is not None:
+        calib_90 = _quantile_calibration.get("coverage_90")
+        calib_95 = _quantile_calibration.get("coverage_95")
+
+    return PriceIntervalEstimate(
+        estimated_price=max(int(round(iv.point_estimate, -4)), 1_000_000),
+        interval_90_low=max(int(round(iv.lower_90, -4)), 500_000),
+        interval_90_high=int(round(iv.upper_90, -4)),
+        interval_95_low=max(int(round(iv.lower_95, -4)), 500_000),
+        interval_95_high=int(round(iv.upper_95, -4)),
+        width_90=int(round(iv.width_90, -4)),
+        width_95=int(round(iv.width_95, -4)),
+        is_cqr_calibrated=iv.is_cqr_calibrated,
+        calibration_coverage_90=calib_90,
+        calibration_coverage_95=calib_95,
+        lgbm_available=lgbm_available(),
     )

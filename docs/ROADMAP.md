@@ -504,9 +504,18 @@
       Weighted overall: 0.4×faithfulness + 0.3×helpfulness + 0.3×(1-FPR).
       Источники: Zheng et al. 2023 MT-Bench (arxiv 2306.05685), LLM Code Review Eval 2025
         (arxiv 2505.20206), Confident AI LLM Eval Guide 2026, evidentlyai.com LLM-as-Judge 2026.
-- [ ] Quantile Regression для Real Estate (Project 07) — 2026-05-10
-      Prediction intervals вместо точечных оценок (LightGBM quantile loss).
-      Calibration plot: покрытие 90%/95% на тестовой выборке.
+- [x] Quantile Regression для Real Estate (Project 07) — 2026-05-10
+      pricing/models/quantile.py: QuantileRegressionModel (5 LightGBM моделей: q=0.025/0.05/0.5/0.95/0.975),
+      Conformalized Quantile Regression (CQR, Romano et al. 2019 NeurIPS) — split-conformal калибровка
+      на holdout, nonconformity score = max(q_lo-y, y-q_hi), конечно-выборочная поправка Venn-Abers.
+      CalibrationResult.is_well_calibrated() + to_dict() с coverage_90/95, mean_width, cqr_adjustment.
+      pricing/api/app.py: POST /estimate/intervals → PriceIntervalEstimate (90%+95% интервалы,
+      width_90/95, is_cqr_calibrated, calibration_coverage). GET /health расширен lgbm_available +
+      quantile_model_loaded. _load_quantile_artifacts() с 503 если нет артефакта.
+      24 новых теста: TestQuantileRegressionModel×13, TestCalibrationResult×4, TestIsAvailable×1,
+      TestQuantileAPI×6. 57/57 тестов зелёных (было 33).
+      Источники: Romano et al. 2019 (NeurIPS), Angelopoulos & Bates 2022 (arxiv 2107.07511),
+      LightGBM quantile docs, IBM Developer Prediction Intervals tutorial.
 
 ---
 
