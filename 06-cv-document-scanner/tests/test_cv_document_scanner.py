@@ -461,3 +461,268 @@ class TestGradCAM:
                 image_tensor=None,
                 target_layer=None,
             )
+
+
+# ===========================================================================
+# TestDocumentQualityAssessment
+# ===========================================================================
+
+
+class TestDocumentQualityAssessment:
+    """Unit tests for scanner/preprocessing/quality.py — numpy-only, no torch."""
+
+    from scanner.preprocessing.quality import (
+        QualityMetrics,
+        assess_quality,
+        estimate_blur,
+        estimate_brightness,
+        estimate_contrast,
+        estimate_noise,
+        estimate_skew,
+    )
+
+    # ---- blur ----
+
+    def test_blur_sharp_checkerboard(self):
+        """Checkerboard has maximum second-derivative variance → high score."""
+        from scanner.preprocessing.quality import estimate_blur
+
+        tile = np.array([[0, 255], [255, 0]], dtype=np.uint8)
+        pixels = np.tile(tile, (50, 50))
+        assert estimate_blur(pixels) > 0.5
+
+    def test_blur_flat_image_low(self):
+        """Uniform image has zero Laplacian variance → near-zero score."""
+        from scanner.preprocessing.quality import estimate_blur
+
+        pixels = np.full((50, 50), 128, dtype=np.uint8)
+        assert estimate_blur(pixels) < 0.3
+
+    def test_blur_returns_in_unit_interval(self):
+        from scanner.preprocessing.quality import estimate_blur
+
+        rng = np.random.default_rng(7)
+        pixels = rng.integers(0, 256, (40, 60), dtype=np.uint8)
+        score = estimate_blur(pixels)
+        assert 0.0 <= score <= 1.0
+
+    # ---- brightness ----
+
+    def test_brightness_midpoint_optimal(self):
+        """Mean ≈ 128 (0.5 normalised) should give score close to 1.0."""
+        from scanner.preprocessing.quality import estimate_brightness
+
+        pixels = np.full((20, 20), 128, dtype=np.uint8)
+        assert estimate_brightness(pixels) > 0.9
+
+    def test_brightness_all_black_poor(self):
+        from scanner.preprocessing.quality import estimate_brightness
+
+        pixels = np.zeros((20, 20), dtype=np.uint8)
+        assert estimate_brightness(pixels) < 0.1
+
+    def test_brightness_all_white_poor(self):
+        from scanner.preprocessing.quality import estimate_brightness
+
+        pixels = np.full((20, 20), 255, dtype=np.uint8)
+        assert estimate_brightness(pixels) < 0.1
+
+    # ---- contrast ----
+
+    def test_contrast_high_binary_image(self):
+        """Alternating 0/255 columns → maximum std → score near 1.0."""
+        from scanner.preprocessing.quality import estimate_contrast
+
+        pixels = np.tile(np.array([[0, 255]], dtype=np.uint8), (30, 30))
+        assert estimate_contrast(pixels) >= 0.9
+
+    def test_contrast_flat_image_low(self):
+        from scanner.preprocessing.quality import estimate_contrast
+
+        pixels = np.full((30, 30), 200, dtype=np.uint8)
+        assert estimate_contrast(pixels) < 0.05
+
+    # ---- noise ----
+
+    def test_noise_smooth_gradient_low(self):
+        """Smooth gradient → low local variation → low noise level."""
+        from scanner.preprocessing.quality import estimate_noise
+
+        x = np.linspace(0, 255, 60).astype(np.uint8)
+        pixels = np.tile(x, (40, 1))
+        assert estimate_noise(pixels) < 0.5
+
+    def test_noise_random_image_high(self):
+        """Pure random noise → high local variation → high noise level."""
+        from scanner.preprocessing.quality import estimate_noise
+
+        pixels = np.random.default_rng(42).integers(0, 256, (50, 50), dtype=np.uint8)
+        assert estimate_noise(pixels) > 0.5
+
+    # ---- skew ----
+
+    def test_skew_returns_float_in_range(self):
+        from scanner.preprocessing.quality import estimate_skew
+
+        pixels = np.random.default_rng(0).integers(0, 256, (40, 60), dtype=np.uint8)
+        angle = estimate_skew(pixels)
+        assert isinstance(angle, float)
+        assert -45.0 <= angle <= 45.0
+
+    def test_skew_tiny_image_returns_zero(self):
+        """Image smaller than 8×8 should return 0 (not enough data)."""
+        from scanner.preprocessing.quality import estimate_skew
+
+        pixels = np.zeros((4, 4), dtype=np.uint8)
+        assert estimate_skew(pixels) == 0.0
+
+    # ---- assess_quality ----
+
+    def test_assess_quality_returns_dataclass(self):
+        from scanner.preprocessing.quality import QualityMetrics, assess_quality
+
+        pixels = np.random.default_rng(1).integers(50, 200, (40, 50), dtype=np.uint8)
+        metrics = assess_quality(pixels)
+        assert isinstance(metrics, QualityMetrics)
+
+    def test_assess_quality_overall_in_unit_interval(self):
+        from scanner.preprocessing.quality import assess_quality
+
+        pixels = np.random.default_rng(2).integers(0, 256, (30, 40), dtype=np.uint8)
+        metrics = assess_quality(pixels)
+        assert 0.0 <= metrics.overall_score <= 1.0
+
+    def test_assess_quality_is_acceptable_is_bool(self):
+        from scanner.preprocessing.quality import assess_quality
+
+        pixels = np.full((20, 20), 128, dtype=np.uint8)
+        metrics = assess_quality(pixels)
+        assert isinstance(metrics.is_acceptable, bool)
+
+    def test_assess_quality_all_white_rejected(self):
+        """Over-exposed scan (all 255) must be rejected with a reason."""
+        from scanner.preprocessing.quality import assess_quality
+
+        pixels = np.full((40, 50), 255, dtype=np.uint8)
+        metrics = assess_quality(pixels)
+        assert not metrics.is_acceptable
+        assert metrics.rejection_reason is not None
+        assert len(metrics.rejection_reason) > 0
+
+    def test_assess_quality_to_dict_keys(self):
+        from scanner.preprocessing.quality import assess_quality
+
+        pixels = np.full((10, 10), 128, dtype=np.uint8)
+        d = assess_quality(pixels).to_dict()
+        expected = {
+            "blur_score",
+            "brightness_score",
+            "contrast_score",
+            "noise_level",
+            "skew_angle_deg",
+            "overall_score",
+            "is_acceptable",
+            "rejection_reason",
+        }
+        assert expected == set(d.keys())
+
+    def test_assess_quality_custom_threshold(self):
+        """With accept_threshold=0.0 every image should be accepted."""
+        from scanner.preprocessing.quality import assess_quality
+
+        pixels = np.zeros((20, 20), dtype=np.uint8)
+        metrics = assess_quality(pixels, accept_threshold=0.0)
+        assert metrics.is_acceptable
+
+
+# ===========================================================================
+# TestQualityAPIEndpoints
+# ===========================================================================
+
+
+class TestQualityAPIEndpoints:
+    """Integration tests for /quality/assess and /classify/gated."""
+
+    @pytest.fixture(scope="class")
+    def qclient(self):
+        from scanner.api.app import app
+
+        return TestClient(app)
+
+    def _mid_pixels(self, h: int = 25, w: int = 30, seed: int = 0) -> list[list[int]]:
+        """Mid-tone random pixel matrix that usually passes the quality gate."""
+        return np.random.default_rng(seed).integers(80, 180, (h, w)).tolist()
+
+    def _white_pixels(self, h: int = 20, w: int = 20) -> list[list[int]]:
+        return [[255] * w for _ in range(h)]
+
+    def _sample_features(self) -> dict:
+        return {
+            "aspect_ratio": 0.77,
+            "brightness": 0.82,
+            "text_density": 0.60,
+            "edge_density": 0.20,
+            "file_size_kb": 350.0,
+        }
+
+    def test_quality_assess_returns_200(self, qclient):
+        resp = qclient.post("/quality/assess", json={"pixels": self._mid_pixels()})
+        assert resp.status_code == 200
+
+    def test_quality_assess_response_has_required_fields(self, qclient):
+        resp = qclient.post("/quality/assess", json={"pixels": self._mid_pixels()})
+        body = resp.json()
+        for field in (
+            "blur_score",
+            "brightness_score",
+            "contrast_score",
+            "noise_level",
+            "skew_angle_deg",
+            "overall_score",
+            "is_acceptable",
+        ):
+            assert field in body, f"Missing field: {field}"
+
+    def test_quality_assess_all_white_not_acceptable(self, qclient):
+        resp = qclient.post("/quality/assess", json={"pixels": self._white_pixels()})
+        assert resp.status_code == 200
+        assert resp.json()["is_acceptable"] is False
+
+    def test_quality_assess_empty_matrix_rejected(self, qclient):
+        resp = qclient.post("/quality/assess", json={"pixels": []})
+        assert resp.status_code == 422
+
+    def test_classify_gated_passes_quality_check(self, qclient):
+        payload = {
+            "quality_pixels": self._mid_pixels(seed=5),
+            "features": self._sample_features(),
+        }
+        resp = qclient.post("/classify/gated", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "quality" in body
+        assert "classification" in body
+        assert "gated" in body
+
+    def test_classify_gated_rejects_bad_scan(self, qclient):
+        """All-white scan must be rejected before classification."""
+        payload = {
+            "quality_pixels": self._white_pixels(),
+            "features": self._sample_features(),
+        }
+        resp = qclient.post("/classify/gated", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["gated"] is True
+        assert body["classification"] is None
+
+    def test_classify_gated_accepted_has_doc_type(self, qclient):
+        """When quality passes, classification result must include doc_type."""
+        payload = {
+            "quality_pixels": self._mid_pixels(seed=9),
+            "features": self._sample_features(),
+        }
+        resp = qclient.post("/classify/gated", json=payload)
+        body = resp.json()
+        if not body["gated"]:  # quality passed
+            assert "doc_type" in body["classification"]

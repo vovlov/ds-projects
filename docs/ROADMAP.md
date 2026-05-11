@@ -505,17 +505,21 @@
       Источники: Zheng et al. 2023 MT-Bench (arxiv 2306.05685), LLM Code Review Eval 2025
         (arxiv 2505.20206), Confident AI LLM Eval Guide 2026, evidentlyai.com LLM-as-Judge 2026.
 - [x] Quantile Regression для Real Estate (Project 07) — 2026-05-10
-      pricing/models/quantile.py: QuantileRegressionModel (5 LightGBM моделей: q=0.025/0.05/0.5/0.95/0.975),
-      Conformalized Quantile Regression (CQR, Romano et al. 2019 NeurIPS) — split-conformal калибровка
-      на holdout, nonconformity score = max(q_lo-y, y-q_hi), конечно-выборочная поправка Venn-Abers.
-      CalibrationResult.is_well_calibrated() + to_dict() с coverage_90/95, mean_width, cqr_adjustment.
-      pricing/api/app.py: POST /estimate/intervals → PriceIntervalEstimate (90%+95% интервалы,
-      width_90/95, is_cqr_calibrated, calibration_coverage). GET /health расширен lgbm_available +
-      quantile_model_loaded. _load_quantile_artifacts() с 503 если нет артефакта.
-      24 новых теста: TestQuantileRegressionModel×13, TestCalibrationResult×4, TestIsAvailable×1,
-      TestQuantileAPI×6. 57/57 тестов зелёных (было 33).
-      Источники: Romano et al. 2019 (NeurIPS), Angelopoulos & Bates 2022 (arxiv 2107.07511),
-      LightGBM quantile docs, IBM Developer Prediction Intervals tutorial.
+- [x] Document Quality Assessment Pipeline для CV Scanner (Project 06) — 2026-05-11
+      scanner/preprocessing/quality.py: QualityMetrics dataclass, 5 numpy-only estimators:
+        estimate_blur() (5-point Laplacian stencil, variance/500 нормализация),
+        estimate_brightness() (штраф за отклонение от μ=0.5, score=1−2|μ−0.5|),
+        estimate_contrast() (нормализованное std, 0.25 = excellent text/bg separation),
+        estimate_noise() (mean absolute adjacent-pixel diff, 25/255 порог),
+        estimate_skew() (OLS регрессия ink-centroid X vs row Y → arctan(slope)).
+        assess_quality(): взвешенный composite (blur 40%, contrast 25%, brightness 20%,
+        noise 15% inverted), accept_threshold=0.40, rejection_reason с диагностикой.
+      scanner/api/app.py: 2 новых endpoint:
+        POST /quality/assess (PixelMatrix → QualityAssessmentResponse, 422 на пустую матрицу),
+        POST /classify/gated (два этапа: quality check → classification, gated=True если отклонён).
+      81/81 тестов зелёных (+25 новых: TestDocumentQualityAssessment×18, TestQualityAPIEndpoints×7).
+      Источники: Laplacian variance blur detection (Pech-Pacheco et al. 2000),
+        ITU-R BT.601 luminance coefficients, Otsu 1979 (thresholding).
 
 ---
 
