@@ -431,7 +431,7 @@ class TestGradCAM:
         assert callable(preprocess_image)
 
     def test_gradcam_raises_without_torch(self):
-        """GradCAM() должен поднимать RuntimeError при отсутствии PyTorch."""
+        """Град-CAM должен поднимать RuntimeError без PyTorch."""
         import scanner.models.gradcam as gcam_mod
 
         if gcam_mod.TORCH_AVAILABLE:
