@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from ..data.dataset import generate_synthetic_transactions, get_feature_matrix
 from ..models.baseline.tabular import train_baseline
+from ..models.calibration import CalibrationResult, FraudCalibrator
 from ..models.temporal import (
     TEMPORAL_FEATURE_NAMES,
     NodeTemporalFeatures,
@@ -23,7 +25,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Graph Fraud Detection API",
     description="Score transactions for fraud using CatBoost baseline + temporal graph features",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 _model = None
@@ -33,6 +35,17 @@ _temporal_trained = False
 
 # Глобальный экстрактор — единый для всех запросов
 _extractor = TemporalFeatureExtractor(TemporalConfig(time_window=30.0))
+
+# Калибратор вероятностей (опциональный)
+_calibrator: FraudCalibrator | None = None
+_calibration_result: CalibrationResult | None = None
+
+
+def _reset_calibrator() -> None:
+    """Сбросить глобальный калибратор (для тестовой изоляции)."""
+    global _calibrator, _calibration_result
+    _calibrator = None
+    _calibration_result = None
 
 
 def _ensure_model():
@@ -97,6 +110,7 @@ class FraudScore(BaseModel):
     fraud_probability: float
     is_fraud: bool
     risk_level: str
+    calibrated_probability: float | None = None  # None если калибратор не обучен
 
 
 class GraphFraudScore(BaseModel):
@@ -117,25 +131,110 @@ def _risk_level(proba: float) -> str:
     return "low"
 
 
+class CalibrateRequest(BaseModel):
+    """Параметры обучения калибратора на новых данных."""
+
+    method: str = Field(
+        "isotonic",
+        description="'platt' (sigmoid, малые датасеты) или 'isotonic' (>1000 samples)",
+    )
+    n_bins: int = Field(10, ge=2, le=50)
+
+
+class CalibrateResponse(BaseModel):
+    method: str
+    n_calibration_samples: int
+    ece_before: float
+    ece_after: float
+    ece_improvement: float
+    brier_score: float
+    mce: float
+
+
 @app.get("/health")
 def health():
     return {
         "status": "healthy",
         "model_loaded": _trained,
         "temporal_model_loaded": _temporal_trained,
+        "calibration_fitted": _calibrator is not None and _calibrator.fitted,
     }
+
+
+@app.post("/calibrate", response_model=CalibrateResponse)
+def calibrate_model(req: CalibrateRequest):
+    """Обучить калибратор на синтетических данных (hold-out 20%).
+
+    В production сюда передаются реальные hold-out данные с ground truth.
+    Калибровка критична для установки порогов блокировки:
+    P(fraud) = 0.7 должна означать 70% реальных мошенников, не 90% и не 50%.
+    """
+    global _calibrator, _calibration_result
+
+    if req.method not in ("platt", "isotonic"):
+        raise HTTPException(status_code=422, detail="method must be 'platt' or 'isotonic'")
+
+    model = _ensure_model()
+
+    # Hold-out калибровочный набор (отдельный от обучающего)
+    cal_data = generate_synthetic_transactions(n_nodes=300, n_transactions=1500, fraud_rate=0.10)
+    X_cal, y_cal = get_feature_matrix(cal_data)
+    raw_scores = model.predict_proba(X_cal)[:, 1]
+
+    _calibrator = FraudCalibrator(method=req.method, n_bins=req.n_bins)  # type: ignore[arg-type]
+    result = _calibrator.fit(raw_scores, y_cal)
+    _calibration_result = result
+
+    improvement = _calibrator.ece_improvement() or 0.0
+    raw_ece = result.ece + improvement  # ece = cal_ece, raw_ece = ece + improvement
+
+    logger.info(
+        f"Calibration done: method={req.method}, "
+        f"ECE {raw_ece:.4f} → {result.ece:.4f} (Δ={improvement:.4f})"
+    )
+
+    return CalibrateResponse(
+        method=result.method,
+        n_calibration_samples=result.n_calibration_samples,
+        ece_before=round(raw_ece, 6),
+        ece_after=round(result.ece, 6),
+        ece_improvement=round(improvement, 6),
+        brier_score=round(result.brier_score, 6),
+        mce=round(result.mce, 6),
+    )
+
+
+@app.get("/calibration/metrics")
+def calibration_metrics() -> dict[str, Any]:
+    """Метрики текущего калибратора + данные reliability diagram (для Grafana/фронтенда)."""
+    if _calibration_result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No calibrator fitted. Call POST /calibrate first.",
+        )
+    return _calibration_result.to_dict()
 
 
 @app.post("/score", response_model=FraudScore)
 def score_transaction(txn: TransactionInput):
-    """Базовая оценка по 3 табличным признакам."""
+    """Базовая оценка по 3 табличным признакам.
+
+    Если калибратор обучен (POST /calibrate), возвращает также calibrated_probability —
+    более надёжную оценку P(fraud) для бизнес-порогов блокировки.
+    """
     model = _ensure_model()
     features = np.array([[txn.avg_amount, txn.n_transactions, txn.account_age_days]])
     proba = float(model.predict_proba(features)[0][1])
+
+    cal_proba: float | None = None
+    if _calibrator is not None and _calibrator.fitted:
+        cal_proba = round(float(_calibrator.calibrate(np.array([proba]))[0]), 4)
+
     return FraudScore(
         fraud_probability=round(proba, 4),
         is_fraud=proba >= 0.5,
         risk_level=_risk_level(proba),
+        calibrated_probability=cal_proba,
     )
 
 

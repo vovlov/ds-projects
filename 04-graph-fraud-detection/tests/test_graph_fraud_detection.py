@@ -535,3 +535,260 @@ class TestAPI:
             },
         )
         assert resp.json()["risk_level"] in ("low", "medium", "high")
+
+
+# ---------------------------------------------------------------------------
+# Probability Calibration
+# ---------------------------------------------------------------------------
+
+
+class TestFraudCalibrationUnit:
+    """Unit tests for FraudCalibrator — no API, pure model tests."""
+
+    def test_ece_computation_perfect(self):
+        """Perfect calibration: ECE = 0."""
+        from fraud.models.calibration import _compute_ece
+
+        probas = np.linspace(0.05, 0.95, 100)
+        labels = (np.random.default_rng(42).random(100) < probas).astype(float)
+        ece, mce, bins = _compute_ece(probas, labels, n_bins=10)
+        assert 0.0 <= ece <= 1.0
+        assert 0.0 <= mce <= 1.0
+        assert len(bins) == 10
+
+    def test_ece_worst_case(self):
+        """Model always predicts 1.0 but labels are 0 → ECE = 1.0."""
+        from fraud.models.calibration import _compute_ece
+
+        probas = np.ones(100)
+        labels = np.zeros(100)
+        ece, mce, bins = _compute_ece(probas, labels, n_bins=10)
+        # All samples fall in last bin: gap = 1.0 - 0.0 = 1.0
+        assert abs(ece - 1.0) < 1e-6
+
+    def test_ece_bins_count(self):
+        from fraud.models.calibration import _compute_ece
+
+        probas = np.random.default_rng(0).uniform(0, 1, 200)
+        labels = (probas > 0.5).astype(float)
+        _, _, bins = _compute_ece(probas, labels, n_bins=5)
+        assert len(bins) == 5
+
+    def test_platt_scaler_fit_transform(self):
+        from fraud.models.calibration import _PlattScaler
+
+        rng = np.random.default_rng(7)
+        scores = rng.uniform(0, 1, 200)
+        labels = (scores + rng.normal(0, 0.2, 200) > 0.5).astype(float)
+        scaler = _PlattScaler(lr=0.05, n_iter=500)
+        scaler.fit(scores, labels)
+        assert scaler.fitted
+        out = scaler.transform(scores)
+        assert out.shape == scores.shape
+        assert np.all(out >= 0) and np.all(out <= 1)
+
+    def test_platt_output_range(self):
+        """Outputs must be valid probabilities."""
+        from fraud.models.calibration import _PlattScaler
+
+        scaler = _PlattScaler()
+        scaler.fit(np.array([0.0, 0.5, 1.0]), np.array([0.0, 1.0, 1.0]))
+        out = scaler.transform(np.array([-5.0, 0.5, 10.0]))
+        assert np.all(out >= 0) and np.all(out <= 1)
+
+    def test_isotonic_fit_transform(self):
+        from fraud.models.calibration import _IsotonicCalibrator
+
+        rng = np.random.default_rng(3)
+        scores = rng.uniform(0, 1, 300)
+        labels = (scores + rng.normal(0, 0.15, 300) > 0.5).astype(float)
+        iso = _IsotonicCalibrator()
+        iso.fit(scores, labels)
+        assert iso.fitted
+        out = iso.transform(scores)
+        assert out.shape == scores.shape
+        assert np.all(out >= 0) and np.all(out <= 1)
+
+    def test_isotonic_monotone(self):
+        """Isotonic calibrator output must be non-decreasing for sorted input."""
+        from fraud.models.calibration import _IsotonicCalibrator
+
+        rng = np.random.default_rng(5)
+        scores = rng.uniform(0, 1, 500)
+        labels = (scores + rng.normal(0, 0.1, 500) > 0.5).astype(float)
+        iso = _IsotonicCalibrator()
+        iso.fit(scores, labels)
+        sorted_scores = np.sort(scores)
+        out = iso.transform(sorted_scores)
+        diffs = np.diff(out)
+        # Allow tiny float noise (-1e-9 tolerance)
+        assert np.all(diffs >= -1e-9)
+
+    def test_fraud_calibrator_fit_platt(self):
+        from fraud.models.calibration import FraudCalibrator
+
+        rng = np.random.default_rng(99)
+        scores = rng.uniform(0, 1, 150)
+        labels = (scores + rng.normal(0, 0.2, 150) > 0.5).astype(float)
+        cal = FraudCalibrator(method="platt")
+        result = cal.fit(scores, labels)
+        assert cal.fitted
+        assert result.method == "platt"
+        assert result.n_calibration_samples == 150
+        assert 0.0 <= result.ece <= 1.0
+        assert 0.0 <= result.brier_score <= 1.0
+
+    def test_fraud_calibrator_fit_isotonic(self):
+        from fraud.models.calibration import FraudCalibrator
+
+        rng = np.random.default_rng(42)
+        scores = rng.uniform(0, 1, 500)
+        labels = (scores + rng.normal(0, 0.15, 500) > 0.5).astype(float)
+        cal = FraudCalibrator(method="isotonic")
+        result = cal.fit(scores, labels)
+        assert cal.fitted
+        assert result.method == "isotonic"
+        assert len(result.bins) == 10
+
+    def test_fraud_calibrator_calibrate(self):
+        from fraud.models.calibration import FraudCalibrator
+
+        rng = np.random.default_rng(11)
+        scores = rng.uniform(0, 1, 200)
+        labels = (scores > 0.5).astype(float)
+        cal = FraudCalibrator(method="platt")
+        cal.fit(scores, labels)
+        out = cal.calibrate(np.array([0.2, 0.5, 0.8]))
+        assert out.shape == (3,)
+        assert np.all(out >= 0) and np.all(out <= 1)
+
+    def test_fraud_calibrator_not_fitted_raises(self):
+        from fraud.models.calibration import FraudCalibrator
+
+        cal = FraudCalibrator()
+        with pytest.raises(RuntimeError, match="fit"):
+            cal.calibrate(np.array([0.5]))
+
+    def test_fraud_calibrator_too_few_samples(self):
+        from fraud.models.calibration import FraudCalibrator
+
+        cal = FraudCalibrator()
+        with pytest.raises(ValueError, match="10 calibration"):
+            cal.fit(np.array([0.5, 0.3]), np.array([1.0, 0.0]))
+
+    def test_ece_improvement_positive(self):
+        """After calibration ECE should not increase (sanity check)."""
+        from fraud.models.calibration import FraudCalibrator
+
+        rng = np.random.default_rng(88)
+        # Over-confident model: predicted 0.9 for everything
+        scores = np.clip(rng.normal(0.85, 0.1, 300), 0.01, 0.99)
+        labels = rng.binomial(1, 0.5, 300).astype(float)
+        cal = FraudCalibrator(method="isotonic")
+        cal.fit(scores, labels)
+        imp = cal.ece_improvement()
+        assert imp is not None
+
+    def test_calibration_result_to_dict(self):
+        from fraud.models.calibration import FraudCalibrator
+
+        rng = np.random.default_rng(7)
+        scores = rng.uniform(0, 1, 200)
+        labels = (scores > 0.5).astype(float)
+        cal = FraudCalibrator(method="platt", n_bins=5)
+        result = cal.fit(scores, labels)
+        d = result.to_dict()
+        assert d["method"] == "platt"
+        assert d["n_bins"] == 5
+        assert len(d["bins"]) == 5
+        assert "ece" in d
+        assert "brier_score" in d
+
+    def test_is_available(self):
+        from fraud.models.calibration import FraudCalibrator
+
+        # sklearn is installed in CI venv
+        assert FraudCalibrator.is_available() is True
+
+
+class TestCalibrationAPIEndpoints:
+    """Integration tests for /calibrate and /calibration/metrics endpoints."""
+
+    def test_calibrate_isotonic_success(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/calibrate", json={"method": "isotonic", "n_bins": 10})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["method"] == "isotonic"
+        assert data["n_calibration_samples"] > 0
+        assert 0.0 <= data["ece_after"] <= 1.0
+        assert 0.0 <= data["brier_score"] <= 1.0
+
+    def test_calibrate_platt_success(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/calibrate", json={"method": "platt", "n_bins": 10})
+        assert resp.status_code == 200
+        assert resp.json()["method"] == "platt"
+
+    def test_calibrate_invalid_method(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/calibrate", json={"method": "unknown", "n_bins": 10})
+        assert resp.status_code == 422
+
+    def test_calibration_metrics_after_calibrate(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        client.post("/calibrate", json={"method": "isotonic", "n_bins": 10})
+        resp = client.get("/calibration/metrics")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "ece" in data
+        assert "bins" in data
+        assert len(data["bins"]) == 10
+
+    def test_calibration_metrics_before_calibrate_404(self):
+        """Without a calibrator, metrics endpoint returns 404."""
+        from fastapi.testclient import TestClient
+        from fraud.api.app import (
+            _reset_calibrator,  # type: ignore[attr-defined]
+            app,
+        )
+
+        _reset_calibrator()
+        client = TestClient(app)
+        resp = client.get("/calibration/metrics")
+        assert resp.status_code == 404
+
+    def test_score_calibrated_probability_after_fit(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        client.post("/calibrate", json={"method": "isotonic", "n_bins": 10})
+        resp = client.post(
+            "/score",
+            json={"avg_amount": 200.0, "n_transactions": 5, "account_age_days": 90.0},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["calibrated_probability"] is not None
+        assert 0.0 <= data["calibrated_probability"] <= 1.0
+
+    def test_health_shows_calibration_status(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import app
+
+        client = TestClient(app)
+        resp = client.get("/health")
+        assert "calibration_fitted" in resp.json()
