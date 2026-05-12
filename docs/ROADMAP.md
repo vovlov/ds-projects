@@ -520,6 +520,25 @@
       81/81 тестов зелёных (+25 новых: TestDocumentQualityAssessment×18, TestQualityAPIEndpoints×7).
       Источники: Laplacian variance blur detection (Pech-Pacheco et al. 2000),
         ITU-R BT.601 luminance coefficients, Otsu 1979 (thresholding).
+- [x] Probability Calibration для Fraud Detection (Project 04) — 2026-05-12
+      fraud/models/calibration.py: FraudCalibrator — Platt scaling (gradient descent sigmoid)
+        + isotonic regression (sklearn PAV algorithm). _compute_ece(): Expected Calibration Error
+        (Guo et al. 2017, weighted avg bin gaps), Maximum Calibration Error (worst bin).
+        CalibrationBin + CalibrationResult dataclasses с to_dict() для Grafana/reliability diagram.
+        _PlattScaler: iterative gradient descent (lr=0.01, 1000 iter), нет sklearn-зависимости.
+        _IsotonicCalibrator: lazy import sklearn.IsotonicRegression (PAV algorithm, monotone гарантия).
+        ece_improvement() — абсолютное снижение ECE после калибровки для мониторинга.
+        is_available() — graceful fallback без sklearn.
+      fraud/api/app.py: _reset_calibrator() для тестовой изоляции, CalibrateRequest/CalibrateResponse,
+        POST /calibrate (обучить на hold-out synthetic set, method=isotonic|platt),
+        GET /calibration/metrics (reliability diagram data + ECE/MCE/Brier для дашборда),
+        FraudScore.calibrated_probability (None если калибратор не обучен, иначе P̂(fraud)),
+        /health расширен calibration_fitted.
+      69/69 тестов зелёных (+22 новых: TestFraudCalibrationUnit×15, TestCalibrationAPIEndpoints×7).
+      Зачем: raw CatBoost scores ≠ P(fraud) — порог 0.7 без калибровки может соответствовать
+        85% или 55% реальных мошенников; калибровка делает бизнес-пороги блокировки надёжными.
+      Источники: Zadrozny & Elkan 2001 ICML, Platt 1999, Guo et al. 2017 ICML (ECE),
+        scikit-learn Calibration docs.
 
 ---
 
