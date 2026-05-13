@@ -24,6 +24,7 @@ from recsys.feature_store.offline import (
 )
 from recsys.feature_store.registry import FeatureRegistry
 from recsys.feature_store.wap import WAPGate
+from recsys.models.bandit import BanditConfig, BanditResult, LinUCBBandit
 from recsys.models.collaborative import CollaborativeRecommender
 from recsys.models.content_based import get_popular_items
 
@@ -145,6 +146,10 @@ _wap_gate: WAPGate | None = None
 # Feast bridge — Feast-compatible online feature serving
 _feast_bridge: FeastBridge | None = None
 
+# LinUCB bandit — singleton, хранит arm statistics между запросами
+# LinUCB bandit singleton — persists A, b matrices across requests
+_bandit: LinUCBBandit | None = None
+
 
 def _get_wap_gate(psi_threshold: float = 0.2) -> WAPGate:
     """Ленивая инициализация WAP gate / Lazy WAP gate initialization."""
@@ -152,6 +157,20 @@ def _get_wap_gate(psi_threshold: float = 0.2) -> WAPGate:
     if _wap_gate is None:
         _wap_gate = WAPGate(psi_threshold=psi_threshold)
     return _wap_gate
+
+
+def _get_bandit(alpha: float = 1.0, feature_dim: int = 8) -> LinUCBBandit:
+    """Ленивая инициализация LinUCB bandit / Lazy LinUCB initialization."""
+    global _bandit
+    if _bandit is None:
+        _bandit = LinUCBBandit(BanditConfig(alpha=alpha, feature_dim=feature_dim))
+    return _bandit
+
+
+def _reset_bandit() -> None:
+    """Сброс bandit для тестовой изоляции / Reset bandit for test isolation."""
+    global _bandit
+    _bandit = None
 
 
 def _get_feast_bridge() -> FeastBridge:
@@ -324,3 +343,178 @@ def popular(
     items = [RecommendationItem(product_id=pid, score=round(score, 4)) for pid, score in results]
 
     return PopularResponse(recommendations=items)
+
+
+# ---------------------------------------------------------------------------
+# LinUCB Contextual Bandit endpoints
+# ---------------------------------------------------------------------------
+
+
+class BanditRecommendationResponse(BaseModel):
+    """Одна рекомендация с UCB-компонентами. / Single UCB recommendation."""
+
+    arm_id: int
+    ucb_score: float
+    expected_reward: float
+    exploration_bonus: float
+    n_updates: int
+
+
+class BanditRecommendRequest(BaseModel):
+    """
+    Запрос на ранжирование кандидатов через LinUCB.
+    Request to rank candidate items via LinUCB bandit.
+
+    Пример / Example:
+        {
+          "candidate_ids": [101, 202, 303],
+          "candidate_contexts": [[0.8, 0.2, 0.5, 0.1, 0.9, 0.3, 0.4, 0.7], ...],
+          "top_k": 3
+        }
+
+    candidate_contexts — конкатенация user_features + item_features.
+    Длина каждого вектора должна соответствовать feature_dim bandit (по умолчанию 8).
+    """
+
+    candidate_ids: list[int]
+    candidate_contexts: list[list[float]]
+    top_k: int = 10
+    alpha: float = 1.0
+    feature_dim: int = 8
+
+
+class BanditRecommendResponse(BaseModel):
+    """Результат LinUCB ранжирования. / LinUCB ranking result."""
+
+    recommendations: list[BanditRecommendationResponse]
+    n_arms_scored: int
+    top_arm_id: int
+    config_alpha: float
+
+
+class BanditFeedbackRequest(BaseModel):
+    """
+    Обратная связь для обновления LinUCB arm.
+    Feedback payload to update LinUCB arm statistics.
+
+    reward: 1.0 = клик/покупка, 0.0 = пропуск, или CTR ∈ [0,1].
+    Контекст должен совпадать с тем, что передавался при recommend.
+    """
+
+    arm_id: int
+    context: list[float]
+    reward: float
+    feature_dim: int = 8
+
+
+class BanditFeedbackResponse(BaseModel):
+    """Статус обновления arm. / Arm update status."""
+
+    arm_id: int
+    n_updates: int
+    total_reward: float
+    message: str
+
+
+class BanditStatsResponse(BaseModel):
+    """Статистика bandit для мониторинга. / Bandit stats for monitoring."""
+
+    n_arms: int
+    total_recommendations: int
+    config_alpha: float
+    arm_stats: list[dict]
+
+
+@app.post("/bandit/recommend", response_model=BanditRecommendResponse)
+def bandit_recommend(request: BanditRecommendRequest) -> BanditRecommendResponse:
+    """
+    Ранжировать кандидатов через LinUCB Contextual Bandit.
+    Rank candidate items using LinUCB exploration-exploitation.
+
+    На старте (cold start) все arms имеют одинаковое UCB → ранжирование
+    по exploration_bonus (случайное исследование). После накопления фидбека
+    модель переходит к exploitation лучших arms.
+
+    Cold start: all arms start equal → ranked by exploration bonus.
+    After feedback accumulates, model shifts to exploitation of high-reward arms.
+    """
+    if len(request.candidate_ids) != len(request.candidate_contexts):
+        raise HTTPException(
+            status_code=422,
+            detail="candidate_ids and candidate_contexts must have equal length",
+        )
+    if not request.candidate_ids:
+        raise HTTPException(status_code=422, detail="candidate_ids must not be empty")
+
+    bandit = _get_bandit(alpha=request.alpha, feature_dim=request.feature_dim)
+    result: BanditResult = bandit.recommend(
+        candidate_ids=request.candidate_ids,
+        candidate_contexts=request.candidate_contexts,
+        top_k=request.top_k,
+    )
+
+    recs = [
+        BanditRecommendationResponse(
+            arm_id=r.arm_id,
+            ucb_score=r.ucb_score,
+            expected_reward=r.expected_reward,
+            exploration_bonus=r.exploration_bonus,
+            n_updates=r.n_updates,
+        )
+        for r in result.recommendations
+    ]
+
+    return BanditRecommendResponse(
+        recommendations=recs,
+        n_arms_scored=result.n_arms_scored,
+        top_arm_id=result.top_arm_id,
+        config_alpha=result.config_alpha,
+    )
+
+
+@app.post("/bandit/feedback", response_model=BanditFeedbackResponse)
+def bandit_feedback(request: BanditFeedbackRequest) -> BanditFeedbackResponse:
+    """
+    Обновить LinUCB arm после получения обратной связи.
+    Update LinUCB arm statistics after receiving user feedback.
+
+    Вызывать после того, как пользователь среагировал (или нет) на рекомендацию.
+    Call this after the user reacted (or ignored) a recommendation.
+
+    reward=1.0 — клик/покупка; reward=0.0 — пропуск.
+    """
+    if not (0.0 <= request.reward <= 1.0):
+        raise HTTPException(status_code=422, detail="reward must be in [0.0, 1.0]")
+
+    bandit = _get_bandit(feature_dim=request.feature_dim)
+    bandit.update(
+        arm_id=request.arm_id,
+        context=request.context,
+        reward=request.reward,
+    )
+
+    arm_state = bandit._arms[request.arm_id]
+    return BanditFeedbackResponse(
+        arm_id=request.arm_id,
+        n_updates=arm_state.n_updates,
+        total_reward=round(arm_state.total_reward, 4),
+        message=f"arm {request.arm_id} updated (n_updates={arm_state.n_updates})",
+    )
+
+
+@app.get("/bandit/stats", response_model=BanditStatsResponse)
+def bandit_stats() -> BanditStatsResponse:
+    """
+    Статистика LinUCB bandit для мониторинга и отладки.
+    LinUCB bandit statistics for monitoring and debugging.
+
+    Показывает количество обновлений и среднее вознаграждение по каждому arm.
+    Полезно для выявления arms с плохим качеством или недостаточным исследованием.
+    """
+    bandit = _get_bandit()
+    return BanditStatsResponse(
+        n_arms=bandit.n_arms,
+        total_recommendations=bandit.total_recommendations,
+        config_alpha=bandit.config.alpha,
+        arm_stats=bandit.get_arm_stats(),
+    )

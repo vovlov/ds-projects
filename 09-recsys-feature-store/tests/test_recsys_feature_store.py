@@ -1347,3 +1347,325 @@ class TestOnlineFeaturesAPIEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["n_entities"] == 1
+
+
+# ========== TestLinUCBBandit: юнит-тесты бандита ==========
+
+
+class TestLinUCBBandit:
+    """Юнит-тесты LinUCB Contextual Bandit / Unit tests for LinUCB."""
+
+    def _make_contexts(self, n: int, dim: int = 8, seed: int = 42) -> list[list[float]]:
+        """Вспомогательный метод: случайные нормализованные контексты."""
+        rng = __import__("numpy").random.default_rng(seed)
+        return rng.random((n, dim)).tolist()
+
+    def test_recommend_returns_top_k(self) -> None:
+        """recommend() возвращает ровно top_k результатов / Returns exactly top_k."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=4))
+        ids = [1, 2, 3, 4, 5]
+        ctxs = self._make_contexts(5, dim=4)
+        result = bandit.recommend(ids, ctxs, top_k=3)
+        assert len(result.recommendations) == 3
+
+    def test_recommend_top_k_exceeds_candidates(self) -> None:
+        """top_k > кол-ва кандидатов → все кандидаты / top_k > n → return all."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=4))
+        ids = [10, 20]
+        ctxs = self._make_contexts(2, dim=4)
+        result = bandit.recommend(ids, ctxs, top_k=10)
+        assert len(result.recommendations) == 2
+
+    def test_recommend_sorted_by_ucb_descending(self) -> None:
+        """Рекомендации отсортированы по UCB убыванию / Sorted by UCB desc."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=4))
+        ids = list(range(10))
+        ctxs = self._make_contexts(10, dim=4)
+        result = bandit.recommend(ids, ctxs, top_k=10)
+        scores = [r.ucb_score for r in result.recommendations]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_cold_start_exploration_bonus_positive(self) -> None:
+        """Cold start: exploration_bonus > 0 у всех arms / Exploration bonus > 0."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(alpha=1.0, feature_dim=4))
+        ids = [1, 2, 3]
+        ctxs = self._make_contexts(3, dim=4)
+        result = bandit.recommend(ids, ctxs, top_k=3)
+        for rec in result.recommendations:
+            assert rec.exploration_bonus > 0, "Cold start должен иметь exploration bonus"
+
+    def test_update_increments_n_updates(self) -> None:
+        """update() увеличивает n_updates arm / update() increments n_updates."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=4))
+        ctx = self._make_contexts(1, dim=4)[0]
+        bandit.update(arm_id=42, context=ctx, reward=1.0)
+        bandit.update(arm_id=42, context=ctx, reward=0.0)
+        arm = bandit._arms[42]
+        assert arm.n_updates == 2
+
+    def test_update_accumulates_reward(self) -> None:
+        """total_reward накапливается правильно / Total reward accumulates correctly."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=4))
+        ctx = self._make_contexts(1, dim=4)[0]
+        bandit.update(arm_id=7, context=ctx, reward=1.0)
+        bandit.update(arm_id=7, context=ctx, reward=0.5)
+        arm = bandit._arms[7]
+        assert abs(arm.total_reward - 1.5) < 1e-9
+
+    def test_update_changes_ucb_score(self) -> None:
+        """После update UCB score меняется / UCB changes after update."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(alpha=1.0, feature_dim=4))
+        ctx = [0.5, 0.5, 0.5, 0.5]
+        result_before = bandit.recommend([99], [ctx], top_k=1)
+        ucb_before = result_before.recommendations[0].ucb_score
+
+        bandit.update(arm_id=99, context=ctx, reward=1.0)
+
+        result_after = bandit.recommend([99], [ctx], top_k=1)
+        ucb_after = result_after.recommendations[0].ucb_score
+        assert ucb_before != ucb_after
+
+    def test_high_reward_arm_ranks_above_zero_reward(self) -> None:
+        """После обучения: arm с высоким reward должен обгонять arm с нулевым.
+        After training, high-reward arm should rank above zero-reward arm."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(alpha=0.1, feature_dim=4))  # low alpha → exploit
+        ctx_good = [1.0, 0.0, 0.0, 0.0]
+        ctx_bad = [0.0, 1.0, 0.0, 0.0]
+
+        # Обучаем хороший arm с reward=1 многократно
+        for _ in range(30):
+            bandit.update(arm_id=1, context=ctx_good, reward=1.0)
+        # Обучаем плохой arm с reward=0
+        for _ in range(30):
+            bandit.update(arm_id=2, context=ctx_bad, reward=0.0)
+
+        result = bandit.recommend([1, 2], [ctx_good, ctx_bad], top_k=2)
+        assert result.top_arm_id == 1, "Хороший arm должен быть первым после exploitation"
+
+    def test_new_arm_auto_registered(self) -> None:
+        """Новый arm регистрируется автоматически при recommend / Auto-init on first seen."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=4))
+        assert bandit.n_arms == 0
+        bandit.recommend([500, 501], self._make_contexts(2, dim=4), top_k=2)
+        assert bandit.n_arms == 2
+
+    def test_n_arms_tracked(self) -> None:
+        """n_arms увеличивается при появлении новых arms / n_arms grows with new arms."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=4))
+        ctx = self._make_contexts(1, dim=4)[0]
+        bandit.update(arm_id=100, context=ctx, reward=1.0)
+        bandit.update(arm_id=200, context=ctx, reward=0.5)
+        assert bandit.n_arms == 2
+
+    def test_context_shorter_than_feature_dim_padded(self) -> None:
+        """Контекст короче feature_dim → дополняется нулями без ошибки."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=8))
+        short_ctx = [0.5, 0.3]  # shorter than dim=8
+        result = bandit.recommend([1], [short_ctx], top_k=1)
+        assert len(result.recommendations) == 1
+
+    def test_get_arm_stats_sorted_by_updates(self) -> None:
+        """get_arm_stats() отсортирован по n_updates убыванию."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=4))
+        ctx = self._make_contexts(1, dim=4)[0]
+        for _ in range(5):
+            bandit.update(arm_id=1, context=ctx, reward=1.0)
+        for _ in range(2):
+            bandit.update(arm_id=2, context=ctx, reward=0.5)
+        stats = bandit.get_arm_stats()
+        assert stats[0]["arm_id"] == 1
+        assert stats[0]["n_updates"] == 5
+
+    def test_total_recommendations_counter(self) -> None:
+        """total_recommendations растёт с каждым вызовом recommend()."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=4))
+        ctxs = self._make_contexts(3, dim=4)
+        bandit.recommend([1, 2, 3], ctxs, top_k=3)
+        bandit.recommend([1, 2, 3], ctxs, top_k=3)
+        assert bandit.total_recommendations == 2
+
+    def test_mismatched_ids_contexts_raises(self) -> None:
+        """len(ids) != len(contexts) → ValueError."""
+        from recsys.models.bandit import BanditConfig, LinUCBBandit
+
+        bandit = LinUCBBandit(BanditConfig(feature_dim=4))
+        with __import__("pytest").raises(ValueError):
+            bandit.recommend([1, 2], [[0.1] * 4], top_k=1)
+
+
+# ========== TestBanditAPIEndpoints: интеграционные тесты API ==========
+
+
+class TestBanditAPIEndpoints:
+    """Интеграционные тесты LinUCB API / LinUCB API integration tests."""
+
+    @pytest.fixture(autouse=True)
+    def reset_bandit(self) -> None:
+        """Сброс bandit перед каждым тестом / Reset bandit before each test."""
+        from recsys.api.app import _reset_bandit
+
+        _reset_bandit()
+
+    @pytest.fixture
+    def client(self) -> TestClient:
+        from recsys.api.app import app
+
+        return TestClient(app)
+
+    def _ctx(self, n: int = 1, dim: int = 8, seed: int = 0) -> list[list[float]]:
+        import numpy as np
+
+        rng = np.random.default_rng(seed)
+        return rng.random((n, dim)).tolist()
+
+    def test_bandit_recommend_status_200(self, client: TestClient) -> None:
+        """POST /bandit/recommend → 200 / Returns 200 on valid request."""
+        response = client.post(
+            "/bandit/recommend",
+            json={
+                "candidate_ids": [1, 2, 3],
+                "candidate_contexts": self._ctx(3),
+                "top_k": 2,
+            },
+        )
+        assert response.status_code == 200
+
+    def test_bandit_recommend_response_structure(self, client: TestClient) -> None:
+        """Ответ содержит все обязательные поля / Response has required fields."""
+        response = client.post(
+            "/bandit/recommend",
+            json={
+                "candidate_ids": [10, 20],
+                "candidate_contexts": self._ctx(2),
+                "top_k": 2,
+            },
+        )
+        data = response.json()
+        assert "recommendations" in data
+        assert "n_arms_scored" in data
+        assert "top_arm_id" in data
+        assert data["n_arms_scored"] == 2
+
+    def test_bandit_recommend_top_k_respected(self, client: TestClient) -> None:
+        """top_k ограничивает число рекомендаций / top_k limits response size."""
+        response = client.post(
+            "/bandit/recommend",
+            json={
+                "candidate_ids": list(range(10)),
+                "candidate_contexts": self._ctx(10),
+                "top_k": 4,
+            },
+        )
+        data = response.json()
+        assert len(data["recommendations"]) == 4
+
+    def test_bandit_recommend_mismatched_lengths_422(self, client: TestClient) -> None:
+        """Несовпадение длин ids/contexts → 422 / Mismatch → 422."""
+        response = client.post(
+            "/bandit/recommend",
+            json={
+                "candidate_ids": [1, 2, 3],
+                "candidate_contexts": self._ctx(2),
+                "top_k": 2,
+            },
+        )
+        assert response.status_code == 422
+
+    def test_bandit_recommend_empty_ids_422(self, client: TestClient) -> None:
+        """Пустой список → 422 / Empty list → 422."""
+        response = client.post(
+            "/bandit/recommend",
+            json={
+                "candidate_ids": [],
+                "candidate_contexts": [],
+                "top_k": 1,
+            },
+        )
+        assert response.status_code == 422
+
+    def test_bandit_feedback_status_200(self, client: TestClient) -> None:
+        """POST /bandit/feedback → 200 / Returns 200 on valid feedback."""
+        response = client.post(
+            "/bandit/feedback",
+            json={
+                "arm_id": 42,
+                "context": self._ctx(1)[0],
+                "reward": 1.0,
+            },
+        )
+        assert response.status_code == 200
+
+    def test_bandit_feedback_response_structure(self, client: TestClient) -> None:
+        """Ответ feedback содержит arm_id и n_updates / Feedback response has arm_id."""
+        ctx = self._ctx(1)[0]
+        response = client.post(
+            "/bandit/feedback",
+            json={"arm_id": 99, "context": ctx, "reward": 0.5},
+        )
+        data = response.json()
+        assert data["arm_id"] == 99
+        assert data["n_updates"] == 1
+
+    def test_bandit_feedback_invalid_reward_422(self, client: TestClient) -> None:
+        """reward вне [0, 1] → 422 / Out-of-range reward → 422."""
+        response = client.post(
+            "/bandit/feedback",
+            json={"arm_id": 1, "context": self._ctx(1)[0], "reward": 1.5},
+        )
+        assert response.status_code == 422
+
+    def test_bandit_stats_status_200(self, client: TestClient) -> None:
+        """GET /bandit/stats → 200 / Stats endpoint returns 200."""
+        response = client.get("/bandit/stats")
+        assert response.status_code == 200
+
+    def test_bandit_stats_structure(self, client: TestClient) -> None:
+        """Ответ stats содержит все поля / Stats response has all fields."""
+        data = client.get("/bandit/stats").json()
+        assert "n_arms" in data
+        assert "total_recommendations" in data
+        assert "config_alpha" in data
+        assert "arm_stats" in data
+
+    def test_bandit_recommend_then_feedback_updates_arm(self, client: TestClient) -> None:
+        """recommend → feedback → stats показывает обновлённый arm / Full cycle test."""
+        ctx = self._ctx(1)[0]
+        client.post(
+            "/bandit/recommend",
+            json={"candidate_ids": [7], "candidate_contexts": [ctx], "top_k": 1},
+        )
+        fb_response = client.post(
+            "/bandit/feedback",
+            json={"arm_id": 7, "context": ctx, "reward": 1.0},
+        )
+        assert fb_response.json()["n_updates"] == 1
+
+        stats = client.get("/bandit/stats").json()
+        arm_ids = [s["arm_id"] for s in stats["arm_stats"]]
+        assert 7 in arm_ids
