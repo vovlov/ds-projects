@@ -539,6 +539,26 @@
         85% или 55% реальных мошенников; калибровка делает бизнес-пороги блокировки надёжными.
       Источники: Zadrozny & Elkan 2001 ICML, Platt 1999, Guo et al. 2017 ICML (ECE),
         scikit-learn Calibration docs.
+- [x] LinUCB Contextual Bandits для RecSys (Project 09) — 2026-05-13
+      recsys/models/bandit.py: LinUCBBandit (disjoint LinUCB, Li et al. 2010 WWW).
+      BanditConfig (alpha, feature_dim, lambda_reg), ArmState (A matrix + b vector per arm),
+      BanditRecommendation (ucb_score, expected_reward, exploration_bonus, n_updates),
+      BanditResult, FeedbackRecord dataclasses.
+      _compute_ucb(): θ̂ᵀx + α√(xᵀA⁻¹x) — exploration bonus защита от floating-point.
+      recommend(): ранжирование кандидатов по UCB убыванию, auto-init новых arms.
+      update(): A_a += xxᵀ, b_a += r·x онлайн-обновление из feedback.
+      Короткий контекст дополняется нулями (graceful padding).
+      recsys/api/app.py: _get_bandit()/reset_bandit() lazy singleton pattern,
+        POST /bandit/recommend (candidate_ids + contexts → UCB ranking, 422 на mismatch),
+        POST /bandit/feedback (arm_id + reward [0,1] → online update, 422 на reward > 1),
+        GET  /bandit/stats (n_arms, total_recommendations, per-arm A_trace, avg_reward).
+      25 новых тестов: TestLinUCBBandit×14 (top_k, sorted, cold_start_bonus, update_increments,
+        accumulates_reward, changes_ucb, exploitation_after_training, auto_register, padding,
+        stats_sorted, counter, mismatch_raises), TestBanditAPIEndpoints×11 (recommend/feedback/
+        stats 200, structure, top_k, 422 mismatch, 422 empty, 422 reward, full cycle).
+      134/134 тестов зелёных (+25, было 109).
+      Источники: Li et al. 2010 WWW (LinUCB), eugeneyan.com/writing/bandits/,
+        Alibaba PAI-Rec LinUCB docs, Kameleoon contextual bandits guide 2026.
 
 ---
 
