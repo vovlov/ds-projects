@@ -7,6 +7,7 @@ import pickle
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import polars as pl
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -892,3 +893,261 @@ def online_reset() -> dict[str, str]:
         IncrementalConfig(snapshot_interval=100, adwin_delta=0.002)
     )
     return {"status": "reset", "message": "Online model reset to initial state."}
+
+
+# ---------------------------------------------------------------------------
+# Uplift Modeling endpoints (T-Learner CATE estimation)
+# ---------------------------------------------------------------------------
+
+from ..uplift.learner import TLearner, UpliftConfig  # noqa: E402
+from ..uplift.qini import compute_qini_curve  # noqa: E402
+
+# Глобальный T-Learner — заменяется при каждом POST /uplift/train.
+# Global T-Learner — replaced on each POST /uplift/train.
+_uplift_model: TLearner | None = None
+
+
+def _get_uplift_model() -> TLearner:
+    if _uplift_model is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Uplift model not trained. POST /uplift/train first.",
+        )
+    return _uplift_model
+
+
+class UpliftTrainRequest(BaseModel):
+    """Запрос на обучение uplift-модели.
+
+    Uplift model training request.
+    """
+
+    n_samples: int = Field(
+        default=2000,
+        ge=100,
+        le=50000,
+        description="Количество синтетических обучающих примеров",
+    )
+    treatment_rate: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=0.9,
+        description="Доля клиентов в treatment-группе (0.5 = рандомизированный эксперимент)",
+    )
+    random_state: int = Field(default=42, description="Random seed для воспроизводимости")
+
+
+class UpliftScoreRequest(BaseModel):
+    """Запрос на scoring батча клиентов по uplift-модели.
+
+    Uplift scoring request for a batch of customers.
+    """
+
+    customers: list[dict[str, float]] = Field(
+        ...,
+        min_length=1,
+        max_length=1000,
+        description="Список словарей признаков клиентов",
+    )
+
+
+class UpliftScoreItem(BaseModel):
+    """Uplift-предсказание для одного клиента."""
+
+    cate: float = Field(..., description="CATE ∈ (−1, 1). > 0 = intervention помогает")
+    p_treated: float = Field(..., description="P(positive outcome | treated, features)")
+    p_control: float = Field(..., description="P(positive outcome | control, features)")
+    segment: str = Field(..., description="persuadable | sleeping_dog | uncertain")
+    recommendation: str = Field(..., description="Человекочитаемая рекомендация")
+
+
+class UpliftScoreResponse(BaseModel):
+    """Ответ на uplift-scoring батча."""
+
+    predictions: list[UpliftScoreItem]
+    n_persuadable: int = Field(..., description="Кол-во persuadable клиентов в батче")
+    n_sleeping_dog: int = Field(..., description="Кол-во sleeping dogs (не таргетировать)")
+    n_uncertain: int = Field(..., description="Кол-во uncertain")
+    avg_cate: float = Field(..., description="Средний CATE по батчу")
+
+
+@app.post("/uplift/train")
+def uplift_train(request: UpliftTrainRequest) -> dict[str, Any]:
+    """Обучить T-Learner uplift-модель на синтетических retention-данных.
+
+    Train a T-Learner uplift model on synthetic retention data.
+
+    Генерирует синтетический датасет телеком-оператора с 4 сегментами:
+    - Persuadables (25%): отреагируют на звонок, без него уйдут
+    - Sure Things (25%): останутся независимо от звонка
+    - Lost Causes (25%): уйдут независимо от звонка
+    - Sleeping Dogs (25%): контакт ухудшает ситуацию (негативный CATE)
+
+    Generates synthetic telecom dataset with 4 segments:
+    - Persuadables (25%): will stay if contacted, churn if not
+    - Sure Things (25%): stay regardless
+    - Lost Causes (25%): churn regardless
+    - Sleeping Dogs (25%): contact makes things worse (negative CATE)
+
+    Возвращает статистику по обучению + Qini-коэффициент на обучающих данных.
+    Returns training statistics + Qini coefficient on training data.
+    """
+    global _uplift_model
+
+    rng = np.random.default_rng(request.random_state)
+    n = request.n_samples
+    treat_rate = request.treatment_rate
+
+    # --- Синтетический датасет: 5 числовых признаков телеком-клиента ---
+    # tenure [0, 72], monthly_charges [18, 120], num_services [1, 6]
+    # senior [0,1], has_contract [0,1]
+    tenure = rng.integers(0, 73, n).astype(float)
+    monthly = rng.uniform(18, 120, n)
+    n_services = rng.integers(1, 7, n).astype(float)
+    senior = (rng.random(n) < 0.16).astype(float)
+    has_contract = (rng.random(n) < 0.45).astype(float)
+
+    X = np.column_stack([tenure, monthly, n_services, senior, has_contract])
+    feature_names = ["tenure", "monthly_charges", "num_services", "senior", "has_contract"]
+
+    # Segment assignment (25% each) based on feature combination
+    # Persuadables: short tenure, high charges, no contract
+    segment_score = -0.02 * tenure + 0.01 * monthly - 0.5 * has_contract + rng.normal(0, 0.5, n)
+    segment_rank = np.argsort(segment_score)
+    segments = np.empty(n, dtype=int)
+    q = n // 4
+    segments[segment_rank[:q]] = 0  # lost causes (bottom)
+    segments[segment_rank[q : 2 * q]] = 1  # sure things
+    segments[segment_rank[2 * q : 3 * q]] = 2  # uncertain
+    segments[segment_rank[3 * q :]] = 3  # persuadables (top)
+
+    # Treatment assignment (random)
+    T = (rng.random(n) < treat_rate).astype(int)
+
+    # Outcome: Y=1 = positive response (stayed after campaign contact)
+    base_rates = {0: 0.10, 1: 0.80, 2: 0.45, 3: 0.30}  # control
+    treat_effects = {0: -0.05, 1: 0.02, 2: 0.05, 3: 0.45}  # treatment lift
+
+    Y = np.zeros(n, dtype=int)
+    for seg in range(4):
+        mask = segments == seg
+        p_c = base_rates[seg]
+        p_t = np.clip(p_c + treat_effects[seg], 0, 1)
+        p = np.where(T[mask] == 1, p_t, p_c)
+        Y[mask] = (rng.random(mask.sum()) < p).astype(int)
+
+    # Train T-Learner
+    cfg = UpliftConfig(
+        max_depth=5,
+        min_samples_leaf=max(5, n // 200),
+        random_state=request.random_state,
+    )
+    model = TLearner(cfg)
+    summary = model.fit(X, T, Y, feature_names=feature_names)
+
+    # Qini coefficient on training data
+    cate_train = model.predict_uplift(X)
+    qini_result = compute_qini_curve(Y, T, cate_train, n_bins=20)
+
+    _uplift_model = model
+
+    return {
+        "status": "trained",
+        "n_total": summary.n_total,
+        "n_treated": summary.n_treated,
+        "n_control": summary.n_control,
+        "treatment_rate": round(summary.treatment_rate, 3),
+        "outcome_rate_treated": round(summary.outcome_rate_treated, 3),
+        "outcome_rate_control": round(summary.outcome_rate_control, 3),
+        "avg_cate_train": round(summary.avg_cate_train, 4),
+        "pct_persuadable": round(summary.pct_persuadable, 1),
+        "pct_sleeping_dog": round(summary.pct_sleeping_dog, 1),
+        "qini_coefficient": qini_result.qini_coefficient,
+        "auuc": qini_result.auuc,
+        "sklearn_available": summary.sklearn_available,
+        "feature_names": feature_names,
+        "segments_description": {
+            "persuadable": "Target: contact significantly increases retention",
+            "sleeping_dog": "Avoid: contact reduces retention (backfire effect)",
+            "uncertain": "Monitor: effect too small to act on confidently",
+        },
+    }
+
+
+@app.post("/uplift/score", response_model=UpliftScoreResponse)
+def uplift_score(request: UpliftScoreRequest) -> UpliftScoreResponse:
+    """Оценить uplift для батча клиентов.
+
+    Score uplift for a batch of customers.
+
+    Возвращает CATE + сегмент + рекомендацию для каждого клиента.
+    Используется для таргетирования retention-кампании:
+    - Контактировать только с 'persuadable' клиентами
+    - Исключить 'sleeping_dog' (контакт ухудшит ситуацию)
+    - 'uncertain' — оставить на усмотрение бизнеса
+
+    Returns CATE + segment + recommendation per customer.
+    Use for targeting retention campaign:
+    - Contact only 'persuadable' customers
+    - Exclude 'sleeping_dog' (contact will backfire)
+    - 'uncertain' — leave to business judgement
+    """
+    model = _get_uplift_model()
+
+    predictions = []
+    for features in request.customers:
+        pred = model.predict_one(features)
+        predictions.append(
+            UpliftScoreItem(
+                cate=pred.cate,
+                p_treated=pred.p_treated,
+                p_control=pred.p_control,
+                segment=pred.segment,
+                recommendation=pred.recommendation,
+            )
+        )
+
+    n_persuadable = sum(1 for p in predictions if p.segment == "persuadable")
+    n_sleeping = sum(1 for p in predictions if p.segment == "sleeping_dog")
+    n_uncertain = len(predictions) - n_persuadable - n_sleeping
+    avg_cate = float(np.mean([p.cate for p in predictions]))
+
+    return UpliftScoreResponse(
+        predictions=predictions,
+        n_persuadable=n_persuadable,
+        n_sleeping_dog=n_sleeping,
+        n_uncertain=n_uncertain,
+        avg_cate=round(avg_cate, 4),
+    )
+
+
+@app.get("/uplift/stats")
+def uplift_stats() -> dict[str, Any]:
+    """Статистика обученной uplift-модели.
+
+    Statistics of the trained uplift model.
+
+    Возвращает сводку по обучению и сегментацию клиентской базы.
+    Returns training summary and customer base segmentation.
+    Полезно для мониторинга и дашбордов / Useful for monitoring and dashboards.
+    """
+    model = _get_uplift_model()
+    summary = model.train_summary
+
+    if summary is None:
+        return {"status": "no_summary"}
+
+    return {
+        "status": "ready",
+        "n_total": summary.n_total,
+        "n_treated": summary.n_treated,
+        "n_control": summary.n_control,
+        "treatment_rate": round(summary.treatment_rate, 3),
+        "outcome_rate_treated": round(summary.outcome_rate_treated, 3),
+        "outcome_rate_control": round(summary.outcome_rate_control, 3),
+        "avg_cate_train": round(summary.avg_cate_train, 4),
+        "pct_persuadable": round(summary.pct_persuadable, 1),
+        "pct_sleeping_dog": round(summary.pct_sleeping_dog, 1),
+        "sklearn_available": summary.sklearn_available,
+        "feature_names": model.feature_names,
+    }

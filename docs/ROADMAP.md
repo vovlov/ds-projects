@@ -559,6 +559,24 @@
       134/134 тестов зелёных (+25, было 109).
       Источники: Li et al. 2010 WWW (LinUCB), eugeneyan.com/writing/bandits/,
         Alibaba PAI-Rec LinUCB docs, Kameleoon contextual bandits guide 2026.
+- [x] Uplift Modeling T-Learner для Churn (Project 01) — 2026-05-14
+      churn/uplift/learner.py: TLearner meta-learner (Künzel et al. 2019 PNAS 116:4156-4165).
+        CATE(x) = μ₁(x) − μ₀(x); два отдельных DecisionTreeClassifier (sklearn / numpy fallback).
+        4 сегмента: persuadable (CATE>0.05), sleeping_dog (CATE<-0.05), uncertain.
+        predict_one(): словарь признаков → UpliftPrediction (cate, p_treated, p_control, segment, recommendation).
+        predict_batch(): батч клиентов → список UpliftPrediction.
+      churn/uplift/qini.py: compute_qini_curve() (Radcliffe & Surry 2011), AUUC (np.trapezoid),
+        qini_coefficient = AUUC(model) / AUUC(perfect) — нормированная оценка качества.
+        Graceful degradation: no sklearn → _NaiveBayesClassifier (Laplace, numpy-only).
+      churn/api/app.py: 3 новых endpoint:
+        POST /uplift/train (синтетические retention-данные: 4 сегмента × treatment assignment → fit T-Learner + Qini stats),
+        POST /uplift/score (батч клиентов → CATE + segment + targeting recommendation),
+        GET  /uplift/stats (сводка по обучению: n_total, rates, avg_cate, pct_persuadable/sleeping_dog).
+      37 новых тестов: TestTLearnerUnit×14, TestQiniCurve×11, TestUpliftAPIEndpoints×12.
+      197/197 тестов зелёных (+37, было 160). Lint чистый.
+      Бизнес-ценность: uplift-таргетирование даёт +15-30% ROI vs случайного (Medium 2026).
+      Источники: Künzel et al. 2019 (PNAS 116:4156), Gutierrez & Gerardy 2017 (JMLR Workshop),
+        Radcliffe & Surry 2011 (Stochastic Solutions), DeepSeqCaus 2026 (JCSSR).
 
 ---
 

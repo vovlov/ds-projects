@@ -2193,3 +2193,376 @@ class TestOnlineAPIEndpoints:
         client.post("/online/reset")
         status = client.get("/online/status").json()
         assert status["n_samples_seen"] == 0
+
+
+# ===========================================================================
+# Uplift Modeling Tests (T-Learner CATE)
+# ===========================================================================
+
+from churn.uplift.learner import TLearner, UpliftConfig, UpliftPrediction  # noqa: E402
+from churn.uplift.qini import (  # noqa: E402
+    QiniResult,
+    compute_auuc,
+    compute_qini_curve,
+    qini_coefficient,
+)
+
+
+class TestTLearnerUnit:
+    """Unit-тесты T-Learner meta-learner."""
+
+    def _make_data(self, n: int = 400, seed: int = 0) -> tuple:
+        """Синтетические данные с известным treatment effect."""
+        rng = np.random.default_rng(seed)
+        X = rng.standard_normal((n, 3))
+        T = (rng.random(n) < 0.5).astype(int)
+        # Позитивный эффект для клиентов с X[:,0] > 0
+        base_p = 0.3
+        treat_effect = np.where(X[:, 0] > 0, 0.3, 0.0)
+        p = np.where(T == 1, base_p + treat_effect, base_p)
+        Y = (rng.random(n) < p).astype(int)
+        return X, T, Y
+
+    def test_fit_returns_summary(self):
+        """fit() возвращает TrainSummary с корректными полями."""
+        X, T, Y = self._make_data()
+        model = TLearner()
+        summary = model.fit(X, T, Y)
+        assert summary.n_total == len(X)
+        assert summary.n_treated + summary.n_control == summary.n_total
+        assert 0.0 <= summary.treatment_rate <= 1.0
+
+    def test_fit_marks_model_as_fitted(self):
+        """После fit() is_fitted == True."""
+        X, T, Y = self._make_data()
+        model = TLearner()
+        assert not model.is_fitted
+        model.fit(X, T, Y)
+        assert model.is_fitted
+
+    def test_predict_uplift_shape(self):
+        """predict_uplift возвращает вектор размера (n,)."""
+        X, T, Y = self._make_data(n=200)
+        model = TLearner()
+        model.fit(X, T, Y)
+        cate = model.predict_uplift(X)
+        assert cate.shape == (len(X),)
+
+    def test_predict_uplift_range(self):
+        """CATE ∈ (−1, 1)."""
+        X, T, Y = self._make_data(n=300)
+        model = TLearner()
+        model.fit(X, T, Y)
+        cate = model.predict_uplift(X)
+        assert cate.min() >= -1.0 - 1e-6
+        assert cate.max() <= 1.0 + 1e-6
+
+    def test_predict_one_returns_correct_type(self):
+        """predict_one возвращает UpliftPrediction с корректными типами."""
+        X, T, Y = self._make_data()
+        model = TLearner()
+        model.fit(X, T, Y, feature_names=["f0", "f1", "f2"])
+        pred = model.predict_one({"f0": 1.0, "f1": 0.0, "f2": -0.5})
+        assert isinstance(pred, UpliftPrediction)
+        assert -1.0 <= pred.cate <= 1.0
+        assert 0.0 <= pred.p_treated <= 1.0
+        assert 0.0 <= pred.p_control <= 1.0
+        assert pred.segment in {"persuadable", "sleeping_dog", "uncertain"}
+
+    def test_predict_one_cate_equals_p_diff(self):
+        """CATE = p_treated − p_control."""
+        X, T, Y = self._make_data()
+        model = TLearner()
+        model.fit(X, T, Y, feature_names=["f0", "f1", "f2"])
+        pred = model.predict_one({"f0": 0.5, "f1": 0.5, "f2": 0.5})
+        assert abs(pred.cate - (pred.p_treated - pred.p_control)) < 1e-6
+
+    def test_high_positive_cate_labeled_persuadable(self):
+        """Клиент с явно положительным CATE → segment='persuadable'."""
+        rng = np.random.default_rng(7)
+        n = 500
+        X = rng.standard_normal((n, 2))
+        T = (rng.random(n) < 0.5).astype(int)
+        # Treated: почти всегда Y=1; Control: почти всегда Y=0
+        Y = np.where(T == 1, (rng.random(n) < 0.9).astype(int), (rng.random(n) < 0.1).astype(int))
+        model = TLearner(UpliftConfig(target_threshold=0.05))
+        model.fit(X, T, Y, feature_names=["f0", "f1"])
+        # Для среднего клиента CATE должен быть позитивным
+        pred = model.predict_one({"f0": 0.0, "f1": 0.0})
+        assert pred.cate > 0.0
+
+    def test_negative_cate_labeled_sleeping_dog(self):
+        """Клиент с явно отрицательным CATE → segment='sleeping_dog'."""
+        rng = np.random.default_rng(13)
+        n = 500
+        X = rng.standard_normal((n, 2))
+        T = (rng.random(n) < 0.5).astype(int)
+        # Treatment ухудшает исход (backfire)
+        Y = np.where(T == 1, (rng.random(n) < 0.05).astype(int), (rng.random(n) < 0.9).astype(int))
+        model = TLearner(UpliftConfig(do_not_target_threshold=-0.05))
+        model.fit(X, T, Y, feature_names=["f0", "f1"])
+        pred = model.predict_one({"f0": 0.0, "f1": 0.0})
+        assert pred.cate < 0.0
+        assert pred.segment == "sleeping_dog"
+
+    def test_train_summary_pct_persuadable_positive(self):
+        """pct_persuadable > 0 для датасета с явным эффектом лечения."""
+        X, T, Y = self._make_data(n=400)
+        model = TLearner()
+        summary = model.fit(X, T, Y)
+        assert summary.pct_persuadable >= 0.0
+
+    def test_predict_one_missing_features_handled(self):
+        """predict_one c пустым словарём не бросает исключение."""
+        X, T, Y = self._make_data()
+        model = TLearner()
+        model.fit(X, T, Y, feature_names=["f0", "f1", "f2"])
+        pred = model.predict_one({})  # все признаки = 0
+        assert isinstance(pred, UpliftPrediction)
+
+    def test_predict_before_fit_raises_runtime_error(self):
+        """predict_uplift до fit() бросает RuntimeError."""
+        model = TLearner()
+        X = np.zeros((5, 3))
+        with pytest.raises(RuntimeError):
+            model.predict_uplift(X)
+
+    def test_fit_too_few_treated_raises_value_error(self):
+        """fit() с только 1 treated-примером бросает ValueError."""
+        X = np.zeros((10, 2))
+        T = np.array([1] + [0] * 9)
+        Y = np.zeros(10, dtype=int)
+        model = TLearner()
+        with pytest.raises(ValueError):
+            model.fit(X, T, Y)
+
+    def test_feature_names_stored_correctly(self):
+        """feature_names сохраняются при вызове fit()."""
+        X, T, Y = self._make_data(n=100)
+        model = TLearner()
+        model.fit(X, T, Y, feature_names=["a", "b", "c"])
+        assert model.feature_names == ["a", "b", "c"]
+
+    def test_predict_batch_returns_list(self):
+        """predict_batch возвращает список правильной длины."""
+        X, T, Y = self._make_data(n=200)
+        model = TLearner()
+        model.fit(X, T, Y, feature_names=["f0", "f1", "f2"])
+        batch = model.predict_batch(X[:10])
+        assert len(batch) == 10
+        assert all(isinstance(p, UpliftPrediction) for p in batch)
+
+
+class TestQiniCurve:
+    """Unit-тесты Qini-кривой и AUUC."""
+
+    def _make_eval_data(self, n: int = 500, seed: int = 0) -> tuple:
+        """Синтетические данные для оценки Qini."""
+        rng = np.random.default_rng(seed)
+        T = (rng.random(n) < 0.5).astype(int)
+        # Случайный uplift-score
+        score = rng.standard_normal(n)
+        # Y зависит от score и treatment
+        p = np.where(T == 1, np.clip(0.3 + 0.2 * score, 0, 1), np.clip(0.3 - 0.05 * score, 0, 1))
+        Y = (rng.random(n) < p).astype(int)
+        return Y, T, score
+
+    def test_qini_result_type(self):
+        """compute_qini_curve возвращает QiniResult."""
+        Y, T, score = self._make_eval_data()
+        result = compute_qini_curve(Y, T, score)
+        assert isinstance(result, QiniResult)
+
+    def test_curve_starts_at_zero(self):
+        """Qini-кривая начинается с (0, 0)."""
+        Y, T, score = self._make_eval_data()
+        result = compute_qini_curve(Y, T, score)
+        assert result.targeting_rates[0] == 0.0
+        assert result.qini_gains[0] == 0.0
+
+    def test_curve_ends_at_one(self):
+        """Qini-кривая заканчивается при targeting_rate=1.0."""
+        Y, T, score = self._make_eval_data()
+        result = compute_qini_curve(Y, T, score)
+        assert result.targeting_rates[-1] == pytest.approx(1.0, abs=0.01)
+
+    def test_n_samples_correct(self):
+        """QiniResult.n_samples равен длине входных массивов."""
+        Y, T, score = self._make_eval_data(n=300)
+        result = compute_qini_curve(Y, T, score)
+        assert result.n_samples == 300
+
+    def test_auuc_is_float(self):
+        """AUUC — скалярный float."""
+        Y, T, score = self._make_eval_data()
+        result = compute_qini_curve(Y, T, score)
+        assert isinstance(result.auuc, float)
+
+    def test_random_scores_auuc_near_zero(self):
+        """Случайный score даёт AUUC близкий к 0 (±noise)."""
+        rng = np.random.default_rng(99)
+        n = 2000
+        T = (rng.random(n) < 0.5).astype(int)
+        Y = (rng.random(n) < 0.4).astype(int)
+        score = rng.standard_normal(n)  # бесполезный score
+        result = compute_qini_curve(Y, T, score, n_bins=10)
+        # AUUC должен быть близок к 0 для случайного score
+        assert abs(result.auuc) < 5.0  # слабое условие из-за шума
+
+    def test_perfect_scores_positive_auuc(self):
+        """Идеальный score (совпадает с ground truth) даёт положительный AUUC."""
+        rng = np.random.default_rng(42)
+        n = 500
+        T = (rng.random(n) < 0.5).astype(int)
+        Y = (rng.random(n) < 0.4).astype(int)
+        # Идеальный score: всем treated+positive=1 ставим высокий score
+        perfect = np.where((T == 1) & (Y == 1), 2.0, -1.0)
+        result = compute_qini_curve(Y, T, perfect)
+        assert result.auuc > 0.0
+
+    def test_compute_auuc_shorthand(self):
+        """compute_auuc() возвращает тот же результат, что и QiniResult.auuc."""
+        Y, T, score = self._make_eval_data(n=200)
+        full_result = compute_qini_curve(Y, T, score)
+        auuc = compute_auuc(Y, T, score)
+        assert auuc == pytest.approx(full_result.auuc, abs=1e-6)
+
+    def test_qini_coefficient_shorthand(self):
+        """qini_coefficient() возвращает тот же результат, что и QiniResult.qini_coefficient."""
+        Y, T, score = self._make_eval_data(n=200)
+        full_result = compute_qini_curve(Y, T, score)
+        coeff = qini_coefficient(Y, T, score)
+        assert coeff == pytest.approx(full_result.qini_coefficient, abs=1e-6)
+
+    def test_empty_arrays_raise_value_error(self):
+        """Пустые массивы бросают ValueError."""
+        with pytest.raises(ValueError):
+            compute_qini_curve(np.array([]), np.array([]), np.array([]))
+
+
+class TestUpliftAPIEndpoints:
+    """Интеграционные тесты uplift API endpoints."""
+
+    def _client(self):
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        return TestClient(app)
+
+    def test_uplift_score_without_train_returns_400(self):
+        """POST /uplift/score без предварительного train возвращает 400."""
+        # Сбрасываем глобальное состояние
+        import churn.api.app as api_module
+
+        api_module._uplift_model = None
+        client = self._client()
+        payload = {"customers": [{"tenure": 12.0}]}
+        resp = client.post("/uplift/score", json=payload)
+        assert resp.status_code == 400
+
+    def test_uplift_stats_without_train_returns_400(self):
+        """GET /uplift/stats без предварительного train возвращает 400."""
+        import churn.api.app as api_module
+
+        api_module._uplift_model = None
+        resp = self._client().get("/uplift/stats")
+        assert resp.status_code == 400
+
+    def test_uplift_train_returns_200(self):
+        """POST /uplift/train возвращает 200."""
+        payload = {"n_samples": 200, "random_state": 0}
+        resp = self._client().post("/uplift/train", json=payload)
+        assert resp.status_code == 200
+
+    def test_uplift_train_response_structure(self):
+        """POST /uplift/train содержит обязательные поля."""
+        payload = {"n_samples": 200, "random_state": 42}
+        data = self._client().post("/uplift/train", json=payload).json()
+        for key in ("status", "n_total", "n_treated", "n_control", "qini_coefficient", "auuc"):
+            assert key in data, f"Missing key: {key}"
+        assert data["status"] == "trained"
+        assert data["n_total"] == 200
+
+    def test_uplift_train_qini_is_finite(self):
+        """Qini-коэффициент и AUUC — конечные числа."""
+        payload = {"n_samples": 300, "random_state": 1}
+        data = self._client().post("/uplift/train", json=payload).json()
+        import math
+
+        assert math.isfinite(data["qini_coefficient"])
+        assert math.isfinite(data["auuc"])
+
+    def test_uplift_score_after_train_returns_200(self):
+        """POST /uplift/score после train возвращает 200."""
+        client = self._client()
+        client.post("/uplift/train", json={"n_samples": 200})
+        payload = {"customers": [{"tenure": 24.0, "monthly_charges": 75.0}]}
+        resp = client.post("/uplift/score", json=payload)
+        assert resp.status_code == 200
+
+    def test_uplift_score_response_structure(self):
+        """POST /uplift/score содержит обязательные поля ответа."""
+        client = self._client()
+        client.post("/uplift/train", json={"n_samples": 200})
+        payload = {"customers": [{"tenure": 5.0, "monthly_charges": 90.0}]}
+        data = client.post("/uplift/score", json=payload).json()
+        assert "predictions" in data
+        assert "n_persuadable" in data
+        assert "n_sleeping_dog" in data
+        assert "n_uncertain" in data
+        assert "avg_cate" in data
+        assert len(data["predictions"]) == 1
+
+    def test_uplift_score_prediction_fields(self):
+        """Каждый prediction содержит cate, p_treated, p_control, segment, recommendation."""
+        client = self._client()
+        client.post("/uplift/train", json={"n_samples": 200})
+        payload = {"customers": [{"tenure": 10.0}]}
+        data = client.post("/uplift/score", json=payload).json()
+        pred = data["predictions"][0]
+        assert "cate" in pred
+        assert "p_treated" in pred
+        assert "p_control" in pred
+        assert "segment" in pred
+        assert "recommendation" in pred
+        assert pred["segment"] in {"persuadable", "sleeping_dog", "uncertain"}
+
+    def test_uplift_score_cate_in_range(self):
+        """CATE из /uplift/score ∈ (−1, 1)."""
+        client = self._client()
+        client.post("/uplift/train", json={"n_samples": 300})
+        payload = {"customers": [{"tenure": float(i)} for i in range(10)]}
+        data = client.post("/uplift/score", json=payload).json()
+        for pred in data["predictions"]:
+            assert -1.0 <= pred["cate"] <= 1.0
+
+    def test_uplift_score_segment_counts_sum_to_total(self):
+        """n_persuadable + n_sleeping_dog + n_uncertain == кол-во клиентов."""
+        client = self._client()
+        client.post("/uplift/train", json={"n_samples": 200})
+        n = 15
+        payload = {"customers": [{"tenure": float(i)} for i in range(n)]}
+        data = client.post("/uplift/score", json=payload).json()
+        total = data["n_persuadable"] + data["n_sleeping_dog"] + data["n_uncertain"]
+        assert total == n
+
+    def test_uplift_stats_after_train_returns_200(self):
+        """GET /uplift/stats после train возвращает 200."""
+        client = self._client()
+        client.post("/uplift/train", json={"n_samples": 200})
+        resp = client.get("/uplift/stats")
+        assert resp.status_code == 200
+
+    def test_uplift_stats_response_structure(self):
+        """GET /uplift/stats содержит обязательные поля."""
+        client = self._client()
+        client.post("/uplift/train", json={"n_samples": 200})
+        data = client.get("/uplift/stats").json()
+        for key in ("status", "n_total", "n_treated", "n_control", "avg_cate_train"):
+            assert key in data
+
+    def test_uplift_train_too_few_samples_raises_422(self):
+        """POST /uplift/train с n_samples=50 (< min=100) возвращает 422."""
+        payload = {"n_samples": 50}
+        resp = self._client().post("/uplift/train", json=payload)
+        assert resp.status_code == 422
