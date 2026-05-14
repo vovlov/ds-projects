@@ -46,6 +46,7 @@ def graph() -> LineageGraph:
 def client() -> TestClient:
     """FastAPI тест-клиент / FastAPI test client."""
     from quality.api.app import app
+
     return TestClient(app)
 
 
@@ -298,9 +299,14 @@ class TestLineageTracker:
     def test_summary(self, tracker: LineageTracker) -> None:
         """summary возвращает корректную статистику / summary returns correct stats."""
         tracker.record("ns", "job", event_type="START", run_id="r1")
-        tracker.record("ns", "job", event_type="COMPLETE", run_id="r1",
-                       inputs=[{"namespace": "db", "name": "src"}],
-                       outputs=[{"namespace": "db", "name": "dst"}])
+        tracker.record(
+            "ns",
+            "job",
+            event_type="COMPLETE",
+            run_id="r1",
+            inputs=[{"namespace": "db", "name": "src"}],
+            outputs=[{"namespace": "db", "name": "dst"}],
+        )
 
         s = tracker.summary()
         assert s["total_events"] == 2
