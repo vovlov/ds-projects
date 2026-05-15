@@ -559,6 +559,28 @@
       134/134 тестов зелёных (+25, было 109).
       Источники: Li et al. 2010 WWW (LinUCB), eugeneyan.com/writing/bandits/,
         Alibaba PAI-Rec LinUCB docs, Kameleoon contextual bandits guide 2026.
+- [x] Corrective RAG (CRAG) для RAG Enterprise (Project 02) — 2026-05-15
+      rag/retrieval/grader.py: DocumentGrader (lexical mode в CI, LLM mode с API-ключом).
+        GradeResult dataclass: relevance_score [0,1], is_relevant, method.
+        _lexical_score(): recall-ориентированный overlap токенов запроса с документом.
+        Стоп-слова исключены — не несут discriminative information.
+        Graceful degradation: LLM → lexical fallback при любой ошибке API.
+      rag/retrieval/corrective.py: CorrectiveRetriever (CRAG orchestrator).
+        CorrectiveResult dataclass: docs, grades, action, query_rewritten, n_relevant, n_total.
+        retrieve_and_grade() → 3-ветки:
+          "use_all": все документы прошли grading → прямой путь.
+          "filter_relevant": часть нерелевантна → отфильтровать subset.
+          "rewrite_and_retry": нет релевантных → keyword query → retry retrieval.
+        _rewrite_query(): стоп-слова удалены, ключевые термины дедуплицированы.
+      rag/api/app.py: CorrectiveQueryResponse dataclass (расширяет QueryResponse
+        полями crag_action/query_rewritten/n_relevant/n_total/relevance_scores),
+        POST /query/corrective endpoint с полным CRAG audit trail.
+      93/93 тестов зелёных (+25 новых: TestDocumentGrader×12, TestCorrectiveRetrieval×8,
+        TestCorrectiveAPIEndpoint×5).
+      Улучшение: CRAG снижает hallucination rate через фильтрацию нерелевантных документов
+        перед generation — ключевой паттерн production RAG 2026.
+      Источники: Yan et al. 2024 (CRAG, arxiv 2401.15884), Asai et al. 2023 (Self-RAG),
+        neuramonks.com "Standard RAG Is Dead 2026", Microsoft Azure RAG Shifts 2026.
 
 ---
 

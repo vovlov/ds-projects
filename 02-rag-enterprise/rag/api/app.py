@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from ..generation.chain import generate_answer, generate_answer_with_gate
 from ..generation.stream import stream_answer
 from ..ingestion.loader import chunk_documents, load_documents
+from ..retrieval.corrective import CorrectiveRetriever
 from ..retrieval.hybrid import HybridIndex, hybrid_search
 from ..retrieval.store import get_client, get_or_create_collection, index_chunks
 
@@ -24,6 +25,14 @@ DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "documents"
 _collection = None
 _hybrid_index: HybridIndex | None = None
 _indexed_chunks: list[dict] = []
+_corrective_retriever: CorrectiveRetriever | None = None
+
+
+def _get_corrective_retriever() -> CorrectiveRetriever:
+    global _corrective_retriever
+    if _corrective_retriever is None:
+        _corrective_retriever = CorrectiveRetriever()
+    return _corrective_retriever
 
 
 def _get_collection():
@@ -62,6 +71,23 @@ class QueryResponse(BaseModel):
     is_faithful: bool
     faithfulness_method: str
     retrieval_method: str
+
+
+class CorrectiveQueryResponse(BaseModel):
+    """Расширенный ответ CRAG с информацией о grading и query rewriting."""
+
+    answer: str
+    sources: list[str]
+    confidence_score: float
+    is_faithful: bool
+    faithfulness_method: str
+    retrieval_method: str
+    # CRAG-specific
+    crag_action: str  # "use_all" | "filter_relevant" | "rewrite_and_retry"
+    query_rewritten: str | None
+    n_relevant: int
+    n_total: int
+    relevance_scores: list[float]
 
 
 @app.get("/health")
@@ -185,6 +211,84 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/query/corrective", response_model=CorrectiveQueryResponse)
+def query_corrective(request: QueryRequest) -> CorrectiveQueryResponse:
+    """CRAG: Corrective RAG с grading и автоматическим query rewriting.
+
+    Алгоритм (Yan et al. 2024, arxiv 2401.15884):
+    1. Retrieve top-k документов (hybrid или semantic).
+    2. Grade: каждый документ получает relevance_score относительно запроса.
+    3. Act:
+       - use_all: все документы релевантны → прямая generation.
+       - filter_relevant: часть нерелевантна → отфильтровать перед generation.
+       - rewrite_and_retry: нет релевантных → переписать запрос → retry retrieval.
+
+    Возвращает расширенный ответ с crag_action, query_rewritten, relevance_scores
+    для мониторинга качества retrieval в production.
+    """
+    collection = _get_collection()
+    if collection.count() == 0:
+        return CorrectiveQueryResponse(
+            answer="No documents indexed. Please add documents to data/documents/ and run /index.",
+            sources=[],
+            confidence_score=0.0,
+            is_faithful=False,
+            faithfulness_method="lexical",
+            retrieval_method="corrective",
+            crag_action="use_all",
+            query_rewritten=None,
+            n_relevant=0,
+            n_total=0,
+            relevance_scores=[],
+        )
+
+    corrective_result = _get_corrective_retriever().retrieve_and_grade(
+        query=request.question,
+        collection=collection,
+        hybrid_index=_hybrid_index,
+        n_results=request.n_results,
+    )
+
+    context = corrective_result.docs
+
+    if not context:
+        gen_result = {
+            "answer": "No relevant documents found for this query.",
+            "sources": [],
+            "confidence_score": 0.0,
+            "is_faithful": False,
+            "faithfulness_method": "lexical",
+        }
+    elif request.check_faithfulness:
+        gen_result = generate_answer_with_gate(
+            query=request.question,
+            context_chunks=context,
+            faithfulness_threshold=request.faithfulness_threshold,
+        )
+    else:
+        raw = generate_answer(request.question, context)
+        gen_result = {
+            **raw,
+            "confidence_score": 1.0,
+            "is_faithful": True,
+            "faithfulness_method": "none",
+        }  # noqa: E501
+
+    return CorrectiveQueryResponse(
+        answer=gen_result["answer"],
+        sources=gen_result.get("sources", []),
+        confidence_score=gen_result["confidence_score"],
+        is_faithful=gen_result["is_faithful"],
+        faithfulness_method=gen_result["faithfulness_method"],
+        retrieval_method="corrective",
+        crag_action=corrective_result.action,
+        query_rewritten=corrective_result.query_rewritten,
+        n_relevant=corrective_result.n_relevant,
+        n_total=corrective_result.n_total,
+        relevance_scores=[g.relevance_score for g in corrective_result.grades],
     )
 
 
