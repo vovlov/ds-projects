@@ -854,3 +854,415 @@ class TestStreamingRAG:
 
         token_events = [e for e in events if e["type"] == "token"]
         assert len(token_events) > 0
+
+
+class TestDocumentGrader:
+    """Тесты Document Grader для CRAG.
+
+    Все тесты работают в lexical-режиме (без ANTHROPIC_API_KEY).
+    Проверяют корректность оценки релевантности документов запросу.
+    """
+
+    RELEVANT_DOC = {
+        "text": "VPN is required for all remote work. Use company VPN when accessing systems.",
+        "metadata": {"source": "policy.txt"},
+    }
+    IRRELEVANT_DOC = {
+        "text": "The cafeteria menu today includes pasta, salad, and dessert options.",
+        "metadata": {"source": "menu.txt"},
+    }
+    QUERY = "What are the VPN requirements for remote work?"
+
+    def test_grade_result_score_in_range(self):
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader()
+        result = grader.grade_document(self.QUERY, self.RELEVANT_DOC)
+        assert 0.0 <= result.relevance_score <= 1.0
+
+    def test_relevant_doc_scores_higher_than_irrelevant(self):
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader()
+        rel = grader.grade_document(self.QUERY, self.RELEVANT_DOC)
+        irr = grader.grade_document(self.QUERY, self.IRRELEVANT_DOC)
+        assert rel.relevance_score > irr.relevance_score, (
+            f"Relevant doc should score higher: {rel.relevance_score} vs {irr.relevance_score}"
+        )
+
+    def test_grade_result_method_is_lexical_without_api(self):
+        """Без ANTHROPIC_API_KEY используется lexical-режим."""
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader()
+        result = grader.grade_document(self.QUERY, self.RELEVANT_DOC)
+        assert result.method == "lexical"
+
+    def test_grade_result_has_doc_reference(self):
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader()
+        result = grader.grade_document(self.QUERY, self.RELEVANT_DOC)
+        assert result.doc is self.RELEVANT_DOC
+
+    def test_empty_doc_text_scores_zero(self):
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader()
+        empty_doc = {"text": "", "metadata": {}}
+        result = grader.grade_document(self.QUERY, empty_doc)
+        assert result.relevance_score == 0.0
+        assert result.is_relevant is False
+
+    def test_threshold_high_makes_not_relevant(self):
+        """Высокий порог делает даже хороший документ not-relevant."""
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader(threshold=0.99)
+        result = grader.grade_document(self.QUERY, self.RELEVANT_DOC)
+        assert result.is_relevant is False
+
+    def test_threshold_zero_makes_nonempty_relevant(self):
+        """Нулевой порог: непустой документ всегда релевантен."""
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader(threshold=0.0)
+        result = grader.grade_document(self.QUERY, self.RELEVANT_DOC)
+        assert result.is_relevant is True
+
+    def test_grade_documents_returns_all_grades(self):
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader()
+        docs = [self.RELEVANT_DOC, self.IRRELEVANT_DOC]
+        grades = grader.grade_documents(self.QUERY, docs)
+        assert len(grades) == 2
+
+    def test_grade_documents_empty_list(self):
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader()
+        grades = grader.grade_documents(self.QUERY, [])
+        assert grades == []
+
+    def test_filter_relevant_keeps_relevant(self):
+        """filter_relevant возвращает только документы с score >= threshold."""
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader(threshold=0.1)
+        docs = [self.RELEVANT_DOC, self.IRRELEVANT_DOC]
+        filtered = grader.filter_relevant(self.QUERY, docs)
+        texts = [d["text"] for d in filtered]
+        assert any("vpn" in t.lower() for t in texts), "VPN doc should be in filtered results"
+
+    def test_tokenize_handles_special_chars(self):
+        """Токенизация корректно обрабатывает спецсимволы."""
+        from rag.retrieval.grader import _tokenize
+
+        tokens = _tokenize("VPN-required! (remote-work)")
+        assert "vpn" in tokens
+        assert "required" in tokens
+        assert "remote" in tokens
+
+    def test_stop_words_excluded_from_scoring(self):
+        """Запрос только из стоп-слов → score = 0."""
+        from rag.retrieval.grader import DocumentGrader
+
+        grader = DocumentGrader()
+        result = grader.grade_document("what is the", self.RELEVANT_DOC)
+        assert result.relevance_score == 0.0
+
+
+class TestCorrectiveRetrieval:
+    """Тесты CorrectiveRetriever — оркестратора CRAG.
+
+    Используют mock ChromaDB collection без реальных данных.
+    """
+
+    def _make_doc(self, text: str, source: str = "test.txt") -> dict:
+        return {"text": text, "metadata": {"source": source}}
+
+    def test_rewrite_query_removes_stop_words(self):
+        from rag.retrieval.corrective import CorrectiveRetriever
+
+        retriever = CorrectiveRetriever()
+        rewritten = retriever._rewrite_query("what are the VPN requirements")
+        assert "vpn" in rewritten.lower()
+        assert "requirements" in rewritten.lower()
+        assert "what" not in rewritten.lower()
+        assert "the" not in rewritten.lower()
+
+    def test_rewrite_query_returns_string(self):
+        from rag.retrieval.corrective import CorrectiveRetriever
+
+        retriever = CorrectiveRetriever()
+        result = retriever._rewrite_query("how do I configure VPN access for remote work?")
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_rewrite_query_deduplicates_keywords(self):
+        from rag.retrieval.corrective import CorrectiveRetriever
+
+        retriever = CorrectiveRetriever()
+        rewritten = retriever._rewrite_query("VPN vpn access VPN")
+        assert rewritten.lower().count("vpn") == 1
+
+    def test_corrective_result_empty_collection(self):
+        """Пустая коллекция → action='use_all', docs=[]."""
+        from unittest.mock import MagicMock
+
+        from rag.retrieval.corrective import CorrectiveRetriever
+
+        mock_collection = MagicMock()
+        mock_collection.query.return_value = {
+            "documents": [[]],
+            "metadatas": [[]],
+            "distances": [[]],
+        }
+
+        retriever = CorrectiveRetriever()
+        result = retriever.retrieve_and_grade("test query", mock_collection)
+        assert result.action == "use_all"
+        assert result.docs == []
+        assert result.grades == []
+
+    def test_corrective_result_has_required_fields(self):
+        from unittest.mock import MagicMock
+
+        from rag.retrieval.corrective import CorrectiveResult, CorrectiveRetriever
+
+        mock_collection = MagicMock()
+        mock_collection.query.return_value = {
+            "documents": [[]],
+            "metadatas": [[]],
+            "distances": [[]],
+        }
+
+        retriever = CorrectiveRetriever()
+        result = retriever.retrieve_and_grade("query", mock_collection)
+        assert isinstance(result, CorrectiveResult)
+        assert hasattr(result, "docs")
+        assert hasattr(result, "grades")
+        assert hasattr(result, "action")
+        assert hasattr(result, "n_relevant")
+        assert hasattr(result, "n_total")
+        assert hasattr(result, "query_rewritten")
+
+    def test_action_filter_relevant_when_partial(self):
+        """Часть документов нерелевантна → action='filter_relevant'."""
+        from unittest.mock import MagicMock, patch
+
+        from rag.retrieval.corrective import CorrectiveRetriever
+        from rag.retrieval.grader import DocumentGrader, GradeResult
+
+        relevant_doc = self._make_doc("VPN remote work policy required")
+        irrelevant_doc = self._make_doc("The cafeteria serves lunch daily")
+
+        grade_rel = GradeResult(doc=relevant_doc, relevance_score=0.8, is_relevant=True)
+        grade_irr = GradeResult(doc=irrelevant_doc, relevance_score=0.0, is_relevant=False)
+
+        with patch.object(DocumentGrader, "grade_documents", return_value=[grade_rel, grade_irr]):
+            mock_collection = MagicMock()
+            mock_collection.query.return_value = {
+                "documents": [[relevant_doc["text"], irrelevant_doc["text"]]],
+                "metadatas": [[relevant_doc["metadata"], irrelevant_doc["metadata"]]],
+                "distances": [[0.1, 0.9]],
+            }
+
+            retriever = CorrectiveRetriever()
+            result = retriever.retrieve_and_grade("VPN requirements", mock_collection)
+
+        assert result.action == "filter_relevant"
+        assert len(result.docs) == 1
+        assert result.n_relevant == 1
+        assert result.n_total == 2
+
+    def test_action_use_all_when_all_relevant(self):
+        """Все документы релевантны → action='use_all'."""
+        from unittest.mock import MagicMock, patch
+
+        from rag.retrieval.corrective import CorrectiveRetriever
+        from rag.retrieval.grader import DocumentGrader, GradeResult
+
+        doc1 = self._make_doc("VPN is required for remote work.")
+        doc2 = self._make_doc("Employees must use VPN when outside office.")
+
+        grade1 = GradeResult(doc=doc1, relevance_score=0.9, is_relevant=True)
+        grade2 = GradeResult(doc=doc2, relevance_score=0.7, is_relevant=True)
+
+        with patch.object(DocumentGrader, "grade_documents", return_value=[grade1, grade2]):
+            mock_collection = MagicMock()
+            mock_collection.query.return_value = {
+                "documents": [[doc1["text"], doc2["text"]]],
+                "metadatas": [[doc1["metadata"], doc2["metadata"]]],
+                "distances": [[0.1, 0.2]],
+            }
+
+            retriever = CorrectiveRetriever()
+            result = retriever.retrieve_and_grade("VPN requirements", mock_collection)
+
+        assert result.action == "use_all"
+        assert len(result.docs) == 2
+        assert result.n_relevant == 2
+
+    def test_action_rewrite_and_retry_when_none_relevant(self):
+        """Нет релевантных документов → action='rewrite_and_retry'."""
+        from unittest.mock import MagicMock, patch
+
+        from rag.retrieval.corrective import CorrectiveRetriever
+        from rag.retrieval.grader import DocumentGrader, GradeResult
+
+        doc = self._make_doc("Completely unrelated cafeteria menu content")
+
+        grade_irr = GradeResult(doc=doc, relevance_score=0.0, is_relevant=False)
+        grade_irr2 = GradeResult(doc=doc, relevance_score=0.0, is_relevant=False)
+
+        with patch.object(
+            DocumentGrader, "grade_documents", side_effect=[[grade_irr], [grade_irr2]]
+        ):
+            mock_collection = MagicMock()
+            mock_collection.query.return_value = {
+                "documents": [[doc["text"]]],
+                "metadatas": [[doc["metadata"]]],
+                "distances": [[0.9]],
+            }
+
+            retriever = CorrectiveRetriever()
+            result = retriever.retrieve_and_grade("VPN security requirements", mock_collection)
+
+        assert result.action == "rewrite_and_retry"
+        assert result.query_rewritten is not None
+        rewritten_lower = result.query_rewritten.lower()
+        assert "vpn" in rewritten_lower or "security" in rewritten_lower
+
+
+class TestCorrectiveAPIEndpoint:
+    """Тесты CRAG endpoint POST /query/corrective."""
+
+    def test_corrective_endpoint_no_documents_returns_200(self):
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
+
+        with patch("rag.api.app._get_collection", return_value=mock_collection):
+            client = TestClient(app)
+            resp = client.post(
+                "/query/corrective",
+                json={"question": "What is the VPN policy?"},
+            )
+
+        assert resp.status_code == 200
+
+    def test_corrective_response_has_crag_fields(self):
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
+
+        with patch("rag.api.app._get_collection", return_value=mock_collection):
+            client = TestClient(app)
+            resp = client.post(
+                "/query/corrective",
+                json={"question": "What is the VPN policy?"},
+            )
+
+        data = resp.json()
+        assert "crag_action" in data
+        assert "query_rewritten" in data
+        assert "n_relevant" in data
+        assert "n_total" in data
+        assert "relevance_scores" in data
+
+    def test_corrective_retrieval_method_field(self):
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
+
+        with patch("rag.api.app._get_collection", return_value=mock_collection):
+            client = TestClient(app)
+            resp = client.post(
+                "/query/corrective",
+                json={"question": "Vacation policy?"},
+            )
+
+        assert resp.json()["retrieval_method"] == "corrective"
+
+    def test_corrective_no_documents_state(self):
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
+
+        with patch("rag.api.app._get_collection", return_value=mock_collection):
+            client = TestClient(app)
+            resp = client.post(
+                "/query/corrective",
+                json={"question": "Test question?"},
+            )
+
+        data = resp.json()
+        assert data["n_total"] == 0
+        assert data["relevance_scores"] == []
+
+    def test_corrective_with_mock_retriever_returns_grades(self):
+        """С mock retriever ответ содержит корректные оценки документов."""
+        from unittest.mock import MagicMock, patch
+
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        mock_context = [
+            {"text": "VPN allows secure remote access.", "metadata": {"source": "vpn.txt"}},
+            {"text": "Remote work policy.", "metadata": {"source": "policy.txt"}},
+        ]
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 5
+
+        with (
+            patch("rag.api.app._get_collection", return_value=mock_collection),
+            patch("rag.api.app._get_corrective_retriever") as mock_factory,
+        ):
+            from rag.retrieval.corrective import CorrectiveResult
+            from rag.retrieval.grader import GradeResult
+
+            grades = [
+                GradeResult(doc=mock_context[0], relevance_score=0.75, is_relevant=True),
+                GradeResult(doc=mock_context[1], relevance_score=0.5, is_relevant=True),
+            ]
+            mock_result = CorrectiveResult(
+                docs=mock_context,
+                grades=grades,
+                action="use_all",
+                n_relevant=2,
+                n_total=2,
+            )
+            mock_retriever = MagicMock()
+            mock_retriever.retrieve_and_grade.return_value = mock_result
+            mock_factory.return_value = mock_retriever
+
+            client = TestClient(app)
+            resp = client.post(
+                "/query/corrective",
+                json={"question": "What is the VPN policy?"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["n_relevant"] == 2
+        assert data["n_total"] == 2
+        assert len(data["relevance_scores"]) == 2
+        assert data["crag_action"] == "use_all"

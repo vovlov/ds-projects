@@ -401,9 +401,7 @@ def run_regression_suite(
             "n": nd,
             "avg_faithfulness": round(sum(v.faithfulness for v in dverdicts) / nd, 3),
             "avg_helpfulness": round(sum(v.helpfulness for v in dverdicts) / nd, 3),
-            "avg_false_positive_rate": round(
-                sum(v.false_positive_rate for v in dverdicts) / nd, 3
-            ),
+            "avg_false_positive_rate": round(sum(v.false_positive_rate for v in dverdicts) / nd, 3),
             "avg_overall_score": round(sum(v.overall_score for v in dverdicts) / nd, 3),
         }
 

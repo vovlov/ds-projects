@@ -11,11 +11,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class ColumnType(str, Enum):
+class ColumnType(StrEnum):
     """Поддерживаемые типы столбцов / Supported column types."""
 
     INTEGER = "integer"
@@ -26,7 +26,7 @@ class ColumnType(str, Enum):
     UNKNOWN = "unknown"
 
 
-class Compatibility(str, Enum):
+class Compatibility(StrEnum):
     """
     Режим совместимости схем (Confluent-совместимая семантика).
     Schema compatibility mode (Confluent-compatible semantics).

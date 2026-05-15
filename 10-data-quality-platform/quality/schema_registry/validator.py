@@ -78,7 +78,7 @@ def validate_dataframe_against_schema(
     schema_cols = schema.column_map()
 
     # 1. Проверить наличие обязательных столбцов / Check required columns present
-    for col_name, col_spec in schema_cols.items():
+    for col_name, _col_spec in schema_cols.items():
         total_count += 1
         if col_name not in df.columns:
             issues.append(
