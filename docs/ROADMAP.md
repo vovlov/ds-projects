@@ -559,6 +559,25 @@
       134/134 тестов зелёных (+25, было 109).
       Источники: Li et al. 2010 WWW (LinUCB), eugeneyan.com/writing/bandits/,
         Alibaba PAI-Rec LinUCB docs, Kameleoon contextual bandits guide 2026.
+- [x] Causal Uplift Modeling (T-Learner CATE) для Churn (Project 01) — 2026-05-16
+      churn/causal/uplift.py: TLearnerUplift — два независимых GradientBoostingClassifier
+        (treatment/control), CATE = μ₁(X) - μ₀(X), Persuasion Matrix сегментация:
+        Persuadable (CATE < -threshold) / Sure Thing / Lost Cause / Sleeping Dog
+        (CATE > threshold — скидка УВЕЛИЧИВАЕТ отток). compute_qini(): Qini-коэффициент
+        (Radcliffe 2007) — площадь между кривой Qini и random baseline (AUUC_model - AUUC_random).
+        numpy-trapezoid AUC без внешних зависимостей. summarize_uplift(): бизнес-метрики:
+        n_persuadable, targeting_uplift (средний CATE persuadable клиентов).
+      churn/api/app.py: 3 новых endpoint:
+        POST /uplift/train (обучить T-Learner на исторических данных кампании),
+        POST /uplift/predict (CATE + сегмент для batch клиентов),
+        GET  /uplift/segments (описание сегментов + параметры модели).
+      39 новых тестов: TestTLearnerUplift×16, TestQiniCoefficient×4,
+        TestSummarizeUplift×5, TestUpliftAPIEndpoints×14.
+      199/199 тестов зелёных (было 160). Graceful fallback без sklearn в CI.
+      Бизнес-эффект: таргетировать только Persuadable сэкономит ~40% бюджета retention-кампании
+        (вместо всех high-churn клиентов → только тех, кому скидка реально помогает).
+      Источники: Künzel et al. 2019 PNAS (Metalearners for HCTE), Radcliffe 2007 (Qini),
+        arxiv 2604.06123 (Large-Scale Meta-Learner Comparison 2026), causalml docs.
 
 ---
 

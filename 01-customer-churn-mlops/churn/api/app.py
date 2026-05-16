@@ -892,3 +892,203 @@ def online_reset() -> dict[str, str]:
         IncrementalConfig(snapshot_interval=100, adwin_delta=0.002)
     )
     return {"status": "reset", "message": "Online model reset to initial state."}
+
+
+# ---------------------------------------------------------------------------
+# Causal Uplift Modeling endpoints (T-Learner, CATE, Persuasion Matrix)
+# ---------------------------------------------------------------------------
+
+from ..causal.uplift import (  # noqa: E402
+    TLearnerUplift,
+    UpliftConfig,
+    summarize_uplift,
+)
+from ..causal.uplift import (
+    is_available as uplift_available,
+)
+
+# Глобальный T-Learner: обучается через POST /uplift/train
+# Global T-Learner: trained via POST /uplift/train
+_uplift_model: TLearnerUplift | None = None
+
+
+def _get_uplift_model() -> TLearnerUplift:
+    """Вернуть обученную uplift-модель или поднять 400."""
+    if _uplift_model is None:
+        raise HTTPException(400, "Uplift model not trained. Call POST /uplift/train first.")
+    return _uplift_model
+
+
+class UpliftTrainRequest(BaseModel):
+    """Запрос на обучение T-Learner.
+
+    T-Learner training request with historical campaign data.
+    """
+
+    features: list[list[float]] = Field(
+        ..., description="Матрица признаков (n_samples × n_features)"
+    )
+    labels: list[int] = Field(..., description="Метки оттока: 1=ушёл, 0=остался")
+    treatment: list[int] = Field(
+        ..., description="Флаг вмешательства: 1=получил скидку, 0=контроль"
+    )
+    n_estimators: int = Field(100, ge=10, le=500)
+    max_depth: int = Field(4, ge=1, le=8)
+    persuadable_threshold: float = Field(
+        0.05, ge=0.01, le=0.3, description="Минимальный |CATE| для сегмента Persuadable"
+    )
+
+
+class UpliftTrainResponse(BaseModel):
+    """Ответ после обучения модели."""
+
+    status: str
+    n_treatment: int
+    n_control: int
+    model_params: dict[str, Any]
+    sklearn_available: bool
+
+
+class UpliftPredictRequest(BaseModel):
+    """Запрос на предсказание CATE для batch клиентов."""
+
+    features: list[list[float]] = Field(
+        ..., description="Матрица признаков (n_samples × n_features)"
+    )
+
+
+class UpliftPredictItem(BaseModel):
+    """Результат предсказания для одного клиента."""
+
+    cate: float
+    p_churn_treatment: float
+    p_churn_control: float
+    segment: str
+
+
+class UpliftPredictResponse(BaseModel):
+    """Ответ batch-предсказания с бизнес-метриками."""
+
+    predictions: list[UpliftPredictItem]
+    n_persuadable: int
+    n_sure_thing: int
+    n_lost_cause: int
+    n_sleeping_dog: int
+    avg_cate: float
+    targeting_uplift: float
+
+
+@app.post("/uplift/train", response_model=UpliftTrainResponse)
+def uplift_train(request: UpliftTrainRequest) -> UpliftTrainResponse:
+    """Обучить T-Learner на исторических данных кампании.
+
+    Train a T-Learner on historical campaign data.
+
+    Два GBM обучаются независимо: один на treatment-группе (клиенты
+    получившие скидку), другой на control-группе. CATE = μ₁(X) - μ₀(X).
+
+    Two GBMs are trained independently: one on the treatment group (customers
+    who received a discount), one on the control group. CATE = μ₁(X) - μ₀(X).
+
+    Требует ≥10 примеров в каждой группе. sklearn должен быть установлен.
+    Requires ≥10 samples per group. sklearn must be installed.
+    """
+    global _uplift_model
+
+    if not uplift_available():
+        raise HTTPException(503, "sklearn not installed. Cannot train uplift model.")
+
+    import numpy as np
+
+    X = np.array(request.features, dtype=float)
+    y = np.array(request.labels, dtype=int)
+    t = np.array(request.treatment, dtype=int)
+
+    if len(X) != len(y) or len(X) != len(t):
+        raise HTTPException(422, "features, labels, treatment must have equal length.")
+
+    config = UpliftConfig(
+        n_estimators=request.n_estimators,
+        max_depth=request.max_depth,
+        persuadable_threshold=-request.persuadable_threshold,
+    )
+
+    try:
+        model = TLearnerUplift(config)
+        model.fit(X, y, t)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+
+    _uplift_model = model
+
+    return UpliftTrainResponse(
+        status="trained",
+        n_treatment=int(t.sum()),
+        n_control=int((t == 0).sum()),
+        model_params=model.get_params(),
+        sklearn_available=True,
+    )
+
+
+@app.post("/uplift/predict", response_model=UpliftPredictResponse)
+def uplift_predict(request: UpliftPredictRequest) -> UpliftPredictResponse:
+    """Предсказать CATE и сегмент для каждого клиента.
+
+    Predict CATE and Persuasion Matrix segment for each customer.
+
+    CATE < 0 означает: скидка снизит вероятность оттока.
+    Segment = persuadable → оптимальная цель для retention-кампании.
+
+    CATE < 0 means: the discount will reduce churn probability.
+    Segment = persuadable → optimal target for retention campaigns.
+
+    Окупаемость ROI: таргетировать только persuadable клиентов
+    экономит до 40% бюджета кампании (Radcliffe 2007).
+    ROI: targeting only persuadable saves up to 40% of campaign budget.
+    """
+    import numpy as np
+
+    model = _get_uplift_model()
+    X = np.array(request.features, dtype=float)
+
+    predictions = model.predict_segment(X)
+    result = summarize_uplift(predictions)
+
+    return UpliftPredictResponse(
+        predictions=[
+            UpliftPredictItem(
+                cate=p.cate,
+                p_churn_treatment=p.p_churn_treatment,
+                p_churn_control=p.p_churn_control,
+                segment=p.segment.value,
+            )
+            for p in result.predictions
+        ],
+        n_persuadable=result.n_persuadable,
+        n_sure_thing=result.n_sure_thing,
+        n_lost_cause=result.n_lost_cause,
+        n_sleeping_dog=result.n_sleeping_dog,
+        avg_cate=result.avg_cate,
+        targeting_uplift=result.targeting_uplift,
+    )
+
+
+@app.get("/uplift/segments")
+def uplift_segments() -> dict[str, Any]:
+    """Статистика по сегментам последнего batch-предсказания.
+
+    Segment statistics for business reporting and Grafana dashboards.
+    Используется для планирования бюджета retention-кампаний.
+    """
+    model = _get_uplift_model()
+    return {
+        "model_params": model.get_params(),
+        "sklearn_available": uplift_available(),
+        "segments": {
+            "persuadable": "Таргетировать — discount снижает отток",
+            "sure_thing": "Не таргетировать — уйдут с или без скидки (бюджет впустую)",
+            "lost_cause": "Не таргетировать — скидка не поможет",
+            "sleeping_dog": "Избегать — скидка УВЕЛИЧИВАЕТ вероятность оттока",
+        },
+        "tip": "Используйте POST /uplift/predict для сегментации новых клиентов.",
+    }
