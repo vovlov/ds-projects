@@ -560,6 +560,30 @@
       Источники: Li et al. 2010 WWW (LinUCB), eugeneyan.com/writing/bandits/,
         Alibaba PAI-Rec LinUCB docs, Kameleoon contextual bandits guide 2026.
 - [x] Causal Uplift Modeling (T-Learner CATE) для Churn (Project 01) — 2026-05-16
+- [x] Isolation Forest + Feature Explainability для Anomaly Detection (Project 05) — 2026-05-17
+      anomaly/models/isolation.py: IsolationForestDetector с per-feature вкладом через
+        маргинальную нейтрализацию (заменяем признак на train mean → delta score = вклад).
+        IsolationConfig/IsolationTrainResult/IsolationResult dataclasses.
+        _normalize_score(): min-max нормализация по train-диапазону → anomaly_score ∈ [0,1].
+        is_available() graceful fallback без sklearn.
+      anomaly/api/app.py: 3 новых endpoint:
+        POST /isolation/train (обучить на нормальных данных, min 20 точек),
+        POST /isolation/detect (детекция + feature_contributions + top_feature),
+        GET  /isolation/status (состояние модели для health-check).
+        GET /health расширен полем isolation_fitted.
+      27 новых тестов: TestIsolationForestDetector×14 (fit, is_fitted, detect_length,
+        binary_bool, score_range, contributions_sum, feature_names, top_feature_valid,
+        anomaly_higher_score, detect_before_fit_raises, low_anomaly_rate, injected_detected,
+        train_result_fields), TestIsolationAPIEndpoints×13 (train 200, response_structure,
+        n_samples, detect_400_before_train, detect_200_after_train, response_structure,
+        feature_contributions_present, rate_range, status_before, status_after,
+        health_field, full_cycle, custom_params).
+      128/128 тестов зелёных (+27, было 101).
+      Преимущество: Isolation Forest ловит многомерные аномалии (CPU spike + latency + requests
+        одновременно), где унивариатный Z-score упускает паттерн. top_feature ускоряет
+        SRE-диагностику ("главная причина — latency" вместо ручного анализа).
+      Источники: Liu et al. 2008 ICDM (Isolation Forest), JetBrains PyCharm Blog 2025,
+        arxiv 2503.13195 (AML-based anomaly 2025).
       churn/causal/uplift.py: TLearnerUplift — два независимых GradientBoostingClassifier
         (treatment/control), CATE = μ₁(X) - μ₀(X), Persuasion Matrix сегментация:
         Persuadable (CATE < -threshold) / Sure Thing / Lost Cause / Sleeping Dog

@@ -9,13 +9,16 @@ from pydantic import BaseModel, Field
 
 from ..metrics.prometheus_exporter import AnomalyMetrics, is_available
 from ..models.detector import MultiMetricDetector
+from ..models.isolation import IsolationConfig, IsolationForestDetector
+from ..models.isolation import is_available as isolation_available
 from ..models.lstm_autoencoder import LSTMConfig, create_autoencoder
 
 app = FastAPI(
     title="Realtime Anomaly Detection API",
     description="Detect anomalies in metric time series with Prometheus observability, "
-    "MMD drift detection, and LSTM/ESN autoencoder serving",
-    version="4.0.0",
+    "MMD drift detection, LSTM/ESN autoencoder serving, and Isolation Forest with "
+    "feature-level explainability",
+    version="5.0.0",
 )
 
 detector = MultiMetricDetector(window_size=50, threshold_sigma=3.0)
@@ -40,6 +43,10 @@ _DRIFT_FEATURES = ["cpu", "latency", "requests"]
 # Глобальный стейт: один model per service (production pattern).
 _lstm_model = create_autoencoder()
 _lstm_train_result: dict | None = None
+
+# Isolation Forest — инициализируется при /isolation/train.
+_isolation_model = IsolationForestDetector()
+_isolation_train_result: dict | None = None
 
 
 class MetricPoint(BaseModel):
@@ -118,6 +125,7 @@ def health() -> dict:
             "mmd_statistic": _last_drift_result["mmd_statistic"],
             "timestamp": _last_drift_result["timestamp"],
         }
+    response["isolation_fitted"] = _isolation_model.is_fitted
     return response
 
 
@@ -384,4 +392,187 @@ def lstm_status() -> dict:
         status["train_metrics"] = _lstm_train_result
     else:
         status["message"] = "Model not trained. Call POST /lstm/train to initialize."
+    return status
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Isolation Forest endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class IsolationTrainRequest(BaseModel):
+    """Обучить Isolation Forest на нормальных данных.
+
+    data: список точек [cpu, latency, requests] — нормальное поведение инфраструктуры.
+    Рекомендуется минимум 100 точек для надёжного построения деревьев.
+    contamination: ожидаемая доля аномалий в production (0.01–0.20).
+    n_estimators: количество деревьев изоляции (больше = стабильнее, медленнее).
+    """
+
+    data: list[list[float]] = Field(
+        ...,
+        description="Normal time series: list of [cpu, latency, requests] points",
+        min_length=20,
+    )
+    contamination: float = Field(
+        default=0.05,
+        ge=0.01,
+        le=0.20,
+        description="Expected fraction of anomalies in production data",
+    )
+    n_estimators: int = Field(
+        default=100,
+        ge=10,
+        le=500,
+        description="Number of isolation trees",
+    )
+
+
+class IsolationTrainResponse(BaseModel):
+    n_samples: int
+    n_features: int
+    contamination: float
+    n_trees: int
+    avg_path_length_normal: float
+    sklearn_available: bool
+
+
+class IsolationPointResult(BaseModel):
+    is_anomaly: bool
+    anomaly_score: float
+    path_length: float
+    feature_contributions: dict[str, float]
+    top_feature: str
+
+
+class IsolationDetectRequest(BaseModel):
+    """Обнаружить аномалии через Isolation Forest.
+
+    data: список точек [cpu, latency, requests] для анализа.
+    Требует предварительного обучения: POST /isolation/train.
+    """
+
+    data: list[list[float]] = Field(
+        ...,
+        description="Metric points to analyze: list of [cpu, latency, requests]",
+        min_length=1,
+    )
+
+
+class IsolationDetectResponse(BaseModel):
+    results: list[IsolationPointResult]
+    n_anomalies: int
+    anomaly_rate: float
+    top_anomalous_feature: str | None
+
+
+@app.post("/isolation/train", response_model=IsolationTrainResponse)
+def isolation_train(request: IsolationTrainRequest) -> IsolationTrainResponse:
+    """Обучить Isolation Forest на нормальных метриках инфраструктуры.
+
+    Isolation Forest строит ансамбль деревьев случайных разбиений.
+    Аномальные точки изолируются быстрее (меньше разбиений = короче путь).
+    Преимущество над Z-score: ловит многомерные аномалии (CPU spike + latency
+    spike одновременно), где унивариатный Z-score пропускает паттерн.
+
+    Требуется sklearn; graceful degradation: 503 если недоступен.
+    """
+    global _isolation_model, _isolation_train_result
+
+    if not isolation_available():
+        raise HTTPException(
+            status_code=503,
+            detail="scikit-learn not available; cannot train IsolationForest",
+        )
+
+    cfg = IsolationConfig(
+        n_estimators=request.n_estimators,
+        contamination=request.contamination,
+    )
+    _isolation_model = IsolationForestDetector(cfg)
+
+    X = np.array(request.data, dtype=float)
+    result = _isolation_model.fit(X)
+
+    _isolation_train_result = {
+        "n_samples": result.n_samples,
+        "n_features": result.n_features,
+        "contamination": result.contamination,
+        "n_trees": result.n_trees,
+        "avg_path_length_normal": result.avg_path_length_normal,
+    }
+
+    return IsolationTrainResponse(
+        n_samples=result.n_samples,
+        n_features=result.n_features,
+        contamination=result.contamination,
+        n_trees=result.n_trees,
+        avg_path_length_normal=result.avg_path_length_normal,
+        sklearn_available=True,
+    )
+
+
+@app.post("/isolation/detect", response_model=IsolationDetectResponse)
+def isolation_detect(request: IsolationDetectRequest) -> IsolationDetectResponse:
+    """Обнаружить аномалии и объяснить вклад каждого признака.
+
+    Возвращает для каждой точки:
+    - is_anomaly: флаг аномалии
+    - anomaly_score: нормализованная оценка [0, 1]
+    - feature_contributions: вклад каждого признака (сумма = 1)
+    - top_feature: главная причина аномалии (важно для SRE diagonistics)
+
+    Требует предварительного обучения: POST /isolation/train.
+    """
+    if not _isolation_model.is_fitted:
+        raise HTTPException(
+            status_code=400,
+            detail="Model not trained. Call POST /isolation/train with normal data first.",
+        )
+
+    X = np.array(request.data, dtype=float)
+    results = _isolation_model.detect(X)
+
+    point_results = [
+        IsolationPointResult(
+            is_anomaly=r.is_anomaly,
+            anomaly_score=r.anomaly_score,
+            path_length=r.path_length,
+            feature_contributions=r.feature_contributions,
+            top_feature=r.top_feature,
+        )
+        for r in results
+    ]
+
+    n_anomalies = sum(1 for r in results if r.is_anomaly)
+    anomaly_rate = n_anomalies / len(results) if results else 0.0
+
+    # Наиболее часто встречающийся top_feature среди аномалий
+    anomaly_features = [r.top_feature for r in results if r.is_anomaly]
+    top_anomalous_feature: str | None = None
+    if anomaly_features:
+        top_anomalous_feature = max(set(anomaly_features), key=anomaly_features.count)
+
+    return IsolationDetectResponse(
+        results=point_results,
+        n_anomalies=n_anomalies,
+        anomaly_rate=anomaly_rate,
+        top_anomalous_feature=top_anomalous_feature,
+    )
+
+
+@app.get("/isolation/status")
+def isolation_status() -> dict:
+    """Статус Isolation Forest: обучена / не обучена, sklearn доступен.
+
+    Полезно для health-check и мониторинга состояния модели.
+    """
+    status: dict = {
+        "fitted": _isolation_model.is_fitted,
+        "sklearn_available": isolation_available(),
+    }
+    if _isolation_train_result is not None:
+        status["train_metrics"] = _isolation_train_result
+    else:
+        status["message"] = "Model not trained. Call POST /isolation/train to initialize."
     return status

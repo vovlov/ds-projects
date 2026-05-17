@@ -1265,3 +1265,307 @@ class TestLSTMAPIEndpoints:
         data_10 = self._normal_data(10)
         resp = client.post("/lstm/train", json={"data": data_10})
         assert resp.status_code == 422
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Unit tests: Isolation Forest detector
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestIsolationForestDetector:
+    """Tests for IsolationForestDetector and IsolationConfig."""
+
+    def _make_normal_data(self, n: int = 200, seed: int = 42) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        cpu = rng.normal(30, 5, n).clip(0, 100)
+        latency = rng.normal(100, 15, n).clip(0)
+        requests = rng.normal(500, 50, n).clip(0)
+        return np.column_stack([cpu, latency, requests])
+
+    def _inject_anomaly(self, data: np.ndarray, idx: int = 0) -> np.ndarray:  # noqa: N803
+        data = data.copy()
+        data[idx] = [99.0, 2000.0, 5000.0]
+        return data
+
+    def test_is_available(self):
+        from anomaly.models.isolation import is_available
+
+        assert isinstance(is_available(), bool)
+
+    def test_fit_returns_train_result(self):
+        from anomaly.models.isolation import IsolationForestDetector
+
+        det = IsolationForestDetector()
+        if not det.is_available() if hasattr(det, "is_available") else False:
+            pytest.skip("sklearn not available")
+        X = self._make_normal_data(200)
+        result = det.fit(X)
+        assert result.n_samples == 200
+        assert result.n_features == 3
+
+    def test_fit_stores_is_fitted(self):
+        from anomaly.models.isolation import IsolationForestDetector
+
+        det = IsolationForestDetector()
+        assert not det.is_fitted
+        det.fit(self._make_normal_data(200))
+        assert det.is_fitted
+
+    def test_detect_returns_correct_length(self):
+        from anomaly.models.isolation import IsolationForestDetector
+
+        det = IsolationForestDetector()
+        det.fit(self._make_normal_data(200))
+        X = self._make_normal_data(10)
+        results = det.detect(X)
+        assert len(results) == 10
+
+    def test_detect_binary_is_anomaly(self):
+        from anomaly.models.isolation import IsolationForestDetector
+
+        det = IsolationForestDetector()
+        det.fit(self._make_normal_data(200))
+        results = det.detect(self._make_normal_data(20))
+        for r in results:
+            assert isinstance(r.is_anomaly, bool)
+
+    def test_anomaly_score_in_range(self):
+        from anomaly.models.isolation import IsolationForestDetector
+
+        det = IsolationForestDetector()
+        det.fit(self._make_normal_data(200))
+        results = det.detect(self._make_normal_data(50))
+        for r in results:
+            assert 0.0 <= r.anomaly_score <= 1.0
+
+    def test_feature_contributions_sum_to_one(self):
+        from anomaly.models.isolation import IsolationForestDetector
+
+        det = IsolationForestDetector()
+        det.fit(self._make_normal_data(200))
+        results = det.detect(self._make_normal_data(10))
+        for r in results:
+            total = sum(r.feature_contributions.values())
+            assert abs(total - 1.0) < 1e-6, f"contributions sum = {total}"
+
+    def test_feature_names_in_contributions(self):
+        from anomaly.models.isolation import IsolationConfig, IsolationForestDetector
+
+        cfg = IsolationConfig(feature_names=["cpu", "latency", "requests"])
+        det = IsolationForestDetector(cfg)
+        det.fit(self._make_normal_data(200))
+        results = det.detect(self._make_normal_data(5))
+        for r in results:
+            assert set(r.feature_contributions.keys()) == {"cpu", "latency", "requests"}
+
+    def test_top_feature_is_valid(self):
+        from anomaly.models.isolation import IsolationForestDetector
+
+        det = IsolationForestDetector()
+        det.fit(self._make_normal_data(200))
+        results = det.detect(self._make_normal_data(10))
+        for r in results:
+            assert r.top_feature in r.feature_contributions
+
+    def test_anomaly_has_higher_score_than_normal(self):
+        """Явная аномалия должна получать более высокий score, чем нормальная точка."""
+        from anomaly.models.isolation import IsolationForestDetector
+
+        normal_data = self._make_normal_data(300)
+        det = IsolationForestDetector()
+        det.fit(normal_data)
+
+        # Нормальная точка — в центре распределения
+        normal_point = np.array([[30.0, 100.0, 500.0]])
+        # Явная аномалия — экстремальные значения всех метрик
+        anomaly_point = np.array([[99.0, 3000.0, 8000.0]])
+
+        normal_result = det.detect(normal_point)[0]
+        anomaly_result = det.detect(anomaly_point)[0]
+
+        assert anomaly_result.anomaly_score > normal_result.anomaly_score
+
+    def test_detect_before_fit_raises(self):
+        from anomaly.models.isolation import IsolationForestDetector
+
+        det = IsolationForestDetector()
+        with pytest.raises(RuntimeError, match="not trained"):
+            det.detect(self._make_normal_data(5))
+
+    def test_normal_data_low_anomaly_rate(self):
+        """На нормальных данных аномалий должно быть ~contamination (5%)."""
+        from anomaly.models.isolation import IsolationForestDetector
+
+        normal_data = self._make_normal_data(500)
+        det = IsolationForestDetector()
+        det.fit(normal_data)
+
+        results = det.detect(normal_data)
+        rate = sum(1 for r in results if r.is_anomaly) / len(results)
+        # Должно быть близко к contamination=0.05, допуск широкий
+        assert rate < 0.15, f"anomaly_rate={rate:.2f} on normal data is too high"
+
+    def test_injected_anomaly_detected(self):
+        """Явная инъекция аномалии должна быть обнаружена."""
+        from anomaly.models.isolation import IsolationConfig, IsolationForestDetector
+
+        normal_data = self._make_normal_data(300)
+        cfg = IsolationConfig(contamination=0.10)
+        det = IsolationForestDetector(cfg)
+        det.fit(normal_data)
+
+        test_data = self._make_normal_data(49)
+        anomaly = np.array([[99.0, 5000.0, 10000.0]])
+        mixed = np.vstack([test_data, anomaly])
+
+        results = det.detect(mixed)
+        # Последняя точка (аномалия) должна иметь score выше медианы нормальных
+        anomaly_result = results[-1]
+        normal_scores = [r.anomaly_score for r in results[:-1]]
+        assert anomaly_result.anomaly_score > np.median(normal_scores)
+
+    def test_train_result_fields(self):
+        from anomaly.models.isolation import IsolationForestDetector
+
+        det = IsolationForestDetector()
+        result = det.fit(self._make_normal_data(100))
+        assert result.n_trees == 100
+        assert result.contamination == 0.05
+        assert result.avg_path_length_normal > 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# API tests: Isolation Forest endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestIsolationAPIEndpoints:
+    """Tests for POST /isolation/train, /isolation/detect, GET /isolation/status."""
+
+    def _client(self):
+        import anomaly.api.app as app_module
+        from anomaly.api.app import _isolation_model, app
+        from fastapi.testclient import TestClient
+
+        # Сбрасываем состояние модели перед каждым тестом
+        _isolation_model._is_fitted = False
+        _isolation_model._model = None
+        _isolation_model._train_result = None
+        app_module._isolation_train_result = None
+        return TestClient(app)
+
+    def _normal_data(self, n: int = 150) -> list[list[float]]:
+        rng = np.random.default_rng(123)
+        cpu = rng.normal(30, 5, n).clip(0, 100).tolist()
+        latency = rng.normal(100, 15, n).clip(0).tolist()
+        requests = rng.normal(500, 50, n).clip(0).tolist()
+        return [[cpu[i], latency[i], requests[i]] for i in range(n)]
+
+    def test_train_status_200(self):
+        client = self._client()
+        resp = client.post("/isolation/train", json={"data": self._normal_data(100)})
+        assert resp.status_code == 200
+
+    def test_train_response_structure(self):
+        client = self._client()
+        resp = client.post("/isolation/train", json={"data": self._normal_data(100)})
+        body = resp.json()
+        assert "n_samples" in body
+        assert "n_features" in body
+        assert "contamination" in body
+        assert "n_trees" in body
+        assert "avg_path_length_normal" in body
+        assert body["sklearn_available"] is True
+
+    def test_train_n_samples_correct(self):
+        client = self._client()
+        resp = client.post("/isolation/train", json={"data": self._normal_data(120)})
+        assert resp.json()["n_samples"] == 120
+
+    def test_detect_before_train_returns_400(self):
+        client = self._client()
+        resp = client.post("/isolation/detect", json={"data": self._normal_data(10)})
+        assert resp.status_code == 400
+
+    def test_detect_after_train_returns_200(self):
+        client = self._client()
+        client.post("/isolation/train", json={"data": self._normal_data(100)})
+        resp = client.post("/isolation/detect", json={"data": self._normal_data(10)})
+        assert resp.status_code == 200
+
+    def test_detect_response_structure(self):
+        client = self._client()
+        client.post("/isolation/train", json={"data": self._normal_data(100)})
+        resp = client.post("/isolation/detect", json={"data": self._normal_data(5)})
+        body = resp.json()
+        assert "results" in body
+        assert "n_anomalies" in body
+        assert "anomaly_rate" in body
+        assert len(body["results"]) == 5
+
+    def test_detect_result_has_feature_contributions(self):
+        client = self._client()
+        client.post("/isolation/train", json={"data": self._normal_data(100)})
+        resp = client.post("/isolation/detect", json={"data": self._normal_data(3)})
+        for point_result in resp.json()["results"]:
+            assert "feature_contributions" in point_result
+            assert "top_feature" in point_result
+            assert "anomaly_score" in point_result
+
+    def test_detect_anomaly_rate_in_range(self):
+        client = self._client()
+        client.post("/isolation/train", json={"data": self._normal_data(100)})
+        resp = client.post("/isolation/detect", json={"data": self._normal_data(50)})
+        rate = resp.json()["anomaly_rate"]
+        assert 0.0 <= rate <= 1.0
+
+    def test_status_before_train(self):
+        client = self._client()
+        resp = client.get("/isolation/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["fitted"] is False
+        assert "message" in body
+
+    def test_status_after_train(self):
+        client = self._client()
+        client.post("/isolation/train", json={"data": self._normal_data(100)})
+        resp = client.get("/isolation/status")
+        body = resp.json()
+        assert body["fitted"] is True
+        assert "train_metrics" in body
+
+    def test_health_includes_isolation_fitted(self):
+        client = self._client()
+        resp = client.get("/health")
+        assert "isolation_fitted" in resp.json()
+
+    def test_full_train_detect_cycle(self):
+        """Полный цикл: train → detect → проверить top_anomalous_feature."""
+        client = self._client()
+        client.post("/isolation/train", json={"data": self._normal_data(150)})
+
+        # Инъецируем явную аномалию в конец списка
+        test_data = self._normal_data(9)
+        test_data.append([99.0, 5000.0, 10000.0])
+
+        resp = client.post("/isolation/detect", json={"data": test_data})
+        body = resp.json()
+        assert resp.status_code == 200
+        # Должна быть хотя бы одна аномалия
+        assert body["n_anomalies"] >= 1
+        assert body["top_anomalous_feature"] is not None
+
+    def test_train_with_custom_params(self):
+        client = self._client()
+        resp = client.post(
+            "/isolation/train",
+            json={
+                "data": self._normal_data(100),
+                "contamination": 0.10,
+                "n_estimators": 50,
+            },
+        )
+        body = resp.json()
+        assert body["contamination"] == 0.10
+        assert body["n_trees"] == 50
