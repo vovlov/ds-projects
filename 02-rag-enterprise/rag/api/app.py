@@ -188,9 +188,21 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
     )
 
 
+class IndexRequest(BaseModel):
+    """Параметры переиндексации документов."""
+
+    chunking_strategy: str = "fixed"  # "fixed" | "semantic" | "paragraph"
+
+
 @app.post("/index")
-def index_documents():
-    """Re-index all documents from data directory."""
+def index_documents(request: IndexRequest = IndexRequest()):
+    """Re-index all documents from data directory.
+
+    chunking_strategy:
+    - "fixed"     — RecursiveCharacterTextSplitter 512 chars (default)
+    - "semantic"  — TF-IDF cosine boundary detection
+    - "paragraph" — split on double newlines
+    """
     global _collection, _hybrid_index, _indexed_chunks
 
     client = get_client()
@@ -205,7 +217,7 @@ def index_documents():
         return {"error": f"Data directory not found: {DATA_DIR}"}
 
     docs = load_documents(DATA_DIR)
-    chunks = chunk_documents(docs)
+    chunks = chunk_documents(docs, chunking_strategy=request.chunking_strategy)
     count = index_chunks(chunks, _collection)
 
     _indexed_chunks = chunks
@@ -214,8 +226,56 @@ def index_documents():
     return {
         "indexed_chunks": count,
         "documents": len(docs),
+        "chunking_strategy": request.chunking_strategy,
         "hybrid_index": _hybrid_index._bm25 is not None,
     }
+
+
+class ChunkPreviewRequest(BaseModel):
+    """Запрос предварительного просмотра нарезки текста."""
+
+    text: str
+    chunking_strategy: str = "semantic"  # "fixed" | "semantic" | "paragraph"
+    chunk_size: int = 512
+    chunk_overlap: int = 64
+
+
+class ChunkPreviewResponse(BaseModel):
+    """Предварительный просмотр результатов нарезки."""
+
+    chunks: list[str]
+    n_chunks: int
+    avg_chunk_chars: float
+    chunking_strategy: str
+    semantic_available: bool
+
+
+@app.post("/chunk/preview", response_model=ChunkPreviewResponse)
+def chunk_preview(request: ChunkPreviewRequest) -> ChunkPreviewResponse:
+    """Preview how a text would be split with the chosen chunking strategy.
+
+    Позволяет сравнить стратегии нарезки без переиндексации: передайте
+    текстовый фрагмент и получите список чанков с метриками.
+    """
+    from ..chunking.semantic import is_available as semantic_available_fn
+
+    doc = {"text": request.text, "metadata": {"source": "preview"}}
+    chunks = chunk_documents(
+        [doc],
+        chunk_size=request.chunk_size,
+        chunk_overlap=request.chunk_overlap,
+        chunking_strategy=request.chunking_strategy,
+    )
+    texts = [c["text"] for c in chunks]
+    avg = sum(len(t) for t in texts) / max(len(texts), 1)
+
+    return ChunkPreviewResponse(
+        chunks=texts,
+        n_chunks=len(texts),
+        avg_chunk_chars=round(avg, 1),
+        chunking_strategy=request.chunking_strategy,
+        semantic_available=semantic_available_fn(),
+    )
 
 
 def ask(question: str, n_results: int = 5, use_hybrid: bool = True) -> str:

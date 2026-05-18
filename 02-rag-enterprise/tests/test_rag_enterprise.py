@@ -854,3 +854,282 @@ class TestStreamingRAG:
 
         token_events = [e for e in events if e["type"] == "token"]
         assert len(token_events) > 0
+
+
+# ---------------------------------------------------------------------------
+# TestSemanticChunking
+# ---------------------------------------------------------------------------
+
+MULTI_TOPIC_TEXT = """
+Remote work policy allows employees to work from home up to three days per week.
+VPN access is required for all remote connections to internal systems.
+All remote employees must use company-approved devices and software.
+
+Data governance policy requires strict data classification.
+Personal data must be stored in approved systems only.
+GDPR compliance is mandatory for all data handling operations.
+Data retention policies apply to all customer records.
+
+Code review standards require at least two approvals before merging.
+All pull requests must pass automated tests and linting checks.
+Security review is required for changes to authentication modules.
+""".strip()
+
+SHORT_TEXT = "This is a single short sentence about VPN."
+
+PARAGRAPH_TEXT = (
+    "First paragraph about onboarding.\n\n"
+    "Second paragraph about benefits.\n\n"
+    "Third paragraph about remote work."
+)
+
+
+class TestSemanticChunker:
+    """Тесты для SemanticChunker — TF-IDF boundary detection."""
+
+    def test_chunk_returns_list(self):
+        from rag.chunking.semantic import SemanticChunker
+
+        chunker = SemanticChunker()
+        result = chunker.chunk(MULTI_TOPIC_TEXT)
+        assert isinstance(result, list)
+        assert len(result) > 0
+
+    def test_chunk_empty_text_returns_empty(self):
+        from rag.chunking.semantic import SemanticChunker
+
+        chunker = SemanticChunker()
+        assert chunker.chunk("") == []
+        assert chunker.chunk("   ") == []
+
+    def test_chunk_single_sentence_returns_one_chunk(self):
+        from rag.chunking.semantic import SemanticChunker
+
+        chunker = SemanticChunker()
+        result = chunker.chunk(SHORT_TEXT)
+        assert len(result) == 1
+        assert SHORT_TEXT in result[0]
+
+    def test_multi_topic_text_produces_multiple_chunks(self):
+        """Три тематических блока должны дать больше одного чанка."""
+        from rag.chunking.semantic import SemanticChunker
+
+        chunker = SemanticChunker()
+        result = chunker.chunk(MULTI_TOPIC_TEXT)
+        assert len(result) >= 2
+
+    def test_chunk_content_coverage(self):
+        """Объединение всех чанков должно содержать все ключевые слова из исходника."""
+        from rag.chunking.semantic import SemanticChunker
+
+        chunker = SemanticChunker()
+        result = chunker.chunk(MULTI_TOPIC_TEXT)
+        combined = " ".join(result).lower()
+        for keyword in ["vpn", "gdpr", "review"]:
+            assert keyword in combined, f"Keyword '{keyword}' lost after chunking"
+
+    def test_no_empty_chunks_in_output(self):
+        """Чанкер не должен возвращать пустые строки."""
+        from rag.chunking.semantic import SemanticChunker
+
+        chunker = SemanticChunker()
+        result = chunker.chunk(MULTI_TOPIC_TEXT)
+        for chunk in result:
+            assert chunk.strip(), "Found empty chunk in output"
+
+    def test_chunk_document_adds_metadata(self):
+        """chunk_document() сохраняет metadata и добавляет chunk_index."""
+        from rag.chunking.semantic import SemanticChunker
+
+        chunker = SemanticChunker()
+        doc = {"text": MULTI_TOPIC_TEXT, "metadata": {"source": "policy.txt"}}
+        result = chunker.chunk_document(doc)
+        assert all("chunk_index" in c["metadata"] for c in result)
+        assert all("chunk_total" in c["metadata"] for c in result)
+        assert all(c["metadata"]["source"] == "policy.txt" for c in result)
+        assert all(c["metadata"]["chunking_strategy"] == "semantic" for c in result)
+
+    def test_chunk_document_chunk_index_sequential(self):
+        """Индексы чанков должны идти по порядку от 0 до chunk_total-1."""
+        from rag.chunking.semantic import SemanticChunker
+
+        chunker = SemanticChunker()
+        doc = {"text": MULTI_TOPIC_TEXT, "metadata": {"source": "test.txt"}}
+        result = chunker.chunk_document(doc)
+        indices = [c["metadata"]["chunk_index"] for c in result]
+        assert indices == list(range(len(result)))
+
+    def test_max_chunk_chars_respected(self):
+        """Ни один чанк не должен превышать max_chunk_chars значительно."""
+        from rag.chunking.semantic import SemanticChunkConfig, SemanticChunker
+
+        config = SemanticChunkConfig(max_chunk_chars=300)
+        chunker = SemanticChunker(config=config)
+        result = chunker.chunk(MULTI_TOPIC_TEXT)
+        for chunk in result:
+            assert len(chunk) <= 600, f"Chunk too long: {len(chunk)} chars"
+
+    def test_high_threshold_produces_more_chunks(self):
+        """Высокий threshold → меньше слияний → больше чанков."""
+        from rag.chunking.semantic import SemanticChunkConfig, SemanticChunker
+
+        chunker_low = SemanticChunker(SemanticChunkConfig(similarity_threshold=0.01))
+        chunker_high = SemanticChunker(SemanticChunkConfig(similarity_threshold=0.99))
+        chunks_low = chunker_low.chunk(MULTI_TOPIC_TEXT)
+        chunks_high = chunker_high.chunk(MULTI_TOPIC_TEXT)
+        assert len(chunks_high) >= len(chunks_low)
+
+    def test_is_available_returns_bool(self):
+        from rag.chunking.semantic import is_available
+
+        result = is_available()
+        assert isinstance(result, bool)
+
+    def test_paragraph_chunks_fallback(self):
+        """_paragraph_chunks() разбивает на части когда абзацы превышают max_chars."""
+        from rag.chunking.semantic import _paragraph_chunks
+
+        # max_chars=50 достаточно мало, чтобы каждый абзац стал отдельным чанком
+        result = _paragraph_chunks(PARAGRAPH_TEXT, max_chars=50)
+        assert len(result) >= 2
+        assert all(r.strip() for r in result)
+
+    def test_paragraph_chunks_empty(self):
+        from rag.chunking.semantic import _paragraph_chunks
+
+        assert _paragraph_chunks("") == []
+
+    def test_split_into_sentences(self):
+        """_split_into_sentences() должен разбивать по границам предложений."""
+        from rag.chunking.semantic import _split_into_sentences
+
+        text = "First sentence. Second sentence. Third sentence."
+        result = _split_into_sentences(text)
+        assert len(result) >= 2
+        assert all(r.strip() for r in result)
+
+
+class TestChunkingStrategiesInLoader:
+    """Тесты интеграции стратегий чанкинга через chunk_documents()."""
+
+    def test_fixed_strategy_default(self):
+        from rag.ingestion.loader import chunk_documents
+
+        docs = [{"text": MULTI_TOPIC_TEXT, "metadata": {"source": "test.txt"}}]
+        chunks = chunk_documents(docs, chunking_strategy="fixed")
+        assert len(chunks) > 0
+        assert all(c["metadata"]["chunking_strategy"] == "fixed" for c in chunks)
+
+    def test_semantic_strategy_produces_chunks(self):
+        from rag.ingestion.loader import chunk_documents
+
+        docs = [{"text": MULTI_TOPIC_TEXT, "metadata": {"source": "test.txt"}}]
+        chunks = chunk_documents(docs, chunking_strategy="semantic")
+        assert len(chunks) > 0
+
+    def test_paragraph_strategy_produces_chunks(self):
+        from rag.ingestion.loader import chunk_documents
+
+        # MULTI_TOPIC_TEXT достаточно длинный, чтобы получить несколько чанков
+        docs = [{"text": MULTI_TOPIC_TEXT, "metadata": {"source": "test.txt"}}]
+        chunks = chunk_documents(docs, chunk_size=80, chunking_strategy="paragraph")
+        assert len(chunks) >= 2
+        assert all(c["metadata"]["chunking_strategy"] == "paragraph" for c in chunks)
+
+    def test_all_strategies_preserve_source_metadata(self):
+        from rag.ingestion.loader import chunk_documents
+
+        docs = [{"text": MULTI_TOPIC_TEXT, "metadata": {"source": "policy.txt"}}]
+        for strategy in ("fixed", "semantic", "paragraph"):
+            chunks = chunk_documents(docs, chunking_strategy=strategy)
+            assert all(c["metadata"]["source"] == "policy.txt" for c in chunks), (
+                f"Source lost for strategy={strategy}"
+            )
+
+    def test_multi_doc_semantic_chunking(self):
+        """Семантический чанкинг работает на нескольких документах."""
+        from rag.ingestion.loader import chunk_documents
+
+        docs = [
+            {"text": MULTI_TOPIC_TEXT, "metadata": {"source": "doc1.txt"}},
+            {"text": PARAGRAPH_TEXT, "metadata": {"source": "doc2.txt"}},
+        ]
+        chunks = chunk_documents(docs, chunking_strategy="semantic")
+        sources = {c["metadata"]["source"] for c in chunks}
+        assert "doc1.txt" in sources
+        assert "doc2.txt" in sources
+
+
+class TestChunkPreviewEndpoint:
+    """Тесты для POST /chunk/preview."""
+
+    def _get_client(self):
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        return TestClient(app)
+
+    def test_preview_returns_200(self):
+        client = self._get_client()
+        resp = client.post(
+            "/chunk/preview",
+            json={"text": MULTI_TOPIC_TEXT, "chunking_strategy": "paragraph"},
+        )
+        assert resp.status_code == 200
+
+    def test_preview_response_structure(self):
+        client = self._get_client()
+        resp = client.post(
+            "/chunk/preview",
+            json={"text": MULTI_TOPIC_TEXT, "chunking_strategy": "semantic"},
+        )
+        data = resp.json()
+        assert "chunks" in data
+        assert "n_chunks" in data
+        assert "avg_chunk_chars" in data
+        assert "chunking_strategy" in data
+        assert "semantic_available" in data
+
+    def test_preview_n_chunks_matches_chunks_list(self):
+        client = self._get_client()
+        resp = client.post(
+            "/chunk/preview",
+            json={"text": MULTI_TOPIC_TEXT, "chunking_strategy": "paragraph"},
+        )
+        data = resp.json()
+        assert data["n_chunks"] == len(data["chunks"])
+
+    def test_preview_returns_chunking_strategy_in_response(self):
+        client = self._get_client()
+        resp = client.post(
+            "/chunk/preview",
+            json={"text": SHORT_TEXT, "chunking_strategy": "fixed"},
+        )
+        assert resp.json()["chunking_strategy"] == "fixed"
+
+    def test_preview_semantic_available_is_bool(self):
+        client = self._get_client()
+        resp = client.post(
+            "/chunk/preview",
+            json={"text": SHORT_TEXT, "chunking_strategy": "semantic"},
+        )
+        assert isinstance(resp.json()["semantic_available"], bool)
+
+    def test_preview_avg_chunk_chars_positive(self):
+        client = self._get_client()
+        resp = client.post(
+            "/chunk/preview",
+            json={"text": MULTI_TOPIC_TEXT, "chunking_strategy": "paragraph"},
+        )
+        assert resp.json()["avg_chunk_chars"] > 0
+
+    def test_preview_all_three_strategies(self):
+        """Все три стратегии работают через /chunk/preview без ошибок."""
+        client = self._get_client()
+        for strategy in ("fixed", "semantic", "paragraph"):
+            resp = client.post(
+                "/chunk/preview",
+                json={"text": MULTI_TOPIC_TEXT, "chunking_strategy": strategy},
+            )
+            assert resp.status_code == 200, f"Strategy {strategy} failed: {resp.text}"
+            assert resp.json()["n_chunks"] > 0

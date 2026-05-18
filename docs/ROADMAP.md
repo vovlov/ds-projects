@@ -561,6 +561,23 @@
         Alibaba PAI-Rec LinUCB docs, Kameleoon contextual bandits guide 2026.
 - [x] Causal Uplift Modeling (T-Learner CATE) для Churn (Project 01) — 2026-05-16
 - [x] Isolation Forest + Feature Explainability для Anomaly Detection (Project 05) — 2026-05-17
+- [x] Semantic Chunking для RAG (Project 02) — 2026-05-18
+      rag/chunking/semantic.py: SemanticChunker (TF-IDF cosine boundary detection),
+        SemanticChunkConfig (similarity_threshold=0.30, min_chunk_chars=100, max_chunk_chars=1200),
+        _split_into_sentences() (абзацы → .!? границы), _paragraph_chunks() (fallback без sklearn),
+        chunk_document() с preserved metadata + chunking_strategy field.
+        Graceful degradation: без sklearn → paragraph splitting по двойным \n.
+      rag/ingestion/loader.py: chunk_documents() новый параметр chunking_strategy
+        ("fixed"|"semantic"|"paragraph"), рефакторинг в 3 private helpers.
+      rag/api/app.py: IndexRequest с chunking_strategy полем (POST /index),
+        POST /chunk/preview — ChunkPreviewRequest/ChunkPreviewResponse,
+        сравнение стратегий без переиндексации.
+      26 новых тестов: TestSemanticChunker×14, TestChunkingStrategiesInLoader×5,
+        TestChunkPreviewEndpoint×7. 94/94 тестов зелёных (68 pre-existing + 26 новых).
+      Преимущество: семантические чанки сохраняют смысловые единицы (одна тема → один чанк),
+        улучшая precision RAG ответов — LLM получает связный контекст вместо обрезанных фрагментов.
+      Источники: LangChain SemanticChunker docs, Anthropic Contextual Retrieval 2024,
+        Douze et al. 2024 FAISS (cosine drift как boundary signal).
       anomaly/models/isolation.py: IsolationForestDetector с per-feature вкладом через
         маргинальную нейтрализацию (заменяем признак на train mean → delta score = вклад).
         IsolationConfig/IsolationTrainResult/IsolationResult dataclasses.
