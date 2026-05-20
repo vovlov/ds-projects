@@ -55,13 +55,21 @@ class LineageNode:
     def dataset(cls, namespace: str, name: str, **facets: Any) -> LineageNode:
         """Создать узел-датасет / Create a dataset node."""
         node_id = f"{namespace}/{name}"
-        return cls(node_id=node_id, node_type=NodeType.DATASET, namespace=namespace, name=name, facets=facets)  # noqa: E501
+        return cls(
+            node_id=node_id,
+            node_type=NodeType.DATASET,
+            namespace=namespace,
+            name=name,
+            facets=facets,
+        )  # noqa: E501
 
     @classmethod
     def job(cls, namespace: str, name: str, **facets: Any) -> LineageNode:
         """Создать узел-задачу / Create a job node."""
         node_id = f"{namespace}/{name}"
-        return cls(node_id=node_id, node_type=NodeType.JOB, namespace=namespace, name=name, facets=facets)  # noqa: E501
+        return cls(
+            node_id=node_id, node_type=NodeType.JOB, namespace=namespace, name=name, facets=facets
+        )  # noqa: E501
 
     def to_dict(self) -> dict[str, Any]:
         """Сериализовать в JSON-совместимый словарь."""
@@ -232,7 +240,9 @@ class LineageGraph:
             "stats": {
                 "total_nodes": len(self._nodes),
                 "total_edges": len(self._edges),
-                "dataset_count": sum(1 for n in self._nodes.values() if n.node_type == NodeType.DATASET),  # noqa: E501
+                "dataset_count": sum(
+                    1 for n in self._nodes.values() if n.node_type == NodeType.DATASET
+                ),  # noqa: E501
                 "job_count": sum(1 for n in self._nodes.values() if n.node_type == NodeType.JOB),
             },
         }

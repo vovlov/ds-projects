@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Any
 
 
-class ColumnType(str, Enum):
+class ColumnType(str, Enum):  # noqa: UP042
     """Поддерживаемые типы столбцов / Supported column types."""
 
     INTEGER = "integer"
@@ -26,7 +26,7 @@ class ColumnType(str, Enum):
     UNKNOWN = "unknown"
 
 
-class Compatibility(str, Enum):
+class Compatibility(str, Enum):  # noqa: UP042
     """
     Режим совместимости схем (Confluent-совместимая семантика).
     Schema compatibility mode (Confluent-compatible semantics).

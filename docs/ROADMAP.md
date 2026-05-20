@@ -620,6 +620,35 @@
       Источники: Künzel et al. 2019 PNAS (Metalearners for HCTE), Radcliffe 2007 (Qini),
         arxiv 2604.06123 (Large-Scale Meta-Learner Comparison 2026), causalml docs.
 
+- [x] Active Learning Pipeline для NER (Project 03) — 2026-05-20
+      ner/active_learning/sampler.py: SamplingStrategy (UNCERTAINTY/MARGIN/ENTROPY/RANDOM),
+        AnnotationCandidate (candidate_id + uncertainty_score + sampling_reason + predicted_entities),
+        ActiveLearningStats dataclass.
+        ActiveLearner: _uncertainty_score() → 4 стратегии:
+          UNCERTAINTY = max(nonconformity_score) по сущностям (Lewis & Gale 1994),
+          MARGIN = avg prediction_set size / n_labels (неоднозначность типа),
+          ENTROPY = Shannon entropy паттерн-скоров (нормировано на [0,1]),
+          RANDOM = случайный baseline.
+        Cold-start: текст без сущностей → score=1.0 (первоочередная аннотация).
+        Дедупликация очереди. receive_annotation() → рекалибровка q_hat без переобучения.
+      ner/api/app.py: 5 новых endpoint:
+        POST /active/sample (top-n по uncertainty, поддержка всех 4 стратегий),
+        POST /active/annotate (принять аннотацию эксперта → обновить q_hat, 404 на unknown id),
+        GET  /active/queue (очередь по убыванию неопределённости),
+        GET  /active/stats (annotated/pending/recalibrations/avg_uncertainty),
+        POST /active/reset (новая сессия аннотации).
+        GET /health расширен полем active_learning (pending/annotated/recalibrations).
+      35 новых тестов: TestActiveLearnerCore×18 (все 4 стратегии, cold-start, дедупликация,
+        аннотация, рекалибровка, stats, reset, queue sort, no_predictor),
+        TestActiveLearningAPI×17 (sample/annotate/queue/stats/reset endpoints,
+        404 на unknown id, полный цикл sample→annotate→recalibrate).
+      96/96 тестов зелёных (+35, было 61).
+      Бизнес-эффект: активное обучение сокращает затраты на аннотацию на ~50%
+        (NER-specific: Lowell et al. 2019) — юридический отдел аннотирует только
+        наиболее информативные договоры вместо случайной выборки.
+      Источники: Lewis & Gale 1994 (uncertainty sampling), Lowell et al. 2019 (NER active learning),
+        Angelopoulos & Bates 2022 (conformal uncertainty), Settles 2009 (AL survey).
+
 ---
 
 ## Ежедневный цикл улучшений
