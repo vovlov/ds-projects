@@ -19,8 +19,8 @@ from ..models import FraudResult, TransactionData
 
 # Пороги, откалиброванные по ROC AUC на synthetic Elliptic-style dataset
 _AMOUNT_NORMAL_MEAN = math.exp(5 + 0.8**2 / 2)  # ~182 USD
-_AMOUNT_FRAUD_MEAN = math.exp(8 + 1.5**2 / 2)   # ~9744 USD
-_AMOUNT_THRESHOLD_HIGH = 2000.0                   # 99-й перцентиль normal
+_AMOUNT_FRAUD_MEAN = math.exp(8 + 1.5**2 / 2)  # ~9744 USD
+_AMOUNT_THRESHOLD_HIGH = 2000.0  # 99-й перцентиль normal
 
 
 class FraudPredictor:
