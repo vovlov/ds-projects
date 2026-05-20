@@ -535,3 +535,376 @@ class TestConformalAPI:
         client = TestClient(app)
         resp = client.get("/health")
         assert "conformal_calibrated" in resp.json()
+
+
+# ── Active Learning тесты ────────────────────────────────────────────────────
+
+
+class TestActiveLearnerCore:
+    """Unit-тесты ActiveLearner — стратегии отбора и управление очередью."""
+
+    def _make_learner(self, strategy: str = "uncertainty"):
+        from ner.active_learning.sampler import ActiveLearner, SamplingStrategy
+        from ner.data.collection5 import get_collection5_sample
+        from ner.model.conformal import ConformalNERPredictor
+        from ner.model.ner import extract_entities_from_bio
+
+        pred = ConformalNERPredictor()
+        dataset = get_collection5_sample()
+        entities = []
+        for sent in dataset:
+            tokens = [tok for tok, _ in sent]
+            labels_bio = [lbl for _, lbl in sent]
+            entities.extend(extract_entities_from_bio(tokens, labels_bio))
+        if entities:
+            pred.calibrate(entities)
+
+        strat_map = {
+            "uncertainty": SamplingStrategy.UNCERTAINTY,
+            "margin": SamplingStrategy.MARGIN,
+            "entropy": SamplingStrategy.ENTROPY,
+            "random": SamplingStrategy.RANDOM,
+        }
+        return ActiveLearner(conformal_predictor=pred, strategy=strat_map[strategy], seed=42)
+
+    def test_select_candidates_returns_n(self):
+        """select_candidates возвращает не более n кандидатов."""
+        learner = self._make_learner()
+        texts = [f"Газпром в Москве номер {i}." for i in range(10)]
+        candidates = learner.select_candidates(texts, n=3)
+        assert len(candidates) == 3
+
+    def test_select_candidates_sorted_by_score(self):
+        """Кандидаты отсортированы по убыванию uncertainty_score."""
+        learner = self._make_learner()
+        texts = ["Газпром в Москве.", "Яндекс в Санкт-Петербурге.", "просто текст без сущностей"]
+        candidates = learner.select_candidates(texts, n=3)
+        scores = [c.uncertainty_score for c in candidates]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_cold_start_text_gets_max_score(self):
+        """Текст без распознанных сущностей → score=1.0 (cold-start)."""
+        learner = self._make_learner()
+        # Текст, для которого rule-based NER не найдёт сущностей
+        candidates = learner.select_candidates(["обычный текст xyz"], n=1)
+        assert candidates[0].uncertainty_score == 1.0
+
+    def test_score_range_is_valid(self):
+        """uncertainty_score ∈ [0, 1]."""
+        learner = self._make_learner()
+        texts = ["Газпром.", "Яндекс в Москве.", "Иван Петров из ООО Рога."]
+        for c in learner.select_candidates(texts, n=3):
+            assert 0.0 <= c.uncertainty_score <= 1.0
+
+    def test_margin_strategy_produces_valid_scores(self):
+        """MARGIN стратегия даёт корректные score ∈ [0, 1]."""
+        learner = self._make_learner("margin")
+        candidates = learner.select_candidates(["Газпром в Москве."], n=1)
+        assert 0.0 <= candidates[0].uncertainty_score <= 1.0
+
+    def test_entropy_strategy_produces_valid_scores(self):
+        """ENTROPY стратегия даёт корректные score ∈ [0, 1]."""
+        learner = self._make_learner("entropy")
+        candidates = learner.select_candidates(["Яндекс в Санкт-Петербурге."], n=1)
+        assert 0.0 <= candidates[0].uncertainty_score <= 1.0
+
+    def test_random_strategy_produces_valid_scores(self):
+        """RANDOM стратегия даёт score ∈ [0, 1]."""
+        learner = self._make_learner("random")
+        candidates = learner.select_candidates(["Газпром.", "Яндекс."], n=2)
+        for c in candidates:
+            assert 0.0 <= c.uncertainty_score <= 1.0
+
+    def test_candidate_has_all_required_fields(self):
+        """AnnotationCandidate содержит все обязательные поля."""
+        learner = self._make_learner()
+        candidates = learner.select_candidates(["Газпром в Москве."], n=1)
+        c = candidates[0]
+        assert c.candidate_id
+        assert c.text
+        assert c.sampling_reason
+        assert c.strategy == "uncertainty"
+        assert c.annotated is False
+
+    def test_deduplicate_texts_in_queue(self):
+        """Повторный вызов select_candidates не добавляет дубликаты."""
+        learner = self._make_learner()
+        texts = ["Газпром в Москве."]
+        learner.select_candidates(texts, n=1)
+        learner.select_candidates(texts, n=1)  # повторно
+        assert learner.get_stats().pending == 1
+
+    def test_receive_annotation_moves_to_annotated(self):
+        """receive_annotation перемещает кандидата из queue в annotated."""
+        learner = self._make_learner()
+        candidates = learner.select_candidates(["Газпром в Москве."], n=1)
+        cid = candidates[0].candidate_id
+        ann = [{"text": "Газпром", "label": "ORG", "start": 0, "end": 6}]
+        success = learner.receive_annotation(cid, ann)
+        assert success is True
+        stats = learner.get_stats()
+        assert stats.pending == 0
+        assert stats.annotated == 1
+
+    def test_receive_annotation_unknown_id_returns_false(self):
+        """Неизвестный candidate_id → receive_annotation возвращает False."""
+        learner = self._make_learner()
+        assert learner.receive_annotation("nonexistent-id", []) is False
+
+    def test_receive_annotation_triggers_recalibration(self):
+        """После аннотации с сущностями счётчик рекалибраций увеличивается."""
+        learner = self._make_learner()
+        candidates = learner.select_candidates(["Газпром в Москве."], n=1)
+        cid = candidates[0].candidate_id
+        learner.receive_annotation(cid, [{"text": "Газпром", "label": "ORG", "start": 0, "end": 6}])
+        assert learner.get_stats().recalibrations == 1
+
+    def test_empty_annotation_no_recalibration(self):
+        """Аннотация без сущностей не вызывает рекалибровку."""
+        learner = self._make_learner()
+        candidates = learner.select_candidates(["непонятный текст"], n=1)
+        cid = candidates[0].candidate_id
+        learner.receive_annotation(cid, [])
+        assert learner.get_stats().recalibrations == 0
+
+    def test_stats_structure(self):
+        """get_stats() возвращает корректную структуру."""
+        learner = self._make_learner()
+        learner.select_candidates(["Газпром.", "Яндекс."], n=2)
+        stats = learner.get_stats()
+        assert stats.total_candidates == 2
+        assert stats.pending == 2
+        assert stats.annotated == 0
+        assert 0.0 <= stats.avg_uncertainty <= 1.0
+
+    def test_reset_clears_state(self):
+        """reset() очищает очередь и аннотированные."""
+        learner = self._make_learner()
+        learner.select_candidates(["Газпром в Москве."], n=1)
+        learner.reset()
+        stats = learner.get_stats()
+        assert stats.total_candidates == 0
+        assert stats.pending == 0
+
+    def test_get_queue_sorted_by_score(self):
+        """get_queue() возвращает кандидатов по убыванию uncertainty_score."""
+        learner = self._make_learner()
+        texts = ["Газпром.", "Яндекс в Москве.", "непонятный текст без сущностей"]
+        learner.select_candidates(texts, n=3)
+        queue = learner.get_queue()
+        scores = [c.uncertainty_score for c in queue]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_no_predictor_returns_random_score(self):
+        """Без conformal_predictor возвращается случайный score."""
+        from ner.active_learning.sampler import ActiveLearner
+
+        learner = ActiveLearner(conformal_predictor=None, seed=42)
+        candidates = learner.select_candidates(["Газпром в Москве."], n=1)
+        assert 0.0 <= candidates[0].uncertainty_score <= 1.0
+
+    def test_to_dict_has_all_keys(self):
+        """to_dict() содержит все необходимые ключи."""
+        learner = self._make_learner()
+        candidates = learner.select_candidates(["Газпром в Москве."], n=1)
+        d = candidates[0].to_dict()
+        for key in [
+            "candidate_id",
+            "text",
+            "uncertainty_score",
+            "sampling_reason",
+            "predicted_entities",
+            "strategy",
+            "annotated",
+        ]:
+            assert key in d
+
+
+class TestActiveLearningAPI:
+    """Интеграционные тесты /active/* endpoints."""
+
+    def setup_method(self):
+        """Сброс состояния active learner перед каждым тестом."""
+        from fastapi.testclient import TestClient
+        from ner.api.app import _reset_active_learner, app
+
+        _reset_active_learner()
+        self.client = TestClient(app)
+
+    def test_sample_endpoint_status_200(self):
+        resp = self.client.post("/active/sample", json={"texts": ["Газпром в Москве."], "n": 1})
+        assert resp.status_code == 200
+
+    def test_sample_endpoint_structure(self):
+        resp = self.client.post(
+            "/active/sample",
+            json={"texts": ["Газпром.", "Яндекс в Москве."], "n": 2},
+        )
+        data = resp.json()
+        assert "candidates" in data
+        assert "strategy" in data
+        assert "total_selected" in data
+
+    def test_sample_returns_n_candidates(self):
+        texts = [f"Газпром в Москве номер {i}." for i in range(8)]
+        resp = self.client.post("/active/sample", json={"texts": texts, "n": 3})
+        assert len(resp.json()["candidates"]) == 3
+
+    def test_sample_candidate_has_required_fields(self):
+        resp = self.client.post("/active/sample", json={"texts": ["Газпром в Москве."], "n": 1})
+        c = resp.json()["candidates"][0]
+        for field in ["candidate_id", "text", "uncertainty_score", "sampling_reason", "annotated"]:
+            assert field in c
+
+    def test_sample_uncertainty_score_range(self):
+        resp = self.client.post(
+            "/active/sample",
+            json={"texts": ["Газпром.", "Яндекс."], "n": 2},
+        )
+        for c in resp.json()["candidates"]:
+            assert 0.0 <= c["uncertainty_score"] <= 1.0
+
+    def test_sample_margin_strategy(self):
+        resp = self.client.post(
+            "/active/sample",
+            json={"texts": ["Газпром в Москве."], "n": 1, "strategy": "margin"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["strategy"] == "margin"
+
+    def test_sample_entropy_strategy(self):
+        resp = self.client.post(
+            "/active/sample",
+            json={"texts": ["Газпром в Москве."], "n": 1, "strategy": "entropy"},
+        )
+        assert resp.status_code == 200
+
+    def test_annotate_endpoint_accepts_annotation(self):
+        # Сначала получаем кандидата
+        sample_resp = self.client.post(
+            "/active/sample", json={"texts": ["Газпром в Москве."], "n": 1}
+        )
+        cid = sample_resp.json()["candidates"][0]["candidate_id"]
+
+        annotate_resp = self.client.post(
+            "/active/annotate",
+            json={
+                "candidate_id": cid,
+                "annotation": [{"text": "Газпром", "label": "ORG", "start": 0, "end": 6}],
+            },
+        )
+        assert annotate_resp.status_code == 200
+        data = annotate_resp.json()
+        assert data["accepted"] is True
+        assert data["candidate_id"] == cid
+
+    def test_annotate_returns_recalibration_count(self):
+        sample_resp = self.client.post(
+            "/active/sample", json={"texts": ["Газпром в Москве."], "n": 1}
+        )
+        cid = sample_resp.json()["candidates"][0]["candidate_id"]
+        resp = self.client.post(
+            "/active/annotate",
+            json={"candidate_id": cid, "annotation": [{"text": "Газпром", "label": "ORG"}]},
+        )
+        assert "recalibrations" in resp.json()
+
+    def test_annotate_unknown_id_returns_404(self):
+        resp = self.client.post(
+            "/active/annotate",
+            json={"candidate_id": "nonexistent-uuid", "annotation": []},
+        )
+        assert resp.status_code == 404
+
+    def test_queue_endpoint_shows_pending(self):
+        self.client.post("/active/sample", json={"texts": ["Газпром в Москве."], "n": 1})
+        resp = self.client.get("/active/queue")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "pending" in data
+        assert "candidates" in data
+        assert data["pending"] == 1
+
+    def test_queue_empty_after_annotation(self):
+        sample_resp = self.client.post(
+            "/active/sample", json={"texts": ["Газпром в Москве."], "n": 1}
+        )
+        cid = sample_resp.json()["candidates"][0]["candidate_id"]
+        self.client.post(
+            "/active/annotate",
+            json={"candidate_id": cid, "annotation": []},
+        )
+        queue_resp = self.client.get("/active/queue")
+        assert queue_resp.json()["pending"] == 0
+
+    def test_stats_endpoint_structure(self):
+        resp = self.client.get("/active/stats")
+        assert resp.status_code == 200
+        data = resp.json()
+        for field in [
+            "total_candidates",
+            "annotated",
+            "pending",
+            "avg_uncertainty",
+            "recalibrations",
+            "strategy_used",
+        ]:
+            assert field in data
+
+    def test_stats_reflect_annotations(self):
+        sample_resp = self.client.post(
+            "/active/sample", json={"texts": ["Газпром.", "Яндекс."], "n": 2}
+        )
+        cid = sample_resp.json()["candidates"][0]["candidate_id"]
+        self.client.post(
+            "/active/annotate",
+            json={"candidate_id": cid, "annotation": []},
+        )
+        stats = self.client.get("/active/stats").json()
+        assert stats["annotated"] == 1
+        assert stats["pending"] == 1
+
+    def test_reset_endpoint(self):
+        self.client.post("/active/sample", json={"texts": ["Газпром."], "n": 1})
+        resp = self.client.post("/active/reset")
+        assert resp.status_code == 200
+        assert resp.json()["reset"] is True
+        stats = self.client.get("/active/stats").json()
+        assert stats["total_candidates"] == 0
+
+    def test_health_includes_active_learning(self):
+        resp = self.client.get("/health")
+        data = resp.json()
+        assert "active_learning" in data
+        al = data["active_learning"]
+        assert "pending" in al
+        assert "annotated" in al
+        assert "recalibrations" in al
+
+    def test_full_active_learning_cycle(self):
+        """Полный цикл: sample → annotate → recalibrate → check stats."""
+        texts = [
+            "Газпром нефть в Москве.",
+            "Яндекс открыл офис.",
+            "непонятный текст без сущностей для cold-start",
+        ]
+        # 1. Отбор кандидатов
+        sample_resp = self.client.post("/active/sample", json={"texts": texts, "n": 3})
+        candidates = sample_resp.json()["candidates"]
+        assert len(candidates) == 3
+
+        # 2. Аннотирование двух кандидатов
+        for c in candidates[:2]:
+            self.client.post(
+                "/active/annotate",
+                json={
+                    "candidate_id": c["candidate_id"],
+                    "annotation": [{"text": "Газпром", "label": "ORG", "start": 0, "end": 6}],
+                },
+            )
+
+        # 3. Проверка статистики
+        stats = self.client.get("/active/stats").json()
+        assert stats["annotated"] == 2
+        assert stats["pending"] == 1
+        assert stats["recalibrations"] == 2
