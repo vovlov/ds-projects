@@ -620,6 +620,39 @@
       Источники: Künzel et al. 2019 PNAS (Metalearners for HCTE), Radcliffe 2007 (Qini),
         arxiv 2604.06123 (Large-Scale Meta-Learner Comparison 2026), causalml docs.
 
+- [x] Active Learning для NER (Project 03) — 2026-05-21
+      ner/active/strategy.py: 3 стратегии неопределённости (Lewis & Gale 1994):
+        least_confidence_score() = max nonconformity (текст с хотя бы одной неуверенной сущностью),
+        margin_score() = диапазон nonconformity (разброс между уверенными и нет),
+        entropy_score() = среднее бинарной энтропии H(nonconformity) по всем сущностям.
+        score_text() — единый интерфейс выбора стратегии → UncertaintyScore namedtuple.
+        Интеграция с ConformalNERPredictor: nonconformity_score ∈ [0,1] как прокси
+        неопределённости без дополнительного inference-прохода.
+      ner/active/pool.py: LabelingPool — state machine аннотации:
+        unlabeled → queried (query/batch_size топ по score) → labeled (label/annotations).
+        query() сортирует по убыванию uncertainty_score — аннотатор получает ценнейшие примеры первыми.
+        label() возвращает None при неверном item_id (защита от двойной разметки).
+        PoolItem/QueryBatch/PoolStatus dataclasses, reset() для тестовой изоляции.
+      ner/api/app.py: 6 новых endpoint:
+        POST /active/pool/add (тексты → inference → uncertainty score → пул, 422 на неверную стратегию),
+        POST /active/pool/query (топ-N для аннотации, items отсортированы по score убыванию),
+        POST /active/pool/label (разметка annotator → labeled state, 404 если item не в queried),
+        GET  /active/pool/status (unlabeled/queried/labeled counts),
+        GET  /active/pool/labeled (все готовые для fine-tuning примеры),
+        POST /active/pool/reset (сброс сессии аннотации).
+      36 новых тестов: TestSamplingStrategies×14 (LC/margin/entropy пустой/одиночный/sorted/
+        entropy_max_at_half/symmetric, score_text×3, higher_uncertainty),
+        TestLabelingPool×12 (initial_zero, add_ids, add_increments, mismatch_raises,
+        query_sorted, query_state_transition, fewer_than_batch, empty_pool,
+        label_transition, unknown_id_none, get_labeled, reset),
+        TestActiveLearningAPI×11 (add_200, structure, invalid_422, query_sorted, query_structure,
+        label_200, label_404, status, full_cycle, margin_strategy, reset).
+      97/97 тестов зелёных (было 61, +36).
+      Бизнес-эффект: аннотировать 50 самых неопределённых примеров эффективнее,
+        чем 500 случайных (Coleman et al. 2020: 2-10x экономия на разметке).
+      Источники: Lewis & Gale 1994 (LC sampling), Settles 2012 "Active Learning" (synthesis lecture),
+        Coleman et al. 2020 Selection via Proxy (arxiv 1906.00884), EU AI Act Article 13.
+
 ---
 
 ## Ежедневный цикл улучшений

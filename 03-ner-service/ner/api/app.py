@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from ..active.pool import LabelingPool
+from ..active.strategy import ActiveLearningConfig, SamplingStrategy, score_text
 from ..data.collection5 import get_collection5_sample
 from ..model.conformal import ConformalNERPredictor
 from ..model.ner import extract_entities_from_bio, predict
@@ -25,6 +29,13 @@ for _sent in _cal_dataset:
     _cal_entities.extend(extract_entities_from_bio(_tokens, _labels))
 if _cal_entities:
     _conformal.calibrate(_cal_entities)
+
+# Active learning pool — singleton per process
+_pool = LabelingPool()
+_al_config = ActiveLearningConfig()
+
+
+# ── Request/Response models ───────────────────────────────────────────────────
 
 
 class NERRequest(BaseModel):
@@ -59,6 +70,70 @@ class ConformalNERResponse(BaseModel):
     text: str
     q_hat: float
     calibrated: bool
+
+
+# Active learning models
+class ActiveAddRequest(BaseModel):
+    texts: list[str] = Field(..., min_length=1, description="Тексты для добавления в пул")
+    strategy: str = Field(default="least_confidence", description="Стратегия выборки")
+
+
+class ActiveAddResponse(BaseModel):
+    ids: list[str]
+    added: int
+    strategy: str
+
+
+class ActiveQueryRequest(BaseModel):
+    batch_size: int = Field(default=10, ge=1, le=100)
+
+
+class ActiveQueryItem(BaseModel):
+    id: str
+    text: str
+    uncertainty_score: float
+    n_entities: int
+    strategy: str
+
+
+class ActiveQueryResponse(BaseModel):
+    items: list[ActiveQueryItem]
+    strategy: str
+    unlabeled_remaining: int
+
+
+class AnnotationEntity(BaseModel):
+    text: str
+    label: str
+    start: int
+    end: int
+
+
+class ActiveLabelRequest(BaseModel):
+    item_id: str
+    annotations: list[AnnotationEntity]
+
+
+class ActiveLabelResponse(BaseModel):
+    id: str
+    labeled: bool
+    labeled_at: str | None
+
+
+class ActiveStatusResponse(BaseModel):
+    unlabeled_count: int
+    queried_count: int
+    labeled_count: int
+    total_added: int
+    strategy: str
+
+
+class ActiveLabeledResponse(BaseModel):
+    items: list[dict[str, Any]]
+    total: int
+
+
+# ── Existing endpoints ────────────────────────────────────────────────────────
 
 
 @app.get("/health")
@@ -122,3 +197,126 @@ def predict_conformal(request: NERRequest):
         q_hat=_conformal.q_hat,
         calibrated=_conformal._calibrated,
     )
+
+
+# ── Active learning endpoints ─────────────────────────────────────────────────
+
+
+@app.post("/active/pool/add", response_model=ActiveAddResponse)
+def active_pool_add(request: ActiveAddRequest):
+    """
+    Добавить тексты в пул активного обучения.
+
+    Каждый текст прогоняется через конформный NER — nonconformity_score
+    используется как прокси неопределённости без дополнительного inference.
+    Тексты без найденных сущностей получают score=0 (нет сигнала для обучения).
+    """
+    try:
+        strategy = SamplingStrategy(request.strategy)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Неизвестная стратегия: {request.strategy}. "
+            f"Допустимые: {[s.value for s in SamplingStrategy]}",
+        ) from None
+
+    config = ActiveLearningConfig(strategy=strategy)
+    uncertainty_scores: list[float] = []
+
+    for text in request.texts:
+        conformal_results = _conformal.predict_text(text)
+        nc_scores = [r.nonconformity_score for r in conformal_results]
+        scored = score_text(text, nc_scores, config)
+        uncertainty_scores.append(scored.score)
+
+    ids = _pool.add_texts(request.texts, uncertainty_scores, str(strategy))
+    return ActiveAddResponse(ids=ids, added=len(ids), strategy=str(strategy))
+
+
+@app.post("/active/pool/query", response_model=ActiveQueryResponse)
+def active_pool_query(request: ActiveQueryRequest):
+    """
+    Запросить топ-N наиболее неопределённых текстов для аннотации.
+
+    Возвращает items, отсортированные по убыванию uncertainty_score.
+    После вызова тексты переходят в статус 'queried' — ожидают разметки.
+    """
+    batch = _pool.query(request.batch_size)
+
+    items = [
+        ActiveQueryItem(
+            id=item.id,
+            text=item.text,
+            uncertainty_score=item.uncertainty_score,
+            n_entities=0,
+            strategy=item.strategy,
+        )
+        for item in batch.items
+    ]
+
+    return ActiveQueryResponse(
+        items=items,
+        strategy=batch.strategy,
+        unlabeled_remaining=batch.unlabeled_remaining,
+    )
+
+
+@app.post("/active/pool/label", response_model=ActiveLabelResponse)
+def active_pool_label(request: ActiveLabelRequest):
+    """
+    Принять разметку аннотатора для указанного item_id.
+
+    annotations — список именованных сущностей в формате {text, label, start, end}.
+    После вызова item переходит в статус 'labeled' и доступен через /active/pool/labeled.
+    """
+    annotations = [a.model_dump() for a in request.annotations]
+    result = _pool.label(request.item_id, annotations)
+
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"item_id {request.item_id!r} не найден в очереди аннотации. "
+            "Сначала вызовите /active/pool/query.",
+        )
+
+    return ActiveLabelResponse(
+        id=result.id,
+        labeled=True,
+        labeled_at=result.labeled_at,
+    )
+
+
+@app.get("/active/pool/status", response_model=ActiveStatusResponse)
+def active_pool_status():
+    """Статус пула: кол-во текстов в каждом состоянии."""
+    status = _pool.status(str(_al_config.strategy))
+    return ActiveStatusResponse(
+        unlabeled_count=status.unlabeled_count,
+        queried_count=status.queried_count,
+        labeled_count=status.labeled_count,
+        total_added=status.total_added,
+        strategy=status.strategy,
+    )
+
+
+@app.get("/active/pool/labeled", response_model=ActiveLabeledResponse)
+def active_pool_labeled():
+    """Вернуть все размеченные примеры (готово для fine-tuning)."""
+    labeled = _pool.get_labeled()
+    items = [
+        {
+            "id": item.id,
+            "text": item.text,
+            "annotations": item.annotations,
+            "labeled_at": item.labeled_at,
+        }
+        for item in labeled
+    ]
+    return ActiveLabeledResponse(items=items, total=len(items))
+
+
+@app.post("/active/pool/reset")
+def active_pool_reset():
+    """Сбросить пул (для тестирования / новой сессии аннотации)."""
+    _pool.reset()
+    return {"reset": True}

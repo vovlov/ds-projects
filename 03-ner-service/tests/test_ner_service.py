@@ -535,3 +535,373 @@ class TestConformalAPI:
         client = TestClient(app)
         resp = client.get("/health")
         assert "conformal_calibrated" in resp.json()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Active Learning Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSamplingStrategies:
+    """Unit-тесты стратегий активного обучения."""
+
+    def test_least_confidence_empty(self):
+        from ner.active.strategy import least_confidence_score
+
+        assert least_confidence_score([]) == 0.0
+
+    def test_least_confidence_single(self):
+        from ner.active.strategy import least_confidence_score
+
+        assert least_confidence_score([0.8]) == 0.8
+
+    def test_least_confidence_returns_max(self):
+        from ner.active.strategy import least_confidence_score
+
+        assert least_confidence_score([0.3, 0.9, 0.5]) == 0.9
+
+    def test_margin_empty(self):
+        from ner.active.strategy import margin_score
+
+        assert margin_score([]) == 0.0
+
+    def test_margin_single(self):
+        from ner.active.strategy import margin_score
+
+        assert margin_score([0.7]) == 0.7
+
+    def test_margin_computes_range(self):
+        from ner.active.strategy import margin_score
+
+        result = margin_score([0.2, 0.8])
+        assert abs(result - 0.6) < 1e-6
+
+    def test_entropy_empty(self):
+        from ner.active.strategy import entropy_score
+
+        assert entropy_score([]) == 0.0
+
+    def test_entropy_max_at_half(self):
+        from ner.active.strategy import entropy_score
+
+        # Бинарная энтропия максимальна при p=0.5 (nonconformity=0.5)
+        e_half = entropy_score([0.5])
+        e_low = entropy_score([0.1])
+        e_high = entropy_score([0.9])
+        assert e_half > e_low
+        assert e_half > e_high
+
+    def test_entropy_symmetric(self):
+        from ner.active.strategy import entropy_score
+
+        # H(p) = H(1-p) для бинарной энтропии
+        assert abs(entropy_score([0.3]) - entropy_score([0.7])) < 1e-6
+
+    def test_score_text_least_confidence(self):
+        from ner.active.strategy import ActiveLearningConfig, SamplingStrategy, score_text
+
+        config = ActiveLearningConfig(strategy=SamplingStrategy.LEAST_CONFIDENCE)
+        result = score_text("Газпром.", [0.2, 0.8], config)
+        assert result.score == 0.8
+        assert result.n_entities == 2
+        assert result.strategy == "least_confidence"
+
+    def test_score_text_margin(self):
+        from ner.active.strategy import ActiveLearningConfig, SamplingStrategy, score_text
+
+        config = ActiveLearningConfig(strategy=SamplingStrategy.MARGIN)
+        result = score_text("test", [0.1, 0.7], config)
+        assert abs(result.score - 0.6) < 1e-3
+
+    def test_score_text_entropy(self):
+        from ner.active.strategy import ActiveLearningConfig, SamplingStrategy, score_text
+
+        config = ActiveLearningConfig(strategy=SamplingStrategy.ENTROPY)
+        result = score_text("test", [0.5], config)
+        assert result.score > 0.9  # max entropy at 0.5
+
+    def test_higher_uncertainty_higher_score(self):
+        """Более неопределённый текст должен получать более высокий score."""
+        from ner.active.strategy import ActiveLearningConfig, SamplingStrategy, score_text
+
+        config = ActiveLearningConfig(strategy=SamplingStrategy.LEAST_CONFIDENCE)
+        certain = score_text("A", [0.0, 0.1], config)
+        uncertain = score_text("B", [0.9, 0.95], config)
+        assert uncertain.score > certain.score
+
+
+class TestLabelingPool:
+    """Unit-тесты менеджера пула аннотации."""
+
+    def _fresh_pool(self):
+        from ner.active.pool import LabelingPool
+
+        return LabelingPool()
+
+    def test_initial_status_all_zero(self):
+        pool = self._fresh_pool()
+        status = pool.status("least_confidence")
+        assert status.unlabeled_count == 0
+        assert status.queried_count == 0
+        assert status.labeled_count == 0
+        assert status.total_added == 0
+
+    def test_add_texts_returns_ids(self):
+        pool = self._fresh_pool()
+        ids = pool.add_texts(["text1", "text2"], [0.5, 0.8], "least_confidence")
+        assert len(ids) == 2
+        assert all(isinstance(i, str) and len(i) > 0 for i in ids)
+
+    def test_add_increments_unlabeled(self):
+        pool = self._fresh_pool()
+        pool.add_texts(["a", "b", "c"], [0.1, 0.5, 0.9], "least_confidence")
+        status = pool.status("least_confidence")
+        assert status.unlabeled_count == 3
+        assert status.total_added == 3
+
+    def test_add_length_mismatch_raises(self):
+        import pytest
+
+        pool = self._fresh_pool()
+        with pytest.raises(ValueError):
+            pool.add_texts(["text"], [0.5, 0.8], "least_confidence")
+
+    def test_query_returns_top_n_sorted(self):
+        pool = self._fresh_pool()
+        pool.add_texts(["low", "mid", "high"], [0.1, 0.5, 0.9], "least_confidence")
+        batch = pool.query(2)
+        assert len(batch.items) == 2
+        # Наиболее неопределённые идут первыми
+        assert batch.items[0].uncertainty_score >= batch.items[1].uncertainty_score
+
+    def test_query_moves_to_queried_state(self):
+        pool = self._fresh_pool()
+        pool.add_texts(["text"], [0.8], "least_confidence")
+        pool.query(1)
+        status = pool.status("least_confidence")
+        assert status.unlabeled_count == 0
+        assert status.queried_count == 1
+
+    def test_query_fewer_than_batch_size(self):
+        pool = self._fresh_pool()
+        pool.add_texts(["only"], [0.5], "least_confidence")
+        batch = pool.query(10)
+        assert len(batch.items) == 1
+        assert batch.unlabeled_remaining == 0
+
+    def test_query_empty_pool_returns_empty(self):
+        pool = self._fresh_pool()
+        batch = pool.query(5)
+        assert batch.items == []
+
+    def test_label_transitions_to_labeled(self):
+        pool = self._fresh_pool()
+        pool.add_texts(["text"], [0.7], "least_confidence")
+        batch = pool.query(1)
+        item_id = batch.items[0].id
+        result = pool.label(item_id, [{"text": "ООО", "label": "ORG", "start": 0, "end": 3}])
+        assert result is not None
+        assert result.labeled_at is not None
+        assert len(result.annotations) == 1
+        status = pool.status("least_confidence")
+        assert status.labeled_count == 1
+        assert status.queried_count == 0
+
+    def test_label_unknown_id_returns_none(self):
+        pool = self._fresh_pool()
+        result = pool.label("nonexistent-id", [])
+        assert result is None
+
+    def test_get_labeled_returns_all(self):
+        pool = self._fresh_pool()
+        pool.add_texts(["t1", "t2"], [0.5, 0.6], "least_confidence")
+        batch = pool.query(2)
+        for item in batch.items:
+            pool.label(item.id, [])
+        labeled = pool.get_labeled()
+        assert len(labeled) == 2
+
+    def test_reset_clears_all_states(self):
+        pool = self._fresh_pool()
+        pool.add_texts(["a", "b"], [0.5, 0.8], "least_confidence")
+        pool.query(1)
+        pool.reset()
+        status = pool.status("least_confidence")
+        assert status.unlabeled_count == 0
+        assert status.queried_count == 0
+        assert status.labeled_count == 0
+        assert status.total_added == 0
+
+
+class TestActiveLearningAPI:
+    """Интеграционные тесты /active/* endpoints."""
+
+    def setup_method(self):
+        """Сбросить пул перед каждым тестом для изоляции."""
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        client.post("/active/pool/reset")
+
+    def test_add_returns_200(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/active/pool/add",
+            json={"texts": ["Газпром в Москве.", "Яндекс"], "strategy": "least_confidence"},
+        )
+        assert resp.status_code == 200
+
+    def test_add_response_structure(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/active/pool/add",
+            json={"texts": ["text1", "text2"], "strategy": "entropy"},
+        ).json()
+        assert "ids" in resp
+        assert resp["added"] == 2
+        assert resp["strategy"] == "entropy"
+
+    def test_add_invalid_strategy_returns_422(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/active/pool/add",
+            json={"texts": ["text"], "strategy": "unknown_strategy"},
+        )
+        assert resp.status_code == 422
+
+    def test_query_returns_sorted_by_score(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        client.post(
+            "/active/pool/add",
+            json={
+                "texts": ["Газпром.", "Привет.", "ОАО Сбербанк в Москве"],
+                "strategy": "least_confidence",
+            },
+        )
+        resp = client.post("/active/pool/query", json={"batch_size": 3}).json()
+        scores = [item["uncertainty_score"] for item in resp["items"]]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_query_response_structure(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        client.post("/active/pool/add", json={"texts": ["Яндекс"], "strategy": "margin"})
+        resp = client.post("/active/pool/query", json={"batch_size": 1}).json()
+        assert "items" in resp
+        assert "strategy" in resp
+        assert "unlabeled_remaining" in resp
+
+    def test_label_moves_item_to_labeled(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        client.post(
+            "/active/pool/add",
+            json={"texts": ["Газпром"], "strategy": "least_confidence"},
+        )
+        query_resp = client.post("/active/pool/query", json={"batch_size": 1}).json()
+        item_id = query_resp["items"][0]["id"]
+
+        label_resp = client.post(
+            "/active/pool/label",
+            json={
+                "item_id": item_id,
+                "annotations": [{"text": "Газпром", "label": "ORG", "start": 0, "end": 7}],
+            },
+        )
+        assert label_resp.status_code == 200
+        data = label_resp.json()
+        assert data["labeled"] is True
+        assert data["labeled_at"] is not None
+
+    def test_label_unknown_id_returns_404(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/active/pool/label",
+            json={"item_id": "nonexistent-uuid", "annotations": []},
+        )
+        assert resp.status_code == 404
+
+    def test_status_endpoint(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        client.post(
+            "/active/pool/add",
+            json={"texts": ["t1", "t2"], "strategy": "least_confidence"},
+        )
+        status = client.get("/active/pool/status").json()
+        assert status["unlabeled_count"] == 2
+        assert status["queried_count"] == 0
+        assert status["labeled_count"] == 0
+        assert status["total_added"] == 2
+
+    def test_full_annotation_cycle(self):
+        """Полный цикл: add → query → label → labeled."""
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        texts = ["Газпром в Москве.", "Яндекс открыл офис.", "Привет мир."]
+        client.post("/active/pool/add", json={"texts": texts, "strategy": "entropy"})
+        query_resp = client.post("/active/pool/query", json={"batch_size": 2}).json()
+        assert len(query_resp["items"]) == 2
+
+        for item in query_resp["items"]:
+            client.post(
+                "/active/pool/label",
+                json={"item_id": item["id"], "annotations": []},
+            )
+
+        labeled_resp = client.get("/active/pool/labeled").json()
+        assert labeled_resp["total"] == 2
+
+        status = client.get("/active/pool/status").json()
+        assert status["labeled_count"] == 2
+        assert status["unlabeled_count"] == 1  # один остался
+        assert status["queried_count"] == 0
+
+    def test_margin_strategy_via_add(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/active/pool/add",
+            json={"texts": ["Москва"], "strategy": "margin"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["strategy"] == "margin"
+
+    def test_reset_clears_pool(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        client.post(
+            "/active/pool/add",
+            json={"texts": ["text"], "strategy": "least_confidence"},
+        )
+        client.post("/active/pool/reset")
+        status = client.get("/active/pool/status").json()
+        assert status["total_added"] == 0
