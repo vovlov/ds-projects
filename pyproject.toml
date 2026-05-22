@@ -50,6 +50,7 @@ rag = [
     "uvicorn>=0.34",
     "gradio>=5.0",
     "rank-bm25>=0.2.2",
+    "scikit-learn>=1.5",
 ]
 ner = [
     "torch>=2.4",

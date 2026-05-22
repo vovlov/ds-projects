@@ -6,13 +6,14 @@ import contextlib
 from pathlib import Path
 
 import gradio as gr
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..generation.chain import generate_answer, generate_answer_with_gate
 from ..generation.stream import stream_answer
 from ..ingestion.loader import chunk_documents, load_documents
+from ..knowledge_graph.graph import KnowledgeGraph
 from ..retrieval.hybrid import HybridIndex, hybrid_search
 from ..retrieval.store import get_client, get_or_create_collection, index_chunks
 
@@ -24,10 +25,11 @@ DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "documents"
 _collection = None
 _hybrid_index: HybridIndex | None = None
 _indexed_chunks: list[dict] = []
+_knowledge_graph: KnowledgeGraph = KnowledgeGraph()
 
 
 def _get_collection():
-    global _collection, _hybrid_index, _indexed_chunks
+    global _collection, _hybrid_index, _indexed_chunks, _knowledge_graph
     if _collection is None:
         client = get_client()
         _collection = get_or_create_collection(client)
@@ -40,6 +42,7 @@ def _get_collection():
                 index_chunks(chunks, _collection)
                 _indexed_chunks = chunks
                 _hybrid_index = HybridIndex.build(chunks)
+                _knowledge_graph.build_from_chunks(chunks)
     return _collection
 
 
@@ -50,7 +53,7 @@ class QueryRequest(BaseModel):
     n_results: int = 5
     check_faithfulness: bool = True
     faithfulness_threshold: float = 0.5
-    retrieval_method: str = "hybrid"  # "hybrid" | "semantic"
+    retrieval_method: str = "hybrid"  # "hybrid" | "semantic" | "graph"
 
 
 class QueryResponse(BaseModel):
@@ -98,6 +101,23 @@ def query(request: QueryRequest) -> QueryResponse:
             n_results=request.n_results,
         )
         used_method = "hybrid" if _hybrid_index is not None else "semantic"
+    elif request.retrieval_method == "graph":
+        context = _knowledge_graph.query_graph(
+            request.question,
+            _indexed_chunks,
+            n_results=request.n_results,
+        )
+        if not context:
+            # Fall back to hybrid when graph finds no entities in query
+            context = hybrid_search(
+                request.question,
+                collection,
+                _hybrid_index,
+                n_results=request.n_results,
+            )
+            used_method = "graph_fallback_hybrid"
+        else:
+            used_method = "graph"
     else:
         from ..retrieval.store import search as semantic_search
 
@@ -222,12 +242,14 @@ def index_documents(request: IndexRequest = IndexRequest()):
 
     _indexed_chunks = chunks
     _hybrid_index = HybridIndex.build(chunks)
+    _knowledge_graph.build_from_chunks(chunks)
 
     return {
         "indexed_chunks": count,
         "documents": len(docs),
         "chunking_strategy": request.chunking_strategy,
         "hybrid_index": _hybrid_index._bm25 is not None,
+        "knowledge_graph_nodes": _knowledge_graph.stats().n_nodes,
     }
 
 
@@ -276,6 +298,43 @@ def chunk_preview(request: ChunkPreviewRequest) -> ChunkPreviewResponse:
         chunking_strategy=request.chunking_strategy,
         semantic_available=semantic_available_fn(),
     )
+
+
+@app.post("/graph/build")
+def graph_build():
+    """Build (or rebuild) the Knowledge Graph from currently indexed chunks.
+
+    Automatically called on /index. Use this endpoint to rebuild after
+    manual updates to indexed_chunks without re-indexing all documents.
+    """
+    global _knowledge_graph
+    if not _indexed_chunks:
+        return {"status": "no_chunks", "n_nodes": 0, "n_edges": 0}
+
+    stats = _knowledge_graph.build_from_chunks(_indexed_chunks)
+    return {
+        "status": "built",
+        **stats.to_dict(),
+    }
+
+
+@app.get("/graph/stats")
+def graph_stats():
+    """Knowledge Graph statistics: node/edge counts and top entities."""
+    stats = _knowledge_graph.stats()
+    return {"is_built": _knowledge_graph.is_built, **stats.to_dict()}
+
+
+@app.get("/graph/entity/{entity_key}")
+def graph_entity(entity_key: str):
+    """Return 1-hop subgraph centred on an entity (D3.js-compatible format).
+
+    entity_key should be lower-cased entity text (e.g. "openai", "machine learning").
+    """
+    subgraph = _knowledge_graph.get_entity_subgraph(entity_key.lower())
+    if not subgraph["found"] and not subgraph["nodes"]:
+        raise HTTPException(status_code=404, detail=f"Entity '{entity_key}' not found in graph")
+    return subgraph
 
 
 def ask(question: str, n_results: int = 5, use_hybrid: bool = True) -> str:

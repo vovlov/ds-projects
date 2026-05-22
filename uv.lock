@@ -1311,6 +1311,7 @@ rag = [
     { name = "langchain-community" },
     { name = "langchain-text-splitters" },
     { name = "rank-bm25" },
+    { name = "scikit-learn" },
     { name = "uvicorn" },
 ]
 recsys = [
@@ -1404,6 +1405,7 @@ requires-dist = [
     { name = "scikit-learn", marker = "extra == 'cv'", specifier = ">=1.5" },
     { name = "scikit-learn", marker = "extra == 'fraud'", specifier = ">=1.5" },
     { name = "scikit-learn", marker = "extra == 'pricing'", specifier = ">=1.5" },
+    { name = "scikit-learn", marker = "extra == 'rag'", specifier = ">=1.5" },
     { name = "scikit-learn", marker = "extra == 'recsys'", specifier = ">=1.5" },
     { name = "scikit-learn", marker = "extra == 'review'", specifier = ">=1.5" },
     { name = "scipy", marker = "extra == 'quality'", specifier = ">=1.14" },
