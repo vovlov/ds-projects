@@ -653,6 +653,32 @@
       Источники: Lewis & Gale 1994 (LC sampling), Settles 2012 "Active Learning" (synthesis lecture),
         Coleman et al. 2020 Selection via Proxy (arxiv 1906.00884), EU AI Act Article 13.
 
+- [x] GraphRAG Knowledge Graph retrieval для RAG (Project 02) — 2026-05-22
+      rag/knowledge_graph/extractor.py: regex NER (DATE/ORG/CONCEPT/PERSON) без LLM.
+        _safe_text() для безопасного group(1) из паттернов с capture group (quoted concept)
+        и без него (акронимы). Lookahead (?=[^A-Za-z]|$) вместо \b для ORG с периодом в суффиксе.
+      rag/knowledge_graph/graph.py: KnowledgeGraph pure-dict adjacency (без NetworkX).
+        build_from_chunks(): co-occurrence edges между сущностями одного чанка (weighted).
+        query_graph(): query → entity extraction → BFS expand (max_hops=1) → rank chunks
+        by entity mention count → top-n. Fallback: пустой список если сущностей не найдено.
+        get_entity_subgraph(): D3.js-совместимый формат для графической визуализации (1-hop).
+        KGNode/KGEdge/KGStats dataclasses, stats().to_dict() для мониторинга.
+      rag/api/app.py: 3 новых endpoint:
+        GET  /graph/stats (n_nodes, n_edges, n_chunks, top_entities, is_built),
+        POST /graph/build (явная перестройка из indexed_chunks, авто-вызов при /index),
+        GET  /graph/entity/{key} (1-hop subgraph, 404 если не найдена).
+        Новый retrieval_method="graph" в POST /query:
+        граф-ретривал → fallback на hybrid при отсутствии сущностей в запросе.
+      pyproject.toml: scikit-learn>=1.5 добавлен в [rag] extras (требуется SemanticChunker).
+      35 новых тестов: TestEntityExtractor×10, TestKnowledgeGraph×16, TestGraphRAGAPI×10.
+      129/129 тестов зелёных (было 94, +35). Бонус: SemanticChunker тест исправлен
+      добавлением sklearn — без него paragraph fallback объединял все абзацы в один чанк.
+      Бизнес-эффект: отвечает на multi-hop вопросы ("Связь между [A] и [B]?") где
+        vector-only search не справляется — сущности не встречаются в одном чанке,
+        но связаны через граф совместной встречаемости (Microsoft GraphRAG arxiv 2404.16130).
+      Источники: Microsoft GraphRAG arxiv 2404.16130 (2024), Calmops GraphRAG Guide 2026,
+        Graph Praxis practitioner guide 2026, calmops.com 2026.
+
 ---
 
 ## Ежедневный цикл улучшений
