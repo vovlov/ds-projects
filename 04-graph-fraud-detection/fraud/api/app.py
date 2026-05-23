@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from ..data.dataset import generate_synthetic_transactions, get_feature_matrix
 from ..models.baseline.tabular import train_baseline
 from ..models.calibration import CalibrationResult, FraudCalibrator
+from ..models.community import CommunityConfig, DetectionResult, FraudRingDetector
 from ..models.temporal import (
     TEMPORAL_FEATURE_NAMES,
     NodeTemporalFeatures,
@@ -40,12 +41,22 @@ _extractor = TemporalFeatureExtractor(TemporalConfig(time_window=30.0))
 _calibrator: FraudCalibrator | None = None
 _calibration_result: CalibrationResult | None = None
 
+# Детектор мошеннических колец (singleton — не хранит состояние между запросами)
+_ring_detector = FraudRingDetector()
+_last_detection: DetectionResult | None = None
+
 
 def _reset_calibrator() -> None:
     """Сбросить глобальный калибратор (для тестовой изоляции)."""
     global _calibrator, _calibration_result
     _calibrator = None
     _calibration_result = None
+
+
+def _reset_ring_detector() -> None:
+    """Сбросить последний результат детекции (для тестовой изоляции)."""
+    global _last_detection
+    _last_detection = None
 
 
 def _ensure_model():
@@ -257,6 +268,29 @@ def score_batch(transactions: list[TransactionInput]):
     ]
 
 
+class CommunityNodeInput(BaseModel):
+    node_id: str
+    is_fraud: bool | None = Field(None, description="None если метка неизвестна")
+
+
+class CommunityEdgeInput(BaseModel):
+    from_id: str
+    to_id: str
+
+
+class CommunityDetectRequest(BaseModel):
+    """Граф транзакций для детекции мошеннических колец.
+
+    Пример: 100 аккаунтов + 300 транзакций → алгоритм находит 5-10 сообществ,
+    часть из которых — скоординированные fraud rings.
+    """
+
+    nodes: list[CommunityNodeInput] = Field(..., min_length=1)
+    edges: list[CommunityEdgeInput] = Field(default_factory=list)
+    fraud_ratio_high: float = Field(0.3, ge=0.0, le=1.0, description="Порог для risk_level=high")
+    min_ring_size: int = Field(2, ge=1, description="Минимальный размер подозрительного кольца")
+
+
 @app.post("/score/graph", response_model=GraphFraudScore)
 def score_with_temporal(txn: GraphTransactionInput):
     """Temporal-обогащённая оценка: base (3) + temporal graph features (6).
@@ -297,3 +331,66 @@ def score_with_temporal(txn: GraphTransactionInput):
         temporal_flags=explanations,
         feature_contributions=contributions,
     )
+
+
+@app.post("/community/detect")
+def detect_fraud_rings(req: CommunityDetectRequest) -> dict:
+    """Обнаружить мошеннические кольца через Label Propagation.
+
+    Алгоритм находит плотно связанные сообщества аккаунтов. Сообщества с высокой долей
+    known fraud → потенциальные fraud rings (организованное мошенничество).
+
+    Fraud rings (>30% known fraudsters) автоматически помечаются risk_level='high'
+    и возвращаются в suspicious_rings для приоритетного расследования.
+    """
+    global _last_detection
+
+    config = CommunityConfig(
+        fraud_ratio_high=req.fraud_ratio_high,
+        min_ring_size=req.min_ring_size,
+    )
+    detector = FraudRingDetector(config)
+
+    node_ids = [n.node_id for n in req.nodes]
+    edges = [(e.from_id, e.to_id) for e in req.edges]
+    fraud_labels = {n.node_id: n.is_fraud for n in req.nodes if n.is_fraud is not None}
+
+    result = detector.detect(node_ids, edges, fraud_labels)
+    _last_detection = result
+
+    logger.info(
+        f"Community detection: {result.n_communities} communities, "
+        f"{len(result.suspicious_rings)} suspicious rings, "
+        f"converged={result.converged} in {result.n_iterations} iter"
+    )
+
+    return result.to_dict()
+
+
+@app.get("/community/stats")
+def community_stats() -> dict:
+    """Статистика последней детекции колец (для Grafana / дашбордов).
+
+    Возвращает агрегированные метрики без полного списка узлов —
+    подходит для мониторинга без утечки PII.
+    """
+    if _last_detection is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No community detection run yet. Call POST /community/detect first.",
+        )
+
+    d = _last_detection
+    nodes_in_suspicious = sum(c.size for c in d.suspicious_rings)
+
+    return {
+        "n_communities": d.n_communities,
+        "n_suspicious_rings": len(d.suspicious_rings),
+        "total_nodes_analyzed": d.total_nodes,
+        "nodes_in_suspicious_rings": nodes_in_suspicious,
+        "suspicious_coverage_ratio": (
+            round(nodes_in_suspicious / d.total_nodes, 4) if d.total_nodes > 0 else 0.0
+        ),
+        "converged": d.converged,
+        "n_iterations": d.n_iterations,
+    }

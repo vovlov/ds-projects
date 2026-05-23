@@ -792,3 +792,265 @@ class TestCalibrationAPIEndpoints:
         client = TestClient(app)
         resp = client.get("/health")
         assert "calibration_fitted" in resp.json()
+
+
+class TestFraudCommunityUnit:
+    """Unit-тесты для детектора мошеннических колец (Label Propagation)."""
+
+    def _detector(self, **kwargs):
+        from fraud.models.community import CommunityConfig, FraudRingDetector
+
+        config = CommunityConfig(**kwargs)
+        return FraudRingDetector(config)
+
+    def test_empty_node_list_raises(self):
+        detector = self._detector()
+        with pytest.raises(ValueError, match="empty"):
+            detector.detect([], [])
+
+    def test_single_node_forms_own_community(self):
+        detector = self._detector()
+        result = detector.detect(["A"], [])
+        assert result.n_communities == 1
+        assert result.communities[0].node_ids == ["A"]
+
+    def test_two_cliques_separate_communities(self):
+        """Два несвязных треугольника → 2 сообщества."""
+        detector = self._detector()
+        nodes = ["A", "B", "C", "D", "E", "F"]
+        edges = [("A", "B"), ("B", "C"), ("A", "C"), ("D", "E"), ("E", "F"), ("D", "F")]
+        result = detector.detect(nodes, edges)
+        assert result.n_communities == 2
+
+    def test_all_connected_chain_same_community(self):
+        """Цепочка A-B-C-D → одно сообщество."""
+        detector = self._detector()
+        nodes = ["A", "B", "C", "D"]
+        edges = [("A", "B"), ("B", "C"), ("C", "D")]
+        result = detector.detect(nodes, edges)
+        assert result.n_communities == 1
+
+    def test_fraud_ratio_zero_no_fraud(self):
+        detector = self._detector()
+        nodes = ["A", "B"]
+        labels = {"A": False, "B": False}
+        result = detector.detect(nodes, [("A", "B")], labels)
+        assert result.communities[0].fraud_ratio == 0.0
+
+    def test_fraud_ratio_all_fraud(self):
+        detector = self._detector()
+        nodes = ["A", "B"]
+        labels = {"A": True, "B": True}
+        result = detector.detect(nodes, [("A", "B")], labels)
+        assert result.communities[0].fraud_ratio == 1.0
+
+    def test_fraud_ratio_mixed(self):
+        detector = self._detector()
+        nodes = ["A", "B", "C", "D"]
+        edges = [("A", "B"), ("B", "C"), ("C", "D")]
+        labels = {"A": True, "B": False, "C": True, "D": False}
+        result = detector.detect(nodes, edges, labels)
+        # Одно сообщество, 2 fraudsters из 4 labeled → ratio = 0.5
+        comm = result.communities[0]
+        assert abs(comm.fraud_ratio - 0.5) < 1e-6
+
+    def test_risk_level_high(self):
+        from fraud.models.community import CommunityConfig, FraudRingDetector
+
+        cfg = CommunityConfig(fraud_ratio_high=0.3)
+        detector = FraudRingDetector(cfg)
+        nodes = ["A", "B", "C"]
+        edges = [("A", "B"), ("B", "C")]
+        labels = {"A": True, "B": True, "C": False}
+        result = detector.detect(nodes, edges, labels)
+        assert result.communities[0].risk_level == "high"
+
+    def test_risk_level_medium(self):
+        from fraud.models.community import CommunityConfig, FraudRingDetector
+
+        cfg = CommunityConfig(fraud_ratio_medium=0.1, fraud_ratio_high=0.5)
+        detector = FraudRingDetector(cfg)
+        nodes = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
+        edges = [(f"{chr(65 + i)}", f"{chr(65 + i + 1)}") for i in range(9)]
+        labels = {n: (n == "A") for n in nodes}  # 1/10 = 0.1 → medium
+        result = detector.detect(nodes, edges, labels)
+        assert result.communities[0].risk_level in ("medium", "high")
+
+    def test_risk_level_low(self):
+        detector = self._detector()
+        nodes = ["A", "B"]
+        labels = {"A": False, "B": False}
+        result = detector.detect(nodes, [("A", "B")], labels)
+        assert result.communities[0].risk_level == "low"
+
+    def test_converged_simple_graph(self):
+        detector = self._detector()
+        result = detector.detect(["A", "B"], [("A", "B")])
+        assert result.converged is True
+        assert result.n_iterations >= 1
+
+    def test_communities_sorted_by_size_descending(self):
+        """Сообщества упорядочены по убыванию размера."""
+        detector = self._detector()
+        # Большая группа (4 узла) и маленькая (2 узла) — несвязные
+        nodes = ["A", "B", "C", "D", "X", "Y"]
+        edges = [("A", "B"), ("B", "C"), ("C", "D"), ("X", "Y")]
+        result = detector.detect(nodes, edges)
+        sizes = [c.size for c in result.communities]
+        assert sizes == sorted(sizes, reverse=True)
+
+    def test_suspicious_rings_filtered_by_risk_and_size(self):
+        """suspicious_rings содержит только high/medium с size >= min_ring_size."""
+        from fraud.models.community import CommunityConfig, FraudRingDetector
+
+        cfg = CommunityConfig(min_ring_size=2, fraud_ratio_high=0.3)
+        detector = FraudRingDetector(cfg)
+        nodes = ["A", "B", "X"]
+        edges = [("A", "B")]
+        labels = {"A": True, "B": True, "X": False}
+        result = detector.detect(nodes, edges, labels)
+        for ring in result.suspicious_rings:
+            assert ring.risk_level != "low"
+            assert ring.size >= 2
+
+    def test_isolated_node_forms_own_community(self):
+        detector = self._detector()
+        nodes = ["A", "B", "C"]
+        edges = [("A", "B")]  # C изолирован
+        result = detector.detect(nodes, edges)
+        sizes = sorted([c.size for c in result.communities], reverse=True)
+        assert sizes[0] >= 2  # группа A-B
+        assert sizes[-1] == 1  # одиночный C
+
+    def test_fraud_ratio_unlabeled_nodes_excluded(self):
+        """Unlabeled узлы не попадают в знаменатель fraud_ratio."""
+        detector = self._detector()
+        nodes = ["A", "B", "C"]
+        edges = [("A", "B"), ("B", "C")]
+        labels = {"A": True}  # B и C не labeled
+        result = detector.detect(nodes, edges, labels)
+        # Только 1 labeled узел (A=True) → fraud_ratio = 1.0
+        assert result.communities[0].fraud_ratio == 1.0
+
+    def test_community_result_to_dict_structure(self):
+        from fraud.models.community import CommunityResult
+
+        cr = CommunityResult(
+            community_id=0, size=3, fraud_ratio=0.5, risk_level="high", node_ids=["A", "B", "C"]
+        )
+        d = cr.to_dict()
+        assert set(d.keys()) == {"community_id", "size", "fraud_ratio", "risk_level", "node_ids"}
+        assert d["fraud_ratio"] == 0.5
+
+    def test_detection_result_total_nodes(self):
+        detector = self._detector()
+        nodes = ["A", "B", "C", "D", "E"]
+        result = detector.detect(nodes, [("A", "B")])
+        assert result.total_nodes == 5
+
+
+class TestCommunityAPIEndpoints:
+    """Интеграционные тесты для /community/* endpoint'ов."""
+
+    def _make_client(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import _reset_ring_detector, app
+
+        _reset_ring_detector()
+        return TestClient(app)
+
+    def _simple_payload(self, with_fraud=False):
+        nodes = [{"node_id": n} for n in ["A", "B", "C", "D", "E", "F"]]
+        if with_fraud:
+            nodes[0]["is_fraud"] = True
+            nodes[1]["is_fraud"] = True
+            nodes[2]["is_fraud"] = True
+        edges = [
+            {"from_id": "A", "to_id": "B"},
+            {"from_id": "B", "to_id": "C"},
+            {"from_id": "D", "to_id": "E"},
+            {"from_id": "E", "to_id": "F"},
+        ]
+        return {"nodes": nodes, "edges": edges}
+
+    def test_detect_returns_200(self):
+        client = self._make_client()
+        resp = client.post("/community/detect", json=self._simple_payload())
+        assert resp.status_code == 200
+
+    def test_detect_response_structure(self):
+        client = self._make_client()
+        resp = client.post("/community/detect", json=self._simple_payload())
+        data = resp.json()
+        expected_keys = (
+            "n_communities",
+            "communities",
+            "suspicious_rings",
+            "n_iterations",
+            "converged",
+            "total_nodes",
+        )
+        for key in expected_keys:
+            assert key in data, f"Missing key: {key}"
+
+    def test_detect_n_communities_positive(self):
+        client = self._make_client()
+        resp = client.post("/community/detect", json=self._simple_payload())
+        assert resp.json()["n_communities"] >= 1
+
+    def test_detect_total_nodes_matches_input(self):
+        client = self._make_client()
+        resp = client.post("/community/detect", json=self._simple_payload())
+        assert resp.json()["total_nodes"] == 6
+
+    def test_detect_with_high_fraud_generates_suspicious_rings(self):
+        client = self._make_client()
+        payload = {
+            "nodes": [
+                {"node_id": "A", "is_fraud": True},
+                {"node_id": "B", "is_fraud": True},
+                {"node_id": "C", "is_fraud": True},
+            ],
+            "edges": [{"from_id": "A", "to_id": "B"}, {"from_id": "B", "to_id": "C"}],
+        }
+        resp = client.post("/community/detect", json=payload)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["suspicious_rings"]) >= 1
+
+    def test_detect_empty_nodes_returns_422(self):
+        client = self._make_client()
+        resp = client.post("/community/detect", json={"nodes": [], "edges": []})
+        assert resp.status_code == 422
+
+    def test_community_stats_404_before_detect(self):
+        client = self._make_client()
+        resp = client.get("/community/stats")
+        assert resp.status_code == 404
+
+    def test_community_stats_200_after_detect(self):
+        client = self._make_client()
+        client.post("/community/detect", json=self._simple_payload())
+        resp = client.get("/community/stats")
+        assert resp.status_code == 200
+
+    def test_community_stats_structure(self):
+        client = self._make_client()
+        client.post("/community/detect", json=self._simple_payload())
+        data = client.get("/community/stats").json()
+        for key in (
+            "n_communities",
+            "n_suspicious_rings",
+            "total_nodes_analyzed",
+            "nodes_in_suspicious_rings",
+            "suspicious_coverage_ratio",
+            "converged",
+            "n_iterations",
+        ):
+            assert key in data, f"Missing key: {key}"
+
+    def test_community_stats_coverage_ratio_in_range(self):
+        client = self._make_client()
+        client.post("/community/detect", json=self._simple_payload())
+        data = client.get("/community/stats").json()
+        assert 0.0 <= data["suspicious_coverage_ratio"] <= 1.0

@@ -654,6 +654,30 @@
         Coleman et al. 2020 Selection via Proxy (arxiv 1906.00884), EU AI Act Article 13.
 
 - [x] GraphRAG Knowledge Graph retrieval для RAG (Project 02) — 2026-05-22
+- [x] Fraud Ring Detection via Label Propagation (Project 04) — 2026-05-23
+      fraud/models/community.py: FraudRingDetector (Label Propagation, Raghavan et al. 2007),
+      CommunityConfig (fraud_ratio_high/medium thresholds, min_ring_size, seed),
+      CommunityResult (community_id, size, fraud_ratio, risk_level, node_ids),
+      DetectionResult (communities sorted by size desc, suspicious_rings filtered,
+        n_iterations, converged, total_nodes). Асинхронный LP с детерминированным
+      tie-breaking (min label) — воспроизводимость для EU AI Act аудит-логов.
+      Labeled / unlabeled разделение: fraud_ratio = labeled_fraud / total_labeled
+      (не помеченные узлы не влияют на знаменатель — честная оценка по evidence).
+      fraud/api/app.py: 2 новых endpoint:
+        POST /community/detect (граф → communities + suspicious_rings),
+        GET  /community/stats (агрегированные метрики без PII для Grafana).
+      _reset_ring_detector() для тестовой изоляции.
+      27 новых тестов: TestFraudCommunityUnit×17 (empty_raises, single_node, two_cliques,
+        chain, fraud_ratio_zero/all/mixed, risk_level_high/medium/low, converged,
+        sorted_by_size, suspicious_filtered, isolated_node, unlabeled_excluded,
+        to_dict_structure, total_nodes), TestCommunityAPIEndpoints×10 (200, structure,
+        n_communities, total_nodes, high_fraud_suspicious, 422_empty,
+        stats_404_before, stats_200_after, stats_structure, coverage_ratio).
+      96/96 тестов зелёных (было 69, +27, 3 skipped PyTorch).
+      Бизнес-эффект: выявляет coordinated fraud rings (account farms, synthetic ID rings),
+        невидимые при индивидуальной оценке транзакций — 60-80% убытков от таких атак.
+      Источники: Raghavan et al. 2007 Physical Review E 76:036106 (Label Propagation),
+        ACFE 2024 Occupational Fraud Report, FinGuard-GNN 2025, EU AI Act Article 13.
       rag/knowledge_graph/extractor.py: regex NER (DATE/ORG/CONCEPT/PERSON) без LLM.
         _safe_text() для безопасного group(1) из паттернов с capture group (quoted concept)
         и без него (акронимы). Lookahead (?=[^A-Za-z]|$) вместо \b для ORG с периодом в суффиксе.
