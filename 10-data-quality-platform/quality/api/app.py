@@ -1007,8 +1007,7 @@ async def analytics_correlation(
     methods: str = Form(
         "pearson,spearman,cramers_v",
         description=(
-            "Методы через запятую / Comma-separated methods: "
-            "pearson, spearman, cramers_v"
+            "Методы через запятую / Comma-separated methods: pearson, spearman, cramers_v"
         ),
     ),
 ) -> JSONResponse:
