@@ -359,7 +359,8 @@ class OWASPMLAudit:
             severity=RiskSeverity.LOW,
             title="High missing-value rate — potential model skewing",
             description=(
-                f"Columns {high_missing} have >{self._MISSING_THRESHOLD * 100:.0f}% missing values. "
+                f"Columns {high_missing} have "
+                f">{self._MISSING_THRESHOLD * 100:.0f}% missing values. "
                 "Adversaries may deliberately omit features to manipulate model outputs."
             ),
             recommendation=(
