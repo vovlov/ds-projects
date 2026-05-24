@@ -248,3 +248,8 @@ def is_available() -> bool:
         return True
     except ImportError:
         return False
+
+
+# Патч: тесты используют det.is_available() (метод экземпляра).
+# Patch: tests call det.is_available() as an instance method.
+IsolationForestDetector.is_available = staticmethod(is_available)  # type: ignore[attr-defined]
