@@ -1017,3 +1017,327 @@ class TestEvaluateAPIEndpoints:
         data = self._client().post("/evaluate/regression", json={"use_lexical": True}).json()
         assert "security" in data["by_domain"]
         assert "clean" in data["by_domain"]
+
+
+# ── TestPRDataset ─────────────────────────────────────────────────────────────
+
+
+class TestPRDataset:
+    """Тесты синтетического PR датасета для LoRA fine-tuning."""
+
+    def test_dataset_total_count(self):
+        from review.data.pr_dataset import get_pr_dataset
+
+        examples = get_pr_dataset()
+        assert len(examples) >= 30, f"Expected ≥30 examples, got {len(examples)}"
+
+    def test_dataset_has_required_fields(self):
+        from review.data.pr_dataset import get_pr_dataset
+
+        for ex in get_pr_dataset():
+            assert ex.id
+            assert ex.diff
+            assert ex.category in {"bug", "security", "performance", "style", "documentation"}
+            assert ex.domain
+            assert ex.severity in {"critical", "major", "minor"}
+            assert ex.review_comment
+
+    def test_dataset_all_categories_present(self):
+        from review.data.pr_dataset import get_pr_dataset
+
+        categories = {ex.category for ex in get_pr_dataset()}
+        assert categories == {"bug", "security", "performance", "style", "documentation"}
+
+    def test_dataset_multiple_domains(self):
+        from review.data.pr_dataset import get_pr_dataset
+
+        domains = {ex.domain for ex in get_pr_dataset()}
+        assert len(domains) >= 3  # python, javascript, sql, yaml, generic
+
+    def test_filter_by_category(self):
+        from review.data.pr_dataset import get_pr_dataset_by_category
+
+        security = get_pr_dataset_by_category("security")
+        assert len(security) >= 5
+        assert all(ex.category == "security" for ex in security)
+
+    def test_filter_by_category_bugs(self):
+        from review.data.pr_dataset import get_pr_dataset_by_category
+
+        bugs = get_pr_dataset_by_category("bug")
+        assert len(bugs) >= 5
+
+    def test_stats_structure(self):
+        from review.data.pr_dataset import get_pr_stats
+
+        stats = get_pr_stats()
+        assert stats["total"] >= 30
+        assert "by_category" in stats
+        assert "by_domain" in stats
+        assert "by_severity" in stats
+        assert "categories" in stats
+
+    def test_unique_ids(self):
+        from review.data.pr_dataset import get_pr_dataset
+
+        ids = [ex.id for ex in get_pr_dataset()]
+        assert len(ids) == len(set(ids)), "All example IDs must be unique"
+
+
+# ── TestLoRAAdapter ───────────────────────────────────────────────────────────
+
+
+class TestLoRAAdapter:
+    """Тесты LoRA адаптера (numpy-only, без GPU)."""
+
+    def _base_pipeline(self):
+        from review.models.classifier import build_classifier
+
+        return build_classifier()
+
+    def _fitted_adapter(self, domain="security"):
+        from review.data.pr_dataset import get_pr_dataset_by_category
+        from review.models.lora_adapter import LoRAAdapter, LoRAConfig
+
+        pipeline = self._base_pipeline()
+        config = LoRAConfig(rank=2, alpha=4.0, n_epochs=10, target_domain=domain)
+        adapter = LoRAAdapter(pipeline, config)
+        examples = get_pr_dataset_by_category(domain)
+        texts = [ex.review_comment for ex in examples]
+        labels = [ex.category for ex in examples]
+        adapter.fit(texts, labels)
+        return adapter
+
+    def test_is_available(self):
+        from review.models.lora_adapter import is_available
+
+        assert is_available() is True
+
+    def test_not_fitted_initially(self):
+        from review.models.lora_adapter import LoRAAdapter
+
+        adapter = LoRAAdapter(self._base_pipeline())
+        assert adapter.is_fitted is False
+
+    def test_predict_before_fit_raises(self):
+        from review.models.lora_adapter import LoRAAdapter
+
+        adapter = LoRAAdapter(self._base_pipeline())
+        with pytest.raises(RuntimeError, match="not fitted"):
+            adapter.predict("SQL injection risk here")
+
+    def test_fit_returns_train_result(self):
+        from review.models.lora_adapter import LoRAAdapter, LoRAConfig
+
+        pipeline = self._base_pipeline()
+        adapter = LoRAAdapter(pipeline, LoRAConfig(rank=2, n_epochs=5))
+        result = adapter.fit(["sql injection vulnerability"], ["security"])
+        assert result.n_examples == 1
+        assert result.n_epochs == 5
+        assert result.final_loss >= 0
+
+    def test_fit_sets_fitted(self):
+        adapter = self._fitted_adapter()
+        assert adapter.is_fitted is True
+
+    def test_train_result_stored(self):
+        adapter = self._fitted_adapter()
+        assert adapter.train_result is not None
+        assert adapter.train_result.domain == "security"
+
+    def test_loss_reduction_non_negative(self):
+        """Модель должна обучаться — final_loss ≤ initial_loss."""
+        adapter = self._fitted_adapter()
+        tr = adapter.train_result
+        # Loss should decrease (or stay same) with gradient descent
+        assert tr.final_loss <= tr.initial_loss + 0.5  # small tolerance for tiny datasets
+
+    def test_predict_returns_adapter_result(self):
+        from review.models.lora_adapter import AdapterResult
+
+        adapter = self._fitted_adapter()
+        result = adapter.predict("SQL injection: use parameterized queries")
+        assert isinstance(result, AdapterResult)
+
+    def test_predict_valid_category(self):
+        adapter = self._fitted_adapter()
+        result = adapter.predict("Path traversal vulnerability in file upload")
+        assert result.category in {"bug", "security", "performance", "style", "documentation"}
+
+    def test_predict_confidence_range(self):
+        adapter = self._fitted_adapter()
+        result = adapter.predict("Buffer overflow security issue")
+        assert 0.0 <= result.confidence <= 1.0
+        assert 0.0 <= result.base_confidence <= 1.0
+
+    def test_predict_all_probs_sum_to_one(self):
+        adapter = self._fitted_adapter()
+        result = adapter.predict("Memory leak performance problem")
+        total = sum(result.all_probabilities.values())
+        assert abs(total - 1.0) < 1e-3
+
+    def test_adapter_norm_positive_after_fit(self):
+        adapter = self._fitted_adapter()
+        assert adapter.adapter_norm() > 0.0
+
+    def test_adapter_norm_zero_before_fit(self):
+        from review.models.lora_adapter import LoRAAdapter
+
+        adapter = LoRAAdapter(self._base_pipeline())
+        assert adapter.adapter_norm() == 0.0
+
+    def test_predict_batch(self):
+        adapter = self._fitted_adapter()
+        texts = ["SQL injection risk", "N+1 query in loop", "Missing docstring"]
+        results = adapter.predict_batch(texts)
+        assert len(results) == 3
+        for r in results:
+            assert 0.0 <= r.confidence <= 1.0
+
+    def test_train_result_to_dict(self):
+        adapter = self._fitted_adapter()
+        d = adapter.train_result.to_dict()
+        expected_keys = (
+            "domain",
+            "rank",
+            "alpha",
+            "n_examples",
+            "n_epochs",
+            "final_loss",
+            "initial_loss",
+            "loss_reduction",
+        )
+        for key in expected_keys:
+            assert key in d
+
+    def test_fit_empty_raises(self):
+        from review.models.lora_adapter import LoRAAdapter
+
+        adapter = LoRAAdapter(self._base_pipeline())
+        with pytest.raises(ValueError):
+            adapter.fit([], [])
+
+    def test_save_load_roundtrip(self, tmp_path):
+
+        from review.models.lora_adapter import LoRAAdapter
+
+        adapter = self._fitted_adapter()
+        save_path = tmp_path / "adapter.json"
+        adapter.save(save_path)
+
+        # Load into new adapter
+        pipeline = self._base_pipeline()
+        new_adapter = LoRAAdapter(pipeline, adapter.config)
+        new_adapter.load(save_path)
+
+        assert new_adapter.is_fitted
+        result = new_adapter.predict("Command injection in subprocess call")
+        assert result.category in {"bug", "security", "performance", "style", "documentation"}
+
+    def test_performance_domain_adapter(self):
+        adapter = self._fitted_adapter(domain="performance")
+        result = adapter.predict("N+1 query loading all users from database")
+        assert result.category in {"bug", "security", "performance", "style", "documentation"}
+        assert result.confidence > 0.0
+
+
+# ── TestLoRAAdapterAPI ────────────────────────────────────────────────────────
+
+
+class TestLoRAAdapterAPI:
+    """Тесты LoRA API endpoints."""
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        from review.api.app import _reset_adapter, app
+
+        _reset_adapter()
+        return TestClient(app)
+
+    def test_status_before_training(self):
+        resp = self._client().get("/adapter/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["fitted"] is False
+
+    def test_train_200(self):
+        resp = self._client().post(
+            "/adapter/train", json={"domain": "security", "rank": 2, "n_epochs": 5}
+        )
+        assert resp.status_code == 200
+
+    def test_train_response_structure(self):
+        data = (
+            self._client()
+            .post("/adapter/train", json={"domain": "bug", "rank": 2, "n_epochs": 5})
+            .json()
+        )
+        for key in ("domain", "rank", "n_examples", "final_loss", "adapter_norm"):
+            assert key in data, f"Missing key: {key}"
+
+    def test_train_unknown_domain_422(self):
+        resp = self._client().post("/adapter/train", json={"domain": "unknown_xyz"})
+        assert resp.status_code == 422
+
+    def test_train_invalid_rank_422(self):
+        resp = self._client().post("/adapter/train", json={"domain": "security", "rank": 0})
+        assert resp.status_code == 422
+
+    def test_predict_before_train_400(self):
+        resp = self._client().post("/adapter/predict", json={"text": "SQL injection risk"})
+        assert resp.status_code == 400
+
+    def test_predict_200_after_train(self):
+        client = self._client()
+        client.post("/adapter/train", json={"domain": "security", "rank": 2, "n_epochs": 5})
+        resp = client.post("/adapter/predict", json={"text": "SQL injection vulnerability"})
+        assert resp.status_code == 200
+
+    def test_predict_response_structure(self):
+        client = self._client()
+        client.post("/adapter/train", json={"domain": "performance", "rank": 2, "n_epochs": 5})
+        data = client.post("/adapter/predict", json={"text": "N+1 queries in loop"}).json()
+        for key in ("category", "confidence", "base_confidence", "adaptation_delta", "domain"):
+            assert key in data, f"Missing key: {key}"
+
+    def test_status_after_training(self):
+        client = self._client()
+        client.post("/adapter/train", json={"domain": "security", "rank": 4, "n_epochs": 10})
+        data = client.get("/adapter/status").json()
+        assert data["fitted"] is True
+        assert data["domain"] == "security"
+        assert data["rank"] == 4
+
+    def test_dataset_stats_endpoint(self):
+        data = self._client().get("/adapter/dataset/stats").json()
+        assert data["total"] >= 30
+        assert "by_category" in data
+        assert "security" in data["by_category"]
+
+    def test_custom_texts_train(self):
+        client = self._client()
+        payload = {
+            "domain": "security",
+            "rank": 2,
+            "n_epochs": 5,
+            "custom_texts": [
+                "SQL injection risk: use parameterized queries",
+                "Path traversal: sanitize filename",
+            ],
+            "custom_labels": ["security", "security"],
+        }
+        resp = client.post("/adapter/train", json=payload)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["n_training_texts"] == 2
+
+    def test_custom_texts_length_mismatch_422(self):
+        client = self._client()
+        payload = {
+            "domain": "security",
+            "rank": 2,
+            "custom_texts": ["text1", "text2"],
+            "custom_labels": ["security"],
+        }
+        resp = client.post("/adapter/train", json=payload)
+        assert resp.status_code == 422

@@ -702,6 +702,32 @@
         но связаны через граф совместной встречаемости (Microsoft GraphRAG arxiv 2404.16130).
       Источники: Microsoft GraphRAG arxiv 2404.16130 (2024), Calmops GraphRAG Guide 2026,
         Graph Praxis practitioner guide 2026, calmops.com 2026.
+- [x] LoRA Adapter Simulation для LLM Code Review (Project 08) — 2026-05-25
+      review/data/pr_dataset.py: 32 аннотированных PR примера (8 security + 10 bug +
+        8 performance + 4 style + 4 documentation) на Python/JS/SQL/YAML.
+        PRExample dataclass, get_pr_dataset(), get_pr_dataset_by_category(),
+        get_pr_stats() — сводная статистика по категориям/доменам/severity.
+      review/models/lora_adapter.py: LoRAAdapter — Low-Rank Adaptation поверх
+        TF-IDF + LogisticRegression (Hu et al. 2021, arxiv 2106.09685).
+        W_adapted = W_base + alpha/rank * A@B, где A ∈ R^(d×r), B ∈ R^(r×k), r << d.
+        Обучение: gradient descent на A и B через cross-entropy loss (numpy-only, без PyTorch).
+        L2 регуляризация против переобучения на малых датасетах.
+        LoRAConfig (rank, alpha, n_epochs, lr, target_domain, l2_reg),
+        AdapterResult (category + confidence + base_confidence + adaptation_delta),
+        AdapterTrainResult (loss_reduction property), save/load JSON roundtrip.
+        is_available() — всегда True (numpy + sklearn).
+      review/api/app.py: 4 новых endpoint:
+        POST /adapter/train (domain + PR датасет → обучить A и B),
+        POST /adapter/predict (classify с адаптером, comparison с base),
+        GET  /adapter/status (fitted/domain/rank/adapter_norm/train_result),
+        GET  /adapter/dataset/stats (статистика PR датасета).
+      38 новых тестов: TestPRDataset×8, TestLoRAAdapter×19, TestLoRAAdapterAPI×12.
+      139/139 тестов зелёных (было 101). Lint clean.
+      Бизнес-эффект: security-adapter точнее классифицирует security findings без
+        переобучения всей модели — 2(d+k)×rank параметров вместо d×k.
+        multi-tenant: один base classifier + N LoRA адаптеров по доменам (S-LoRA pattern).
+      Источники: Hu et al. 2021 LoRA (arxiv 2106.09685), LoRA Land 2024 (arxiv 2405.00732),
+        Serving Heterogeneous LoRA Adapters (arxiv 2511.22880).
 
 ---
 

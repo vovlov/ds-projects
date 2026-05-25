@@ -7,11 +7,13 @@ import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from ..data.pr_dataset import get_pr_dataset, get_pr_stats
 from ..evaluation.golden_dataset import get_golden_dataset
 from ..evaluation.judge import JudgeVerdict, RegressionResult
 from ..evaluation.judge import evaluate_review as _evaluate_review
 from ..evaluation.judge import run_regression_suite as _run_regression_suite
 from ..models.classifier import build_classifier, classify_comment
+from ..models.lora_adapter import LoRAAdapter, LoRAConfig
 from ..models.multi_review import MultiReviewResult as _MultiReviewResult
 from ..models.multi_review import multi_model_review
 from ..models.reviewer import review_code
@@ -20,6 +22,15 @@ app = FastAPI(title="LLM Code Review API", version="1.0.0")
 
 # Pre-train classifier at startup
 _pipeline = build_classifier()
+
+# LoRA adapter (lazy-initialised on first /adapter/train call)
+_adapter: LoRAAdapter | None = None
+
+
+def _reset_adapter() -> None:
+    """Сбросить адаптер (для тестовой изоляции)."""
+    global _adapter
+    _adapter = None
 
 
 # ── Request / Response schemas ───────────────────────────────────────────────
@@ -203,3 +214,143 @@ def post_evaluate_regression(req: RegressionRequest) -> dict:
         use_lexical=req.use_lexical or not os.environ.get("ANTHROPIC_API_KEY", ""),
     )
     return result.to_dict()
+
+
+# ── LoRA Adapter endpoints ────────────────────────────────────────────────────
+
+
+class AdapterTrainRequest(BaseModel):
+    """Запрос на обучение LoRA адаптера. / Train a LoRA adapter on domain examples."""
+
+    domain: str = "security"
+    """Категория/домен для специализации: security/bug/performance/style/documentation."""
+
+    rank: int = 4
+    """Ранг адаптера (r). Чем меньше — тем меньше параметров. / Adapter rank."""
+
+    alpha: float = 16.0
+    """Масштабирующий коэффициент LoRA. / LoRA scaling factor."""
+
+    n_epochs: int = 100
+    """Число эпох обучения. / Training epochs."""
+
+    learning_rate: float = 0.05
+    """Шаг обучения. / Learning rate."""
+
+    custom_texts: list[str] = []
+    """Кастомные тексты для fine-tuning (опционально). / Custom texts for fine-tuning."""
+
+    custom_labels: list[str] = []
+    """Метки для кастомных текстов. / Labels for custom texts."""
+
+
+class AdapterPredictRequest(BaseModel):
+    """Запрос на классификацию с адаптером. / Predict using the active adapter."""
+
+    text: str
+
+
+@app.post("/adapter/train")
+def post_adapter_train(req: AdapterTrainRequest) -> dict:
+    """Обучить LoRA адаптер на domain-specific PR примерах.
+
+    Использует синтетический PR датасет для заданного домена.
+    Если переданы custom_texts + custom_labels — использует их.
+
+    Train a LoRA adapter on domain-specific PR examples from the synthetic dataset.
+    Pass custom_texts + custom_labels to override with your own fine-tuning data.
+    """
+    global _adapter
+
+    valid_domains = {"security", "bug", "performance", "style", "documentation", "general"}
+    if req.domain not in valid_domains:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown domain '{req.domain}'. Valid: {sorted(valid_domains)}",
+        )
+    if req.rank < 1 or req.rank > 64:
+        raise HTTPException(status_code=422, detail="rank must be between 1 and 64")
+
+    if req.custom_texts and req.custom_labels:
+        if len(req.custom_texts) != len(req.custom_labels):
+            raise HTTPException(
+                status_code=422,
+                detail="custom_texts and custom_labels must have the same length",
+            )
+        texts = req.custom_texts
+        labels = req.custom_labels
+    else:
+        # Use synthetic PR dataset filtered by domain
+        examples = get_pr_dataset()
+        if req.domain != "general":
+            examples = [ex for ex in examples if ex.category == req.domain]
+        if not examples:
+            raise HTTPException(
+                status_code=422,
+                detail=f"No examples found for domain '{req.domain}'",
+            )
+        texts = [ex.review_comment for ex in examples]
+        labels = [ex.category for ex in examples]
+
+    config = LoRAConfig(
+        rank=req.rank,
+        alpha=req.alpha,
+        n_epochs=req.n_epochs,
+        learning_rate=req.learning_rate,
+        target_domain=req.domain,
+    )
+    _adapter = LoRAAdapter(_pipeline, config)
+    result = _adapter.fit(texts, labels)
+    return {
+        **result.to_dict(),
+        "adapter_norm": _adapter.adapter_norm(),
+        "n_training_texts": len(texts),
+    }
+
+
+@app.post("/adapter/predict")
+def post_adapter_predict(req: AdapterPredictRequest) -> dict:
+    """Классифицировать текст с активным LoRA адаптером.
+
+    Возвращает category, confidence, base_confidence и adaptation_delta
+    (насколько адаптер изменил уверенность базовой модели).
+
+    Classify a review comment using the active LoRA adapter.
+    Returns confidence delta to show adapter impact vs base model.
+    """
+    if _adapter is None or not _adapter.is_fitted:
+        raise HTTPException(
+            status_code=400,
+            detail="No adapter trained yet. Call POST /adapter/train first.",
+        )
+    result = _adapter.predict(req.text)
+    return result.to_dict()
+
+
+@app.get("/adapter/status")
+def get_adapter_status() -> dict:
+    """Состояние активного LoRA адаптера.
+
+    LoRA adapter status: fitted, domain, rank, loss metrics.
+    """
+    if _adapter is None or not _adapter.is_fitted:
+        return {"fitted": False, "domain": None, "rank": None}
+
+    tr = _adapter.train_result
+    return {
+        "fitted": True,
+        "domain": _adapter.config.target_domain,
+        "rank": _adapter.config.rank,
+        "alpha": _adapter.config.alpha,
+        "adapter_norm": _adapter.adapter_norm(),
+        "train_result": tr.to_dict() if tr else None,
+    }
+
+
+@app.get("/adapter/dataset/stats")
+def get_adapter_dataset_stats() -> dict:
+    """Статистика синтетического PR датасета для LoRA fine-tuning.
+
+    PR dataset statistics: total, by_category, by_domain, by_severity.
+    """
+    return get_pr_stats()
