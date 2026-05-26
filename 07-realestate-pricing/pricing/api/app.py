@@ -26,6 +26,12 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from ..forecast.price_forecast import (
+    NEIGHBORHOOD_BASE_PRICES,
+    ForecastConfig,
+    HoltWintersForecaster,
+    generate_price_history,
+)
 from ..models.quantile import QuantileRegressionModel
 from ..models.quantile import is_available as lgbm_available
 
@@ -147,6 +153,98 @@ class PriceIntervalEstimate(BaseModel):
         None, description="Эмпирическое покрытие 95% на тестовой выборке"
     )
     lgbm_available: bool = Field(..., description="Доступен ли LightGBM")
+
+
+class ForecastRequest(BaseModel):
+    """Запрос прогноза цен для района."""
+
+    neighborhood: str = Field(..., description="Район Москвы", examples=["Хамовники"])
+    n_months_history: int = Field(36, ge=12, le=120, description="Месяцев истории")
+    forecast_periods: int = Field(12, ge=1, le=36, description="Горизонт прогноза, месяцев")
+    seed: int | None = Field(None, description="Seed для воспроизводимости")
+
+
+class ForecastPointResponse(BaseModel):
+    """Одна точка прогноза."""
+
+    period: int
+    value: float
+    lower: float
+    upper: float
+
+
+class PriceForecastResponse(BaseModel):
+    """Прогноз цены руб/кв.м для района с доверительными интервалами."""
+
+    neighborhood: str
+    trend_direction: str
+    trend_slope_monthly_pct: float
+    mape: float
+    last_known_price: float
+    forecast: list[ForecastPointResponse]
+    alpha: float
+    beta: float
+
+
+class TrendSummary(BaseModel):
+    """Краткая сводка тренда района для дашборда."""
+
+    neighborhood: str
+    trend_direction: str
+    trend_slope_monthly_pct: float
+    current_price: float
+    forecast_12m: float
+
+
+@app.post("/forecast/price", response_model=PriceForecastResponse)
+def forecast_price(req: ForecastRequest) -> PriceForecastResponse:
+    """Прогноз цены руб/кв.м для района на forecast_periods месяцев вперёд.
+
+    Использует Holt's Double Exponential Smoothing с оптимизацией α и β.
+    """
+    if req.neighborhood not in NEIGHBORHOOD_BASE_PRICES:
+        raise HTTPException(
+            400,
+            detail=f"Unknown neighborhood '{req.neighborhood}'. "
+            f"Available: {sorted(NEIGHBORHOOD_BASE_PRICES)}",
+        )
+
+    history = generate_price_history(req.neighborhood, req.n_months_history, req.seed)
+    config = ForecastConfig(forecast_periods=req.forecast_periods)
+    result = HoltWintersForecaster(config).fit(history).forecast()
+
+    return PriceForecastResponse(
+        neighborhood=req.neighborhood,
+        trend_direction=result.trend_direction,
+        trend_slope_monthly_pct=result.trend_slope_pct,
+        mape=result.mape,
+        last_known_price=result.last_known_value,
+        forecast=[
+            ForecastPointResponse(period=p.period, value=p.value, lower=p.lower, upper=p.upper)
+            for p in result.forecast
+        ],
+        alpha=result.alpha,
+        beta=result.beta,
+    )
+
+
+@app.get("/forecast/trends", response_model=list[TrendSummary])
+def forecast_trends() -> list[TrendSummary]:
+    """Сводка трендов по всем районам Москвы (seed=42 для воспроизводимости)."""
+    summaries: list[TrendSummary] = []
+    for neighborhood in sorted(NEIGHBORHOOD_BASE_PRICES):
+        history = generate_price_history(neighborhood, n_months=36, seed=42)
+        result = HoltWintersForecaster().fit(history).forecast(steps=12)
+        summaries.append(
+            TrendSummary(
+                neighborhood=neighborhood,
+                trend_direction=result.trend_direction,
+                trend_slope_monthly_pct=result.trend_slope_pct,
+                current_price=result.last_known_value,
+                forecast_12m=round(result.forecast[-1].value, 2),
+            )
+        )
+    return summaries
 
 
 @app.get("/health")

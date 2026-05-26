@@ -779,3 +779,232 @@ class TestQuantileAPI:
         assert data["interval_95_low"] < data["interval_95_high"]
 
         api_module._quantile_model = original
+
+
+# ---------------------------------------------------------------------------
+# Holt's Double Exponential Smoothing — Price Forecast
+# ---------------------------------------------------------------------------
+
+
+class TestHoltWintersForecaster:
+    """Юнит-тесты алгоритма Хольта (уровень + тренд)."""
+
+    def test_fit_returns_self(self) -> None:
+        from pricing.forecast.price_forecast import ForecastConfig, HoltWintersForecaster
+
+        f = HoltWintersForecaster(ForecastConfig(optimize_params=False))
+        result = f.fit([100_000.0, 105_000.0, 110_000.0, 115_000.0])
+        assert result is f
+
+    def test_fit_requires_min_4_points(self) -> None:
+        from pricing.forecast.price_forecast import HoltWintersForecaster
+
+        with pytest.raises(ValueError, match="4"):
+            HoltWintersForecaster().fit([100_000.0, 110_000.0, 120_000.0])
+
+    def test_forecast_before_fit_raises(self) -> None:
+        from pricing.forecast.price_forecast import HoltWintersForecaster
+
+        with pytest.raises(RuntimeError, match="fit"):
+            HoltWintersForecaster().forecast()
+
+    def test_forecast_length_matches_config(self) -> None:
+        from pricing.forecast.price_forecast import ForecastConfig, HoltWintersForecaster
+
+        f = HoltWintersForecaster(ForecastConfig(forecast_periods=6, optimize_params=False))
+        f.fit([100_000.0 + 5_000.0 * i for i in range(12)])
+        result = f.forecast()
+        assert len(result.forecast) == 6
+
+    def test_forecast_steps_override(self) -> None:
+        from pricing.forecast.price_forecast import ForecastConfig, HoltWintersForecaster
+
+        f = HoltWintersForecaster(ForecastConfig(optimize_params=False))
+        f.fit([200_000.0 + 1_000.0 * i for i in range(12)])
+        result = f.forecast(steps=3)
+        assert len(result.forecast) == 3
+
+    def test_rising_trend_detected(self) -> None:
+        from pricing.forecast.price_forecast import ForecastConfig, HoltWintersForecaster
+
+        prices = [100_000.0 + 5_000.0 * i for i in range(24)]
+        f = HoltWintersForecaster(ForecastConfig(optimize_params=False))
+        f.fit(prices)
+        result = f.forecast()
+        assert result.trend_direction == "rising"
+
+    def test_forecast_values_increasing_for_rising_series(self) -> None:
+        from pricing.forecast.price_forecast import ForecastConfig, HoltWintersForecaster
+
+        prices = [200_000.0 + 2_000.0 * i for i in range(24)]
+        f = HoltWintersForecaster(ForecastConfig(optimize_params=False, forecast_periods=6))
+        f.fit(prices)
+        result = f.forecast()
+        vals = [p.value for p in result.forecast]
+        assert vals[-1] > vals[0]
+
+    def test_ci_widens_with_horizon(self) -> None:
+        from pricing.forecast.price_forecast import HoltWintersForecaster, generate_price_history
+
+        history = generate_price_history("Хамовники", n_months=36, seed=0)
+        f = HoltWintersForecaster().fit(history)
+        result = f.forecast(steps=6)
+        widths = [p.upper - p.lower for p in result.forecast]
+        assert widths[-1] >= widths[0]
+
+    def test_lower_le_value_le_upper(self) -> None:
+        from pricing.forecast.price_forecast import HoltWintersForecaster, generate_price_history
+
+        history = generate_price_history("Арбат", n_months=24, seed=1)
+        f = HoltWintersForecaster().fit(history)
+        result = f.forecast()
+        for p in result.forecast:
+            assert p.lower <= p.value <= p.upper, (
+                f"period={p.period}: lower={p.lower} > value={p.value} or upper={p.upper}"
+            )
+
+    def test_mape_in_valid_range(self) -> None:
+        from pricing.forecast.price_forecast import HoltWintersForecaster, generate_price_history
+
+        history = generate_price_history("Марьино", n_months=24, seed=2)
+        f = HoltWintersForecaster().fit(history)
+        result = f.forecast()
+        assert isinstance(result.mape, float)
+        assert 0.0 <= result.mape <= 100.0
+
+    def test_optimize_params_produces_valid_alpha_beta(self) -> None:
+        from pricing.forecast.price_forecast import (
+            ForecastConfig,
+            HoltWintersForecaster,
+            generate_price_history,
+        )
+
+        history = generate_price_history("Митино", n_months=36, seed=3)
+        f = HoltWintersForecaster(ForecastConfig(optimize_params=True)).fit(history)
+        result = f.forecast()
+        assert 0.0 < result.alpha <= 0.5
+        assert 0.0 < result.beta <= 0.4
+
+    def test_last_known_value_positive(self) -> None:
+        from pricing.forecast.price_forecast import HoltWintersForecaster, generate_price_history
+
+        history = generate_price_history("Некрасовка", n_months=24, seed=5)
+        f = HoltWintersForecaster().fit(history)
+        result = f.forecast()
+        assert result.last_known_value > 0
+
+
+class TestGeneratePriceHistory:
+    """Тесты генератора исторических цен."""
+
+    def test_length_matches_n_months(self) -> None:
+        from pricing.forecast.price_forecast import generate_price_history
+
+        h = generate_price_history("Хамовники", n_months=24, seed=42)
+        assert len(h) == 24
+
+    def test_all_positive(self) -> None:
+        from pricing.forecast.price_forecast import generate_price_history
+
+        h = generate_price_history("Некрасовка", n_months=12, seed=0)
+        assert all(x > 0 for x in h)
+
+    def test_unknown_neighborhood_uses_default(self) -> None:
+        from pricing.forecast.price_forecast import generate_price_history
+
+        h = generate_price_history("НеизвестныйРайон", n_months=12, seed=0)
+        assert len(h) == 12
+
+    def test_seed_reproducibility(self) -> None:
+        from pricing.forecast.price_forecast import generate_price_history
+
+        h1 = generate_price_history("Арбат", n_months=12, seed=7)
+        h2 = generate_price_history("Арбат", n_months=12, seed=7)
+        assert h1 == h2
+
+    def test_different_seeds_differ(self) -> None:
+        from pricing.forecast.price_forecast import generate_price_history
+
+        h1 = generate_price_history("Арбат", n_months=12, seed=1)
+        h2 = generate_price_history("Арбат", n_months=12, seed=2)
+        assert h1 != h2
+
+    def test_presnensky_higher_than_nekrasovka(self) -> None:
+        """Пресненский дороже Некрасовки (проверяем реалистичность базовых цен)."""
+        from pricing.forecast.price_forecast import generate_price_history
+
+        h_pres = generate_price_history("Пресненский", n_months=12, seed=42)
+        h_nekr = generate_price_history("Некрасовка", n_months=12, seed=42)
+        assert sum(h_pres) > sum(h_nekr)
+
+
+class TestPriceForecastAPI:
+    """Тесты API эндпоинтов прогнозирования цен."""
+
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+        from pricing.api.app import app
+
+        return TestClient(app)
+
+    def test_forecast_price_200(self, client) -> None:
+        resp = client.post(
+            "/forecast/price",
+            json={
+                "neighborhood": "Хамовники",
+                "n_months_history": 24,
+                "forecast_periods": 6,
+                "seed": 42,
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_forecast_price_structure(self, client) -> None:
+        resp = client.post("/forecast/price", json={"neighborhood": "Арбат", "seed": 0})
+        data = resp.json()
+        required = (
+            "neighborhood",
+            "trend_direction",
+            "mape",
+            "last_known_price",
+            "forecast",
+            "alpha",
+            "beta",
+        )
+        for field in required:
+            assert field in data, f"Missing field: {field}"
+
+    def test_forecast_price_default_12_periods(self, client) -> None:
+        resp = client.post("/forecast/price", json={"neighborhood": "Якиманка", "seed": 1})
+        assert len(resp.json()["forecast"]) == 12
+
+    def test_forecast_price_unknown_neighborhood_400(self, client) -> None:
+        resp = client.post("/forecast/price", json={"neighborhood": "НеизвестныйРайон"})
+        assert resp.status_code == 400
+
+    def test_forecast_price_ci_valid(self, client) -> None:
+        resp = client.post("/forecast/price", json={"neighborhood": "Митино", "seed": 5})
+        for pt in resp.json()["forecast"]:
+            assert pt["lower"] <= pt["value"] <= pt["upper"]
+
+    def test_forecast_trends_200(self, client) -> None:
+        resp = client.get("/forecast/trends")
+        assert resp.status_code == 200
+
+    def test_forecast_trends_all_15_neighborhoods(self, client) -> None:
+        data = client.get("/forecast/trends").json()
+        assert len(data) == 15
+
+    def test_forecast_trends_structure(self, client) -> None:
+        item = client.get("/forecast/trends").json()[0]
+        for field in ("neighborhood", "trend_direction", "current_price", "forecast_12m"):
+            assert field in item, f"Missing field: {field}"
+
+    def test_forecast_trends_all_rising(self, client) -> None:
+        """Все районы должны иметь rising тренд (все NEIGHBORHOOD_ANNUAL_TRENDS > 0)."""
+        data = client.get("/forecast/trends").json()
+        for item in data:
+            assert item["trend_direction"] in ("rising", "stable"), (
+                f"{item['neighborhood']}: unexpected direction '{item['trend_direction']}'"
+            )

@@ -703,6 +703,21 @@
       Источники: Microsoft GraphRAG arxiv 2404.16130 (2024), Calmops GraphRAG Guide 2026,
         Graph Praxis practitioner guide 2026, calmops.com 2026.
 - [x] LoRA Adapter Simulation для LLM Code Review (Project 08) — 2026-05-25
+- [x] Price Trend Forecasting (Holt's DES) для Real Estate (Project 07) — 2026-05-26
+      pricing/forecast/price_forecast.py: HoltWintersForecaster — Holt's Double Exponential
+        Smoothing (уровень + тренд, без сезонности). s_t/b_t уравнения, predict-then-update порядок.
+        Grid search 5×5 = 25 комбинаций α×β по SSE — без scipy, CI-совместимо.
+        CI: ŷ ± z·σ_res·√h — расширяются с горизонтом (Gardner 2006 ETS(A,A,N) аппроксимация).
+        generate_price_history(): base*exp(monthly_rate*t)*lognormal_noise (Fama 1970),
+        NEIGHBORHOOD_BASE_PRICES (15 районов, ЦИАН 2025-2026) + NEIGHBORHOOD_ANNUAL_TRENDS.
+        pricing/api/app.py: POST /forecast/price (neighborhood → Holt fit → 12m forecast + CI),
+        GET /forecast/trends (все 15 районов, seed=42, trend_direction + forecast_12m).
+      27 новых тестов: TestHoltWintersForecaster×12, TestGeneratePriceHistory×6,
+        TestPriceForecastAPI×9. 84/84 зелёных (было 57).
+      Бизнес-эффект: маркетплейс недвижимости знает "Пресненский +9%/год" vs "Марьино +4%/год"
+        → оценки автоматически учитывают рыночный тренд, а не только текущий срез.
+      Источники: Holt 1957 ONR Memo 52, Gardner 2006 IJF survey (ETS),
+        Fama 1970 (lognormal returns), IRN.ru + ЦИАН данные 2024-2026.
       review/data/pr_dataset.py: 32 аннотированных PR примера (8 security + 10 bug +
         8 performance + 4 style + 4 documentation) на Python/JS/SQL/YAML.
         PRExample dataclass, get_pr_dataset(), get_pr_dataset_by_category(),
