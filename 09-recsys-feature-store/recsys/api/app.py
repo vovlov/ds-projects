@@ -27,6 +27,7 @@ from recsys.feature_store.wap import WAPGate
 from recsys.models.bandit import BanditConfig, BanditResult, LinUCBBandit
 from recsys.models.collaborative import CollaborativeRecommender
 from recsys.models.content_based import get_popular_items
+from recsys.models.diversity import DiversityConfig, DiversityResult, MMRDiversifier
 
 app = FastAPI(
     title="RecSys API",
@@ -150,6 +151,9 @@ _feast_bridge: FeastBridge | None = None
 # LinUCB bandit singleton — persists A, b matrices across requests
 _bandit: LinUCBBandit | None = None
 
+# MMR Diversifier singleton
+_mmr_diversifier: MMRDiversifier | None = None
+
 
 def _get_wap_gate(psi_threshold: float = 0.2) -> WAPGate:
     """Ленивая инициализация WAP gate / Lazy WAP gate initialization."""
@@ -171,6 +175,20 @@ def _reset_bandit() -> None:
     """Сброс bandit для тестовой изоляции / Reset bandit for test isolation."""
     global _bandit
     _bandit = None
+
+
+def _get_diversifier(embedding_dim: int = 8) -> MMRDiversifier:
+    """Ленивая инициализация MMR diversifier / Lazy MMR diversifier initialization."""
+    global _mmr_diversifier
+    if _mmr_diversifier is None:
+        _mmr_diversifier = MMRDiversifier(DiversityConfig(embedding_dim=embedding_dim))
+    return _mmr_diversifier
+
+
+def _reset_diversifier() -> None:
+    """Сброс diversifier для тестовой изоляции / Reset for test isolation."""
+    global _mmr_diversifier
+    _mmr_diversifier = None
 
 
 def _get_feast_bridge() -> FeastBridge:
@@ -517,4 +535,118 @@ def bandit_stats() -> BanditStatsResponse:
         total_recommendations=bandit.total_recommendations,
         config_alpha=bandit.config.alpha,
         arm_stats=bandit.get_arm_stats(),
+    )
+
+
+# --- MMR Diversity Reranking ---
+
+
+class DiverseRecommendRequest(BaseModel):
+    """Запрос на MMR-диверсификацию списка рекомендаций.
+    Request for MMR diversity reranking of a candidate list."""
+
+    candidate_ids: list[int]
+    relevance_scores: list[float]
+    lambda_param: float = 0.5
+    """Trade-off: 1.0 = pure relevance, 0.0 = pure diversity."""
+    n_items: int = 10
+    embedding_dim: int = 8
+    categories: list[str] | None = None
+    """Optional category label per candidate (same order as candidate_ids)."""
+    price_tiers: list[str] | None = None
+    """Optional price tier per candidate: 'low' | 'medium' | 'high'."""
+
+
+class DiverseItemResponse(BaseModel):
+    """Один товар в диверсифицированном списке / Single item in diverse list."""
+
+    item_id: int
+    relevance_score: float
+    diversity_contribution: float
+    mmr_score: float
+    rank: int
+
+
+class DiversityMetricsResponse(BaseModel):
+    """Агрегированные метрики разнообразия / Aggregate diversity metrics."""
+
+    intra_list_diversity: float
+    coverage: float
+    novelty: float
+    effective_diversity: float
+
+
+class DiverseRecommendResponse(BaseModel):
+    """Результат MMR-диверсификации / MMR diversity reranking response."""
+
+    items: list[DiverseItemResponse]
+    metrics: DiversityMetricsResponse
+    lambda_param: float
+    n_candidates: int
+
+
+@app.post("/recommend/diverse", response_model=DiverseRecommendResponse)
+def recommend_diverse(request: DiverseRecommendRequest) -> DiverseRecommendResponse:
+    """
+    MMR-диверсификация списка кандидатов.
+    MMR Diversity Reranking — balance relevance and novelty.
+
+    Принимает отсортированный список кандидатов с оценками релевантности
+    и переранжирует их, максимизируя разнообразие (Carbonell & Goldstein 1998).
+
+    Takes a scored candidate list and reranks it to maximise the trade-off
+    between relevance (lambda=1.0) and diversity (lambda=0.0).
+
+    Полезно для борьбы с "пузырём фильтров" — пользователю предлагаются
+    похожие, но не одинаковые товары.
+    """
+    if not request.candidate_ids:
+        raise HTTPException(status_code=422, detail="candidate_ids must not be empty")
+
+    if len(request.candidate_ids) != len(request.relevance_scores):
+        raise HTTPException(
+            status_code=422,
+            detail="candidate_ids and relevance_scores must have equal length",
+        )
+
+    if not (0.0 <= request.lambda_param <= 1.0):
+        raise HTTPException(status_code=422, detail="lambda_param must be in [0.0, 1.0]")
+
+    diversifier = _get_diversifier(embedding_dim=request.embedding_dim)
+
+    # Build content embeddings from optional metadata (or random if absent)
+    item_embeddings = diversifier.build_item_embeddings(
+        item_ids=request.candidate_ids,
+        categories=request.categories,
+        price_tiers=request.price_tiers,
+        rng=None,
+    )
+
+    result: DiversityResult = diversifier.rerank(
+        candidate_ids=request.candidate_ids,
+        relevance_scores=request.relevance_scores,
+        item_embeddings=item_embeddings,
+        lambda_param=request.lambda_param,
+        n_items=request.n_items,
+    )
+
+    return DiverseRecommendResponse(
+        items=[
+            DiverseItemResponse(
+                item_id=item.item_id,
+                relevance_score=item.relevance_score,
+                diversity_contribution=item.diversity_contribution,
+                mmr_score=item.mmr_score,
+                rank=item.rank,
+            )
+            for item in result.items
+        ],
+        metrics=DiversityMetricsResponse(
+            intra_list_diversity=result.metrics.intra_list_diversity,
+            coverage=result.metrics.coverage,
+            novelty=result.metrics.novelty,
+            effective_diversity=result.metrics.effective_diversity,
+        ),
+        lambda_param=result.lambda_param,
+        n_candidates=result.n_candidates,
     )

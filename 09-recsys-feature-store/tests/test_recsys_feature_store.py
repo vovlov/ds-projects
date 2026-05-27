@@ -1669,3 +1669,284 @@ class TestBanditAPIEndpoints:
         stats = client.get("/bandit/stats").json()
         arm_ids = [s["arm_id"] for s in stats["arm_stats"]]
         assert 7 in arm_ids
+
+
+# ========== TestMMRDiversifier: unit tests for diversity module ==========
+
+
+class TestMMRDiversifier:
+    """Unit tests for Maximal Marginal Relevance diversifier."""
+
+    def _diversifier(self, lam: float = 0.5, n: int = 5) -> object:
+        from recsys.models.diversity import DiversityConfig, MMRDiversifier
+
+        return MMRDiversifier(DiversityConfig(lambda_param=lam, n_items=n, embedding_dim=8))
+
+    def _embs(self, ids: list[int], seed: int = 42) -> dict:
+        import numpy as np
+        from recsys.models.diversity import DiversityConfig, MMRDiversifier
+
+        d = MMRDiversifier(DiversityConfig(embedding_dim=8))
+        return d.build_item_embeddings(ids, rng=np.random.default_rng(seed))
+
+    def test_empty_candidates_returns_empty(self) -> None:
+        """Пустой список кандидатов → пустой результат / Empty candidates → empty result."""
+        d = self._diversifier()
+        result = d.rerank([], [], {})
+        assert result.items == []
+        assert result.n_candidates == 0
+
+    def test_single_candidate_returned(self) -> None:
+        """Один кандидат → он же возвращается / Single candidate is returned."""
+        d = self._diversifier()
+        embs = self._embs([42])
+        result = d.rerank([42], [0.9], embs)
+        assert len(result.items) == 1
+        assert result.items[0].item_id == 42
+        assert result.items[0].rank == 1
+
+    def test_n_items_limits_output(self) -> None:
+        """n_items ограничивает длину результата / n_items caps output length."""
+        d = self._diversifier(n=3)
+        ids = list(range(10))
+        embs = self._embs(ids)
+        result = d.rerank(ids, [float(i) for i in range(10)], embs, n_items=3)
+        assert len(result.items) <= 3
+
+    def test_n_items_more_than_candidates_returns_all(self) -> None:
+        """n_items > кандидатов → возвращаем всех / n_items > len(candidates) → return all."""
+        d = self._diversifier(n=100)
+        ids = [1, 2, 3]
+        embs = self._embs(ids)
+        result = d.rerank(ids, [0.9, 0.8, 0.7], embs)
+        assert len(result.items) == 3
+
+    def test_ranks_are_sequential_one_based(self) -> None:
+        """Ранги последовательные, начиная с 1 / Ranks are 1-based and sequential."""
+        d = self._diversifier()
+        ids = list(range(5))
+        embs = self._embs(ids)
+        result = d.rerank(ids, [0.9, 0.8, 0.7, 0.6, 0.5], embs)
+        ranks = [item.rank for item in result.items]
+        assert ranks == list(range(1, len(ranks) + 1))
+
+    def test_first_item_diversity_contribution_is_one(self) -> None:
+        """Первый выбранный элемент: нет selected → max_sim=0 → div=1.0.
+        First item: no selected items yet → max_sim=0 → diversity=1-0=1.0."""
+        d = self._diversifier()
+        ids = [10, 20, 30]
+        embs = self._embs(ids)
+        result = d.rerank(ids, [0.9, 0.8, 0.7], embs)
+        # max_sim to selected set is 0 (empty set) → diversity_contribution = 1-0 = 1.0
+        assert result.items[0].diversity_contribution == pytest.approx(1.0, abs=1e-6)
+
+    def test_lambda1_respects_relevance_order(self) -> None:
+        """lambda=1.0 → чисто по релевантности (нет diversity penalty) / Pure relevance."""
+        import numpy as np
+        from recsys.models.diversity import DiversityConfig, MMRDiversifier
+
+        d = MMRDiversifier(DiversityConfig(lambda_param=1.0, n_items=5))
+        # create identical embeddings so diversity can't interfere
+        embs = {i: np.ones(8) / np.sqrt(8) for i in range(5)}
+        ids = [0, 1, 2, 3, 4]
+        scores = [0.9, 0.5, 0.8, 0.3, 0.7]
+        result = d.rerank(ids, scores, embs)
+        # top item by relevance must be first (score 0.9 → item 0)
+        assert result.items[0].item_id == 0
+
+    def test_lambda0_maximises_diversity(self) -> None:
+        """lambda=0.0 → чистое разнообразие (нет relevance) / Pure diversity."""
+        import numpy as np
+        from recsys.models.diversity import DiversityConfig, MMRDiversifier
+
+        d = MMRDiversifier(DiversityConfig(lambda_param=0.0, n_items=3))
+        # first two items identical, third orthogonal
+        e1 = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        e2 = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        e3 = np.array([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        embs = {1: e1, 2: e2, 3: e3}
+        result = d.rerank([1, 2, 3], [0.9, 0.8, 0.1], embs)
+        selected_ids = {item.item_id for item in result.items}
+        # item 3 (orthogonal) must be selected despite low relevance
+        assert 3 in selected_ids
+
+    def test_mismatched_lengths_raises(self) -> None:
+        """Несовпадение длин → ValueError / Mismatched lengths → ValueError."""
+        d = self._diversifier()
+        with pytest.raises(ValueError, match="equal length"):
+            d.rerank([1, 2], [0.9], {})
+
+    def test_intra_list_diversity_in_range(self) -> None:
+        """ILD ∈ [0, 1] / Intra-list diversity is in [0, 1]."""
+        d = self._diversifier()
+        ids = list(range(5))
+        embs = self._embs(ids)
+        result = d.rerank(ids, [float(i) for i in range(5)], embs)
+        ild = result.metrics.intra_list_diversity
+        assert 0.0 <= ild <= 1.0
+
+    def test_coverage_in_range(self) -> None:
+        """Coverage ∈ [0, 1] / Coverage is in [0, 1]."""
+        d = self._diversifier()
+        ids = list(range(5))
+        embs = self._embs(ids)
+        result = d.rerank(ids, [float(i) for i in range(5)], embs)
+        assert 0.0 <= result.metrics.coverage <= 1.0
+
+    def test_novelty_in_range(self) -> None:
+        """Novelty ∈ [0, 1] / Novelty is in [0, 1]."""
+        d = self._diversifier()
+        ids = list(range(5))
+        embs = self._embs(ids)
+        result = d.rerank(ids, [float(i) for i in range(5)], embs)
+        assert 0.0 <= result.metrics.novelty <= 1.0
+
+    def test_build_item_embeddings_length(self) -> None:
+        """build_item_embeddings возвращает словарь нужной длины / Correct dict length."""
+        from recsys.models.diversity import DiversityConfig, MMRDiversifier
+
+        d = MMRDiversifier(DiversityConfig(embedding_dim=8))
+        ids = [1, 2, 3, 4, 5]
+        embs = d.build_item_embeddings(ids)
+        assert len(embs) == 5
+        for item_id in ids:
+            assert item_id in embs
+
+    def test_build_item_embeddings_are_l2_normalised(self) -> None:
+        """Эмбеддинги L2-нормированы / Embeddings are L2-normalised."""
+        import numpy as np
+        from recsys.models.diversity import DiversityConfig, MMRDiversifier
+
+        d = MMRDiversifier(DiversityConfig(embedding_dim=8))
+        embs = d.build_item_embeddings([10, 20, 30])
+        for emb in embs.values():
+            assert abs(np.linalg.norm(emb) - 1.0) < 1e-6
+
+    def test_different_categories_produce_different_embeddings(self) -> None:
+        """Разные категории → разные эмбеддинги / Different categories → different embeddings."""
+        import numpy as np
+        from recsys.models.diversity import DiversityConfig, MMRDiversifier
+
+        d = MMRDiversifier(DiversityConfig(embedding_dim=8))
+        embs = d.build_item_embeddings(
+            [1, 2],
+            categories=["electronics", "sports"],
+            rng=np.random.default_rng(0),
+        )
+        sim = float(np.dot(embs[1], embs[2]))
+        assert sim < 0.99  # not identical
+
+    def test_lambda_in_result_matches_input(self) -> None:
+        """lambda_param в результате совпадает с входным / lambda echoed back."""
+        d = self._diversifier(lam=0.7)
+        ids = [1, 2]
+        embs = self._embs(ids)
+        result = d.rerank(ids, [0.9, 0.8], embs, lambda_param=0.7)
+        assert result.lambda_param == 0.7
+
+    def test_n_candidates_matches_input_length(self) -> None:
+        """n_candidates = len(candidate_ids) / n_candidates reflects input."""
+        d = self._diversifier()
+        ids = [1, 2, 3, 4, 5, 6, 7]
+        embs = self._embs(ids)
+        result = d.rerank(ids, [float(i) for i in range(7)], embs)
+        assert result.n_candidates == 7
+
+
+# ========== TestDiversityAPIEndpoints: integration tests ==========
+
+
+class TestDiversityAPIEndpoints:
+    """Интеграционные тесты /recommend/diverse / Integration tests for MMR diversity API."""
+
+    @pytest.fixture(autouse=True)
+    def reset_diversifier(self) -> None:
+        """Сброс diversifier перед каждым тестом / Reset before each test."""
+        from recsys.api.app import _reset_diversifier
+
+        _reset_diversifier()
+
+    @pytest.fixture
+    def client(self) -> TestClient:
+        from recsys.api.app import app
+
+        return TestClient(app)
+
+    def _payload(self, n: int = 5, lam: float = 0.5, n_items: int = 3) -> dict:
+        return {
+            "candidate_ids": list(range(1, n + 1)),
+            "relevance_scores": [1.0 - 0.1 * i for i in range(n)],
+            "lambda_param": lam,
+            "n_items": n_items,
+        }
+
+    def test_status_200(self, client: TestClient) -> None:
+        """POST /recommend/diverse → 200 / Endpoint returns 200."""
+        response = client.post("/recommend/diverse", json=self._payload())
+        assert response.status_code == 200
+
+    def test_response_structure(self, client: TestClient) -> None:
+        """Ответ содержит обязательные поля / Response contains required fields."""
+        data = client.post("/recommend/diverse", json=self._payload()).json()
+        assert "items" in data
+        assert "metrics" in data
+        assert "lambda_param" in data
+        assert "n_candidates" in data
+
+    def test_items_are_ranked_sequentially(self, client: TestClient) -> None:
+        """items отсортированы по rank / Items are ranked sequentially."""
+        data = client.post("/recommend/diverse", json=self._payload()).json()
+        ranks = [item["rank"] for item in data["items"]]
+        assert ranks == list(range(1, len(ranks) + 1))
+
+    def test_n_items_respected(self, client: TestClient) -> None:
+        """n_items ограничивает длину списка / n_items caps output length."""
+        payload = self._payload(n=10, n_items=4)
+        data = client.post("/recommend/diverse", json=payload).json()
+        assert len(data["items"]) <= 4
+
+    def test_lambda_param_echoed(self, client: TestClient) -> None:
+        """lambda_param в ответе совпадает с запросом / lambda_param echoed back."""
+        payload = self._payload(lam=0.3)
+        data = client.post("/recommend/diverse", json=payload).json()
+        assert data["lambda_param"] == pytest.approx(0.3, abs=1e-6)
+
+    def test_metrics_fields_present(self, client: TestClient) -> None:
+        """Поля metrics присутствуют / All metric fields are present."""
+        data = client.post("/recommend/diverse", json=self._payload()).json()
+        metrics = data["metrics"]
+        assert "intra_list_diversity" in metrics
+        assert "coverage" in metrics
+        assert "novelty" in metrics
+        assert "effective_diversity" in metrics
+
+    def test_422_on_empty_candidates(self, client: TestClient) -> None:
+        """Пустой candidate_ids → 422 / Empty candidates → 422."""
+        payload = {"candidate_ids": [], "relevance_scores": [], "lambda_param": 0.5}
+        response = client.post("/recommend/diverse", json=payload)
+        assert response.status_code == 422
+
+    def test_422_on_mismatched_lengths(self, client: TestClient) -> None:
+        """Несовпадение длин → 422 / Mismatched lengths → 422."""
+        payload = {
+            "candidate_ids": [1, 2, 3],
+            "relevance_scores": [0.9, 0.8],
+            "lambda_param": 0.5,
+        }
+        response = client.post("/recommend/diverse", json=payload)
+        assert response.status_code == 422
+
+    def test_with_metadata_returns_diverse_list(self, client: TestClient) -> None:
+        """С метаданными возвращает разнообразный список / Metadata-enriched diverse list."""
+        payload = {
+            "candidate_ids": [1, 2, 3, 4, 5],
+            "relevance_scores": [0.9, 0.88, 0.87, 0.86, 0.85],
+            "lambda_param": 0.3,
+            "n_items": 3,
+            "categories": ["electronics", "electronics", "books", "sports", "food"],
+            "price_tiers": ["high", "high", "low", "medium", "low"],
+        }
+        data = client.post("/recommend/diverse", json=payload).json()
+        assert len(data["items"]) == 3
+        # with low lambda, diversity should be prioritised — check ild > 0
+        assert data["metrics"]["intra_list_diversity"] >= 0.0

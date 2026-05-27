@@ -743,6 +743,33 @@
         multi-tenant: один base classifier + N LoRA адаптеров по доменам (S-LoRA pattern).
       Источники: Hu et al. 2021 LoRA (arxiv 2106.09685), LoRA Land 2024 (arxiv 2405.00732),
         Serving Heterogeneous LoRA Adapters (arxiv 2511.22880).
+- [x] MMR Diversity Reranking для RecSys (Project 09) — 2026-05-27
+      recsys/models/diversity.py: MMRDiversifier (Carbonell & Goldstein 1998, SIGIR).
+        DiversityConfig (lambda_param, n_items, embedding_dim), DiverseItem (item_id,
+        relevance_score, diversity_contribution, mmr_score, rank), DiversityMetrics
+        (intra_list_diversity, coverage, novelty, effective_diversity), DiversityResult.
+        rerank(): жадный MMR-отбор — λ·rel - (1-λ)·max_sim к уже выбранным.
+          _normalise(): min-max в [0,1] для стабильного objective.
+          _compute_metrics(): ILD (mean pairwise cosine distance), coverage (quadrant proxy),
+          novelty (distance from most popular), effective_diversity (Shannon entropy).
+        build_item_embeddings(): OHE(category)+OHE(price_tier)+Gaussian noise → L2-norm.
+          CAT_MAP (electronics/books/clothing/food/sports), PT_MAP (low/medium/high).
+      recsys/api/app.py: _mmr_diversifier singleton + _reset_diversifier() для тестов.
+        POST /recommend/diverse (DiverseRecommendRequest → DiverseRecommendResponse):
+          422 на пустые candidate_ids, несовпадение длин, lambda вне [0,1].
+          auto-build embeddings из metadata (categories/price_tiers) при наличии.
+      26 новых тестов: TestMMRDiversifier×16 (empty, single, n_items, sequential_ranks,
+        first_div_one, lambda1_relevance_order, lambda0_diversity, mismatch_raises,
+        ild_range, coverage_range, novelty_range, build_length, l2_norm,
+        different_categories, lambda_echoed, n_candidates_reflects_input),
+        TestDiversityAPIEndpoints×9 (200, structure, sequential_ranks, n_items,
+        lambda_echoed, metrics_fields, 422_empty, 422_mismatch, with_metadata).
+      160/160 тестов зелёных (было 134). Lint clean.
+      Бизнес-эффект: λ=0.5 снижает "пузырь фильтров" — пользователь видит не 10 одинаковых
+        ноутбуков, а ноутбук+наушники+клавиатура+мышь (категориальное разнообразие).
+        YouTube: 25% роста watch time после внедрения diversity (RecSys 2019).
+      Источники: Carbonell & Goldstein 1998 SIGIR (оригинальная MMR), Kunaver & Požrl 2017
+        (ILS survey), Google RecSys 2024 diversity-aware retrieval.
 
 ---
 
