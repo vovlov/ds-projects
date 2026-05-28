@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from scanner.data.dataset import generate_synthetic_documents, get_feature_matrix
 from scanner.models.classifier import predict, train_classifier
+from scanner.preprocessing.layout import LayoutResult, segment_layout
 from scanner.preprocessing.quality import QualityMetrics, assess_quality
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,25 @@ class ClassifyWithGateRequest(BaseModel):
     features: DocumentFeatures
 
 
+class LayoutRegionResponse(BaseModel):
+    region_type: str
+    row_start: int
+    row_end: int
+    col_start: int
+    col_end: int
+    height: int
+    width: int
+    ink_density: float
+
+
+class LayoutResponse(BaseModel):
+    regions: list[LayoutRegionResponse]
+    n_text_zones: int
+    has_header: bool
+    has_footer: bool
+    is_two_column: bool
+
+
 def _ensure_model() -> None:
     """Train the sklearn model if it hasn't been loaded yet."""
     if "model" in _state:
@@ -102,6 +122,18 @@ def _pixels_to_array(pixels: list[list[int]]) -> np.ndarray:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/layout/segment", response_model=LayoutResponse)
+def segment_document_layout(request: PixelMatrix) -> LayoutResponse:
+    """Segment document into header / body / footer zones via projection profiles.
+
+    Identifies structural zones without any ML — useful for directing OCR
+    to specific regions (e.g. signature block at footer, amounts in body).
+    """
+    arr = _pixels_to_array(request.pixels)
+    result: LayoutResult = segment_layout(arr)
+    return LayoutResponse(**result.to_dict())
 
 
 @app.post("/classify", response_model=PredictionResponse)

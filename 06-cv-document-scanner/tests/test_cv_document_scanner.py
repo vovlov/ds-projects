@@ -35,6 +35,15 @@ from scanner.data.rvl_cdip import (
 from scanner.models.classifier import predict, train_classifier
 from scanner.models.cnn import is_available as cnn_is_available
 from scanner.models.gradcam import is_available as gradcam_is_available
+from scanner.preprocessing.layout import (
+    LayoutResult,
+    RegionType,
+    compute_horizontal_projection,
+    compute_vertical_projection,
+    find_gaps,
+    find_text_zones,
+    segment_layout,
+)
 
 # ---- fixtures ----
 
@@ -726,3 +735,204 @@ class TestQualityAPIEndpoints:
         body = resp.json()
         if not body["gated"]:  # quality passed
             assert "doc_type" in body["classification"]
+
+
+# ===========================================================================
+# TestLayoutSegmentation
+# ===========================================================================
+
+
+class TestLayoutSegmentation:
+    """Unit tests for document layout segmentation (projection profile analysis)."""
+
+    def _make_doc(self, height: int = 100, width: int = 80) -> np.ndarray:
+        """Create a blank white document canvas."""
+        return np.full((height, width), 255, dtype=np.uint8)
+
+    def test_blank_returns_no_regions(self):
+        pixels = self._make_doc()
+        result = segment_layout(pixels)
+        assert result.n_text_zones == 0
+        assert result.regions == []
+        assert not result.has_header
+        assert not result.has_footer
+
+    def test_single_block_is_body(self):
+        pixels = self._make_doc()
+        pixels[40:60, 10:70] = 50  # single block in middle
+        result = segment_layout(pixels)
+        assert result.n_text_zones == 1
+        assert result.regions[0].region_type == RegionType.BODY
+
+    def test_header_detected(self):
+        pixels = self._make_doc()
+        pixels[5:15, 5:75] = 50  # top zone — header candidate
+        pixels[50:80, 5:75] = 50  # middle zone — body
+        result = segment_layout(pixels)
+        types = [r.region_type for r in result.regions]
+        assert RegionType.HEADER in types
+
+    def test_footer_detected(self):
+        pixels = self._make_doc()
+        pixels[10:40, 5:75] = 50  # body zone
+        pixels[85:95, 5:75] = 50  # bottom zone — footer candidate
+        result = segment_layout(pixels)
+        types = [r.region_type for r in result.regions]
+        assert RegionType.FOOTER in types
+
+    def test_three_zone_has_header_and_footer(self):
+        pixels = self._make_doc(height=120)
+        pixels[5:20, :] = 50  # header (ends at 17% of 120)
+        pixels[40:80, :] = 50  # body
+        pixels[100:115, :] = 50  # footer (starts at 83% of 120)
+        result = segment_layout(pixels)
+        assert result.has_header
+        assert result.has_footer
+        assert result.n_text_zones >= 2
+
+    def test_projection_length_matches_height(self):
+        pixels = self._make_doc(height=50)
+        pixels[10:20, :] = 50
+        result = segment_layout(pixels)
+        assert len(result.h_projection) == 50
+
+    def test_ink_density_in_range(self):
+        pixels = np.zeros((50, 40), dtype=np.uint8)  # all black
+        result = segment_layout(pixels)
+        for r in result.regions:
+            assert 0.0 <= r.ink_density <= 1.0
+
+    def test_region_bounds_within_image(self):
+        pixels = self._make_doc()
+        pixels[10:30, :] = 50
+        pixels[60:80, :] = 50
+        result = segment_layout(pixels)
+        h, w = pixels.shape
+        for r in result.regions:
+            assert 0 <= r.row_start < r.row_end <= h
+            assert 0 <= r.col_start < r.col_end <= w
+
+    def test_two_column_detection(self):
+        pixels = self._make_doc(height=100, width=100)
+        pixels[20:80, 5:40] = 50  # left column
+        pixels[20:80, 60:95] = 50  # right column (gap at cols 40–60)
+        result = segment_layout(pixels)
+        assert result.is_two_column
+
+    def test_single_column_not_two_column(self):
+        pixels = self._make_doc(height=100, width=80)
+        pixels[20:80, 5:75] = 50  # full-width block
+        result = segment_layout(pixels)
+        assert not result.is_two_column
+
+    def test_compute_horizontal_projection_shape(self):
+        gray = np.full((50, 40), 200.0)
+        proj = compute_horizontal_projection(gray)
+        assert proj.shape == (50,)
+
+    def test_compute_vertical_projection_shape(self):
+        gray = np.full((50, 40), 200.0)
+        proj = compute_vertical_projection(gray)
+        assert proj.shape == (40,)
+
+    def test_projection_values_in_range(self):
+        rng = np.random.default_rng(0)
+        gray = rng.uniform(0, 255, (50, 40))
+        proj = compute_horizontal_projection(gray)
+        assert float(proj.min()) >= 0.0
+        assert float(proj.max()) <= 1.0
+
+    def test_tiny_image_returns_empty_result(self):
+        pixels = np.array([[0, 255], [255, 0]], dtype=np.uint8)
+        result = segment_layout(pixels)
+        assert isinstance(result, LayoutResult)
+        assert result.regions == []
+
+    def test_find_gaps_all_text(self):
+        projection = np.ones(20) * 0.5
+        gaps = find_gaps(projection, gap_threshold=0.1)
+        assert gaps == []
+
+    def test_find_gaps_all_blank(self):
+        projection = np.zeros(20)
+        gaps = find_gaps(projection, gap_threshold=0.02)
+        assert len(gaps) == 1
+        assert gaps[0] == (0, 20)
+
+    def test_find_text_zones_two_zones(self):
+        proj = np.array([0.5] * 10 + [0.0] * 5 + [0.5] * 10, dtype=float)
+        zones = find_text_zones(proj, gap_threshold=0.02, min_rows=3)
+        assert len(zones) == 2
+        assert zones[0] == (0, 10)
+        assert zones[1] == (15, 25)
+
+
+# ===========================================================================
+# TestLayoutAPIEndpoints
+# ===========================================================================
+
+
+class TestLayoutAPIEndpoints:
+    """Integration tests for POST /layout/segment."""
+
+    @pytest.fixture(autouse=True)
+    def _client(self, api_client):
+        self.client = api_client
+
+    def _pixels(self, height: int = 100, width: int = 80, *, fill: int = 255) -> list[list[int]]:
+        return np.full((height, width), fill, dtype=np.uint8).tolist()
+
+    def _with_blocks(self, *row_ranges: tuple[int, int]) -> list[list[int]]:
+        """Create a 100×80 document with dark blocks at specified row ranges."""
+        arr = np.full((100, 80), 255, dtype=np.uint8)
+        for r0, r1 in row_ranges:
+            arr[r0:r1, :] = 50
+        return arr.tolist()
+
+    def test_segment_returns_200(self):
+        pixels = self._with_blocks((10, 25), (50, 80))
+        resp = self.client.post("/layout/segment", json={"pixels": pixels})
+        assert resp.status_code == 200
+
+    def test_segment_response_structure(self):
+        resp = self.client.post("/layout/segment", json={"pixels": self._with_blocks((10, 30))})
+        data = resp.json()
+        for key in ("regions", "n_text_zones", "has_header", "has_footer", "is_two_column"):
+            assert key in data
+
+    def test_blank_document_zero_zones(self):
+        resp = self.client.post("/layout/segment", json={"pixels": self._pixels()})
+        assert resp.json()["n_text_zones"] == 0
+
+    def test_empty_matrix_422(self):
+        resp = self.client.post("/layout/segment", json={"pixels": []})
+        assert resp.status_code == 422
+
+    def test_region_type_is_valid_string(self):
+        pixels = self._with_blocks((10, 30), (60, 80))
+        resp = self.client.post("/layout/segment", json={"pixels": pixels})
+        valid = {"header", "body", "footer", "margin", "blank"}
+        for r in resp.json()["regions"]:
+            assert r["region_type"] in valid
+
+    def test_regions_have_required_fields(self):
+        resp = self.client.post("/layout/segment", json={"pixels": self._with_blocks((10, 30))})
+        required = (
+            "region_type",
+            "row_start",
+            "row_end",
+            "col_start",
+            "col_end",
+            "height",
+            "width",
+            "ink_density",
+        )
+        for r in resp.json()["regions"]:
+            for key in required:
+                assert key in r
+
+    def test_n_text_zones_matches_regions(self):
+        pixels = self._with_blocks((10, 25), (50, 75))
+        resp = self.client.post("/layout/segment", json={"pixels": pixels})
+        data = resp.json()
+        assert data["n_text_zones"] == len(data["regions"])
