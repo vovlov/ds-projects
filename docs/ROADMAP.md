@@ -770,6 +770,25 @@
         YouTube: 25% роста watch time после внедрения diversity (RecSys 2019).
       Источники: Carbonell & Goldstein 1998 SIGIR (оригинальная MMR), Kunaver & Požrl 2017
         (ILS survey), Google RecSys 2024 diversity-aware retrieval.
+- [x] Document Layout Segmentation via Projection Profiles (Project 06) — 2026-05-28
+      scanner/preprocessing/layout.py: numpy-only horizontal/vertical projection profiles.
+      compute_horizontal_projection() / compute_vertical_projection() — ink density per
+        row/col. find_gaps() / find_text_zones() — boundary detection via density valleys.
+        Box-filter smoothing (window=3) merges scanner noise gaps without losing real gaps.
+      segment_layout(): labels detected zones HEADER (ends < 35% of page), FOOTER (starts
+        > 75%), BODY (everything else); single-zone docs always BODY.
+      _detect_two_column(): checks middle-third vertical gap ≥5 cols → multi-column flag.
+      LayoutConfig/LayoutRegion/LayoutResult dataclasses + to_dict() for API/serialisation.
+      scanner/api/app.py: POST /layout/segment endpoint.
+      24 новых теста: TestLayoutSegmentation×17 (blank, single-block, header/footer/3-zone,
+        projection length, ink density range, region bounds, two-column, find_gaps,
+        find_text_zones), TestLayoutAPIEndpoints×7 (200, structure, blank=0, 422, valid types,
+        required fields, n_zones==len(regions)). 105/105 тестов зелёных (81+24). Lint clean.
+      Бизнес-эффект: для страховой STP — направляет OCR точно в зону подписи (footer),
+        сумм (body), заголовка (header) вместо обработки всего скана.
+        Дополняет existing quality gate и GradCAM explainability.
+      Источники: O'Gorman 1993 Document Spectral Analysis (IUPUI),
+        Kise et al. 1998 ICDAR document segmentation.
 
 ---
 
