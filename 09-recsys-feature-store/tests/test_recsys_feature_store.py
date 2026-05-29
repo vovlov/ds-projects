@@ -1950,3 +1950,327 @@ class TestDiversityAPIEndpoints:
         assert len(data["items"]) == 3
         # with low lambda, diversity should be prioritised — check ild > 0
         assert data["metrics"]["intra_list_diversity"] >= 0.0
+
+
+# ===========================================================================
+# TestSessionRecommender — unit tests for session.py
+# ===========================================================================
+
+
+class TestSessionRecommender:
+    """Unit-тесты для SessionRecommender / Unit tests for SessionRecommender."""
+
+    def test_empty_session_cold_start(self) -> None:
+        """Пустая сессия → cold start (popular_fallback)."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=20, seed=0))
+        result = rec.recommend(user_id=999, top_k=5)
+        assert result.method == "popular_fallback"
+        assert result.session_length == 0
+        assert result.session_vector_norm == 0.0
+
+    def test_record_interaction_creates_session(self) -> None:
+        """record_interaction создаёт сессию если её нет."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=20, seed=0))
+        state = rec.record_interaction(user_id=1, item_id=5)
+        assert state.user_id == 1
+        assert 5 in state.item_history
+        assert len(state.item_history) == 1
+
+    def test_session_method_after_interaction(self) -> None:
+        """После взаимодействия метод становится 'session'."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=50, seed=1))
+        rec.record_interaction(user_id=2, item_id=10)
+        result = rec.recommend(user_id=2, top_k=5)
+        assert result.method == "session"
+        assert result.session_length == 1
+        assert result.session_vector_norm == 1.0
+
+    def test_recommendations_length(self) -> None:
+        """top_k рекомендаций возвращается (не больше)."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=50, seed=2))
+        rec.record_interaction(5, 10)
+        rec.record_interaction(5, 15)
+        result = rec.recommend(user_id=5, top_k=10)
+        assert len(result.recommendations) == 10
+
+    def test_recommendations_sorted_by_rank(self) -> None:
+        """Рекомендации отсортированы по rank (1, 2, 3, ...)."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=50, seed=3))
+        rec.record_interaction(7, 0)
+        result = rec.recommend(user_id=7, top_k=5)
+        ranks = [r.rank for r in result.recommendations]
+        assert ranks == list(range(1, len(ranks) + 1))
+
+    def test_scores_sorted_descending(self) -> None:
+        """Оценки убывают (первый товар самый релевантный)."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=100, seed=4))
+        rec.record_interaction(10, 5)
+        rec.record_interaction(10, 12)
+        result = rec.recommend(user_id=10, top_k=8)
+        scores = [r.score for r in result.recommendations]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_exclude_seen_removes_history_items(self) -> None:
+        """exclude_seen=True убирает товары из истории сессии."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=30, seed=5))
+        seen_items = [1, 2, 3]
+        for iid in seen_items:
+            rec.record_interaction(20, iid)
+        result = rec.recommend(user_id=20, top_k=10, exclude_seen=True)
+        rec_ids = {r.item_id for r in result.recommendations}
+        assert rec_ids.isdisjoint(seen_items)
+
+    def test_exclude_seen_false_includes_history(self) -> None:
+        """exclude_seen=False может включать товары из истории."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=10, seed=6))
+        rec.record_interaction(30, 0)
+        rec.record_interaction(30, 1)
+        # С маленьким n_items и exclude_seen=False все товары — кандидаты
+        result = rec.recommend(user_id=30, top_k=5, exclude_seen=False)
+        assert len(result.recommendations) == 5
+
+    def test_sliding_window_truncation(self) -> None:
+        """max_session_length ограничивает историю (sliding window)."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        max_len = 5
+        rec = SessionRecommender(SessionConfig(n_items=50, seed=7, max_session_length=max_len))
+        for iid in range(10):
+            rec.record_interaction(40, iid)
+        state = rec.get_session(40)
+        assert state is not None
+        assert len(state.item_history) == max_len
+        # Последние max_len элементов — самые свежие
+        assert state.item_history == list(range(10 - max_len, 10))
+
+    def test_decay_factor_one_equals_mean_pooling(self) -> None:
+        """decay_factor=1.0 → все позиции равновесны (mean pooling)."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=50, seed=8, decay_factor=1.0))
+        for iid in [5, 10, 15]:
+            rec.record_interaction(50, iid)
+        result = rec.recommend(user_id=50, top_k=5)
+        assert result.method == "session"
+
+    def test_different_users_independent_sessions(self) -> None:
+        """Разные пользователи имеют независимые сессии."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=50, seed=9))
+        rec.record_interaction(100, 10)
+        rec.record_interaction(200, 20)
+        s100 = rec.get_session(100)
+        s200 = rec.get_session(200)
+        assert s100 is not None and s200 is not None
+        assert s100.item_history == [10]
+        assert s200.item_history == [20]
+
+    def test_reset_session(self) -> None:
+        """reset_session удаляет сессию пользователя."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=20, seed=10))
+        rec.record_interaction(60, 3)
+        assert rec.reset_session(60) is True
+        assert rec.get_session(60) is None
+
+    def test_reset_nonexistent_session_returns_false(self) -> None:
+        """reset_session на несуществующей сессии → False."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=20, seed=11))
+        assert rec.reset_session(9999) is False
+
+    def test_get_stats_empty(self) -> None:
+        """get_stats работает при нулевом числе сессий."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=20, seed=12))
+        stats = rec.get_stats()
+        assert stats["n_sessions"] == 0
+        assert stats["avg_session_length"] == 0.0
+
+    def test_get_stats_after_interactions(self) -> None:
+        """get_stats корректно считает avg_session_length."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=20, seed=13))
+        rec.record_interaction(70, 1)
+        rec.record_interaction(70, 2)
+        rec.record_interaction(80, 3)
+        stats = rec.get_stats()
+        assert stats["n_sessions"] == 2
+        # user 70 → длина 2, user 80 → длина 1, среднее = 1.5
+        assert stats["avg_session_length"] == 1.5
+
+    def test_candidate_ids_respected(self) -> None:
+        """Рекомендации только из переданных candidate_ids."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=100, seed=14))
+        rec.record_interaction(90, 5)
+        candidates = [10, 20, 30, 40]
+        result = rec.recommend(user_id=90, candidate_ids=candidates, top_k=4)
+        rec_ids = {r.item_id for r in result.recommendations}
+        assert rec_ids.issubset(set(candidates))
+
+    def test_popular_fallback_uses_interaction_count(self) -> None:
+        """Cold start ранжирует по числу взаимодействий (популярность)."""
+        from recsys.models.session import SessionConfig, SessionRecommender
+
+        rec = SessionRecommender(SessionConfig(n_items=10, seed=15))
+        # item 3 → 5 взаимодействий от других пользователей
+        for uid in range(5):
+            rec.record_interaction(uid, 3)
+        # item 7 → 1 взаимодействие
+        rec.record_interaction(50, 7)
+        # Новый пользователь 99 — без сессии
+        result = rec.recommend(user_id=99, candidate_ids=[3, 7], top_k=2)
+        assert result.method == "popular_fallback"
+        assert result.recommendations[0].item_id == 3  # самый популярный — первый
+
+
+# ===========================================================================
+# TestSessionAPIEndpoints — integration tests via FastAPI TestClient
+# ===========================================================================
+
+
+class TestSessionAPIEndpoints:
+    """Интеграционные тесты session endpoints / Session API endpoint tests."""
+
+    @pytest.fixture(autouse=True)
+    def reset(self) -> None:
+        """Сбрасываем session recommender перед каждым тестом."""
+        from recsys.api.app import _reset_session_recommender
+
+        _reset_session_recommender()
+
+    @pytest.fixture
+    def client(self) -> TestClient:
+        from recsys.api.app import app
+
+        return TestClient(app)
+
+    def test_interact_200(self, client: TestClient) -> None:
+        """POST /session/interact возвращает 200."""
+        resp = client.post("/session/interact", json={"user_id": 1, "item_id": 10})
+        assert resp.status_code == 200
+
+    def test_interact_response_structure(self, client: TestClient) -> None:
+        """Ответ /session/interact содержит нужные поля."""
+        data = client.post("/session/interact", json={"user_id": 2, "item_id": 5}).json()
+        assert "user_id" in data
+        assert "item_id" in data
+        assert "session_length" in data
+        assert "message" in data
+
+    def test_interact_increments_session_length(self, client: TestClient) -> None:
+        """Повторные взаимодействия увеличивают длину сессии."""
+        for iid in [1, 2, 3]:
+            resp = client.post("/session/interact", json={"user_id": 10, "item_id": iid})
+        assert resp.json()["session_length"] == 3
+
+    def test_recommend_200_no_session(self, client: TestClient) -> None:
+        """POST /session/recommend работает без предварительной сессии (cold start)."""
+        resp = client.post("/session/recommend", json={"user_id": 999, "top_k": 5})
+        assert resp.status_code == 200
+
+    def test_recommend_cold_start_method(self, client: TestClient) -> None:
+        """Без сессии метод = popular_fallback."""
+        data = client.post("/session/recommend", json={"user_id": 888, "top_k": 5}).json()
+        assert data["method"] == "popular_fallback"
+        assert data["session_length"] == 0
+
+    def test_recommend_after_interact_method_session(self, client: TestClient) -> None:
+        """После взаимодействия метод = session."""
+        client.post("/session/interact", json={"user_id": 20, "item_id": 7})
+        data = client.post("/session/recommend", json={"user_id": 20, "top_k": 5}).json()
+        assert data["method"] == "session"
+
+    def test_recommend_response_structure(self, client: TestClient) -> None:
+        """Структура ответа /session/recommend корректна."""
+        client.post("/session/interact", json={"user_id": 30, "item_id": 1})
+        data = client.post("/session/recommend", json={"user_id": 30, "top_k": 3}).json()
+        assert "recommendations" in data
+        assert "session_length" in data
+        assert "method" in data
+        assert "session_vector_norm" in data
+        assert len(data["recommendations"]) == 3
+
+    def test_recommend_items_have_rank_and_score(self, client: TestClient) -> None:
+        """Каждая рекомендация содержит item_id, score, rank."""
+        client.post("/session/interact", json={"user_id": 40, "item_id": 2})
+        data = client.post("/session/recommend", json={"user_id": 40, "top_k": 5}).json()
+        for item in data["recommendations"]:
+            assert "item_id" in item
+            assert "score" in item
+            assert "rank" in item
+
+    def test_recommend_ranks_sequential(self, client: TestClient) -> None:
+        """Ranks последовательны (1, 2, 3, ...)."""
+        client.post("/session/interact", json={"user_id": 50, "item_id": 3})
+        data = client.post("/session/recommend", json={"user_id": 50, "top_k": 4}).json()
+        ranks = [r["rank"] for r in data["recommendations"]]
+        assert ranks == list(range(1, len(ranks) + 1))
+
+    def test_status_404_no_session(self, client: TestClient) -> None:
+        """GET /session/status/{user_id} → 404 если сессия не существует."""
+        resp = client.get("/session/status/77777")
+        assert resp.status_code == 404
+
+    def test_status_200_after_interact(self, client: TestClient) -> None:
+        """GET /session/status/{user_id} → 200 после взаимодействия."""
+        client.post("/session/interact", json={"user_id": 60, "item_id": 4})
+        resp = client.get("/session/status/60")
+        assert resp.status_code == 200
+
+    def test_status_contains_history(self, client: TestClient) -> None:
+        """Статус сессии содержит историю взаимодействий."""
+        for iid in [10, 20, 30]:
+            client.post("/session/interact", json={"user_id": 70, "item_id": iid})
+        data = client.get("/session/status/70").json()
+        assert data["session_length"] == 3
+        assert set(data["item_history"]) == {10, 20, 30}
+
+    def test_stats_endpoint(self, client: TestClient) -> None:
+        """GET /session/stats возвращает корректную структуру."""
+        client.post("/session/interact", json={"user_id": 80, "item_id": 1})
+        data = client.get("/session/stats").json()
+        assert "n_sessions" in data
+        assert "avg_session_length" in data
+        assert "embedding_dim" in data
+        assert "decay_factor" in data
+        assert data["n_sessions"] >= 1
+
+    def test_full_session_cycle(self, client: TestClient) -> None:
+        """Полный цикл: interact → recommend → status → stats."""
+        # Запись взаимодействий
+        for iid in [5, 10, 15]:
+            client.post("/session/interact", json={"user_id": 100, "item_id": iid})
+        # Рекомендации
+        rec_data = client.post("/session/recommend", json={"user_id": 100, "top_k": 5}).json()
+        assert rec_data["method"] == "session"
+        assert len(rec_data["recommendations"]) == 5
+        # Статус
+        status = client.get("/session/status/100").json()
+        assert status["session_length"] == 3
+        # Статистика
+        stats = client.get("/session/stats").json()
+        assert stats["n_sessions"] >= 1

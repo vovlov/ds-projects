@@ -28,6 +28,7 @@ from recsys.models.bandit import BanditConfig, BanditResult, LinUCBBandit
 from recsys.models.collaborative import CollaborativeRecommender
 from recsys.models.content_based import get_popular_items
 from recsys.models.diversity import DiversityConfig, DiversityResult, MMRDiversifier
+from recsys.models.session import SessionConfig, SessionRecommender, SessionResult
 
 app = FastAPI(
     title="RecSys API",
@@ -154,6 +155,9 @@ _bandit: LinUCBBandit | None = None
 # MMR Diversifier singleton
 _mmr_diversifier: MMRDiversifier | None = None
 
+# Session-based recommender singleton
+_session_recommender: SessionRecommender | None = None
+
 
 def _get_wap_gate(psi_threshold: float = 0.2) -> WAPGate:
     """Ленивая инициализация WAP gate / Lazy WAP gate initialization."""
@@ -189,6 +193,32 @@ def _reset_diversifier() -> None:
     """Сброс diversifier для тестовой изоляции / Reset for test isolation."""
     global _mmr_diversifier
     _mmr_diversifier = None
+
+
+def _get_session_recommender(
+    embedding_dim: int = 32,
+    decay_factor: float = 0.8,
+    max_session_length: int = 20,
+    n_items: int = 500,
+) -> SessionRecommender:
+    """Ленивая инициализация SessionRecommender / Lazy session recommender init."""
+    global _session_recommender
+    if _session_recommender is None:
+        _session_recommender = SessionRecommender(
+            SessionConfig(
+                embedding_dim=embedding_dim,
+                decay_factor=decay_factor,
+                max_session_length=max_session_length,
+                n_items=n_items,
+            )
+        )
+    return _session_recommender
+
+
+def _reset_session_recommender() -> None:
+    """Сброс session recommender для тестовой изоляции / Reset for test isolation."""
+    global _session_recommender
+    _session_recommender = None
 
 
 def _get_feast_bridge() -> FeastBridge:
@@ -649,4 +679,187 @@ def recommend_diverse(request: DiverseRecommendRequest) -> DiverseRecommendRespo
         ),
         lambda_param=result.lambda_param,
         n_candidates=result.n_candidates,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session-Based Recommendations endpoints
+# ---------------------------------------------------------------------------
+
+
+class SessionInteractRequest(BaseModel):
+    """
+    Запрос на запись взаимодействия в сессию.
+    Request to record a user-item interaction into the session.
+
+    Пример / Example:
+        { "user_id": 42, "item_id": 101 }
+    """
+
+    user_id: int
+    item_id: int
+
+
+class SessionInteractResponse(BaseModel):
+    """Подтверждение записи взаимодействия. / Interaction recording confirmation."""
+
+    user_id: int
+    item_id: int
+    session_length: int
+    message: str
+
+
+class SessionRecommendRequest(BaseModel):
+    """
+    Запрос на session-based рекомендации.
+    Request for session-based next-item recommendations.
+
+    candidate_ids: список кандидатов для ранжирования.
+        None → все item_ids [0, n_items).
+    exclude_seen: исключить товары уже просмотренные в сессии.
+    decay_factor: вес новых взаимодействий. 0.8 по умолчанию.
+    """
+
+    user_id: int
+    candidate_ids: list[int] | None = None
+    top_k: int = 10
+    exclude_seen: bool = True
+    decay_factor: float = 0.8
+    embedding_dim: int = 32
+
+
+class SessionRecommendationResponse(BaseModel):
+    """Одна рекомендация из session-based модели."""
+
+    item_id: int
+    score: float
+    rank: int
+
+
+class SessionRecommendResponse(BaseModel):
+    """Ответ session-based рекомендательной системы."""
+
+    user_id: int
+    session_length: int
+    recommendations: list[SessionRecommendationResponse]
+    method: str
+    session_vector_norm: float
+
+
+class SessionStatusResponse(BaseModel):
+    """Текущее состояние сессии пользователя."""
+
+    user_id: int
+    session_length: int
+    item_history: list[int]
+    last_updated: str
+
+
+class SessionStatsResponse(BaseModel):
+    """Агрегированная статистика всех сессий для мониторинга."""
+
+    n_sessions: int
+    n_known_items: int
+    avg_session_length: float
+    embedding_dim: int
+    decay_factor: float
+
+
+@app.post("/session/interact", response_model=SessionInteractResponse)
+def session_interact(request: SessionInteractRequest) -> SessionInteractResponse:
+    """
+    Записать взаимодействие пользователя с товаром в сессию.
+    Record a user-item interaction into the session window.
+
+    Сессия создаётся автоматически при первом взаимодействии.
+    Старые взаимодействия вытесняются при достижении max_session_length.
+
+    Session is auto-created on first interaction.
+    Old interactions are evicted when max_session_length is reached (sliding window).
+    """
+    rec = _get_session_recommender()
+    state = rec.record_interaction(request.user_id, request.item_id)
+    return SessionInteractResponse(
+        user_id=request.user_id,
+        item_id=request.item_id,
+        session_length=len(state.item_history),
+        message=f"interaction recorded (session_length={len(state.item_history)})",
+    )
+
+
+@app.post("/session/recommend", response_model=SessionRecommendResponse)
+def session_recommend(request: SessionRecommendRequest) -> SessionRecommendResponse:
+    """
+    Рекомендовать следующие товары на основе истории сессии.
+    Recommend next items using session-based decay-weighted embedding similarity.
+
+    Алгоритм (GRU4Rec-инспированный, Hidasi et al. 2016):
+        session_vec = Σ decay^(T-t) · emb[item_t] / Σ decay^(T-t)
+        score(item) = cosine(session_vec, emb[item])
+
+    При пустой сессии (cold start) — ранжирование по популярности.
+    Empty session (cold start) → popular item fallback.
+    """
+    if request.top_k < 1:
+        raise HTTPException(status_code=422, detail="top_k must be >= 1")
+
+    rec = _get_session_recommender(
+        embedding_dim=request.embedding_dim,
+        decay_factor=request.decay_factor,
+    )
+    result: SessionResult = rec.recommend(
+        user_id=request.user_id,
+        candidate_ids=request.candidate_ids,
+        top_k=request.top_k,
+        exclude_seen=request.exclude_seen,
+    )
+
+    return SessionRecommendResponse(
+        user_id=result.user_id,
+        session_length=result.session_length,
+        recommendations=[
+            SessionRecommendationResponse(item_id=r.item_id, score=r.score, rank=r.rank)
+            for r in result.recommendations
+        ],
+        method=result.method,
+        session_vector_norm=result.session_vector_norm,
+    )
+
+
+@app.get("/session/status/{user_id}", response_model=SessionStatusResponse)
+def session_status(user_id: int) -> SessionStatusResponse:
+    """
+    Текущее состояние сессии пользователя.
+    Current session state for the given user.
+
+    Возвращает 404 если сессия не существует (пользователь ещё не взаимодействовал).
+    Returns 404 if the user has no session yet.
+    """
+    rec = _get_session_recommender()
+    state = rec.get_session(user_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"No session found for user_id={user_id}")
+
+    return SessionStatusResponse(
+        user_id=state.user_id,
+        session_length=len(state.item_history),
+        item_history=list(state.item_history),
+        last_updated=state.last_updated,
+    )
+
+
+@app.get("/session/stats", response_model=SessionStatsResponse)
+def session_stats() -> SessionStatsResponse:
+    """
+    Агрегированная статистика сессий для мониторинга.
+    Aggregate session statistics for monitoring dashboards.
+    """
+    rec = _get_session_recommender()
+    stats = rec.get_stats()
+    return SessionStatsResponse(
+        n_sessions=stats["n_sessions"],
+        n_known_items=stats["n_known_items"],
+        avg_session_length=stats["avg_session_length"],
+        embedding_dim=stats["embedding_dim"],
+        decay_factor=stats["decay_factor"],
     )

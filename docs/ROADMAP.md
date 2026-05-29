@@ -771,6 +771,35 @@
       Источники: Carbonell & Goldstein 1998 SIGIR (оригинальная MMR), Kunaver & Požrl 2017
         (ILS survey), Google RecSys 2024 diversity-aware retrieval.
 - [x] Document Layout Segmentation via Projection Profiles (Project 06) — 2026-05-28
+- [x] Session-Based Recommendations (GRU4Rec-style) для RecSys (Project 09) — 2026-05-29
+      recsys/models/session.py: SessionRecommender — decay-weighted mean pooling item-эмбеддингов.
+      SessionConfig (max_session_length=20, embedding_dim=32, decay_factor=0.8, n_items=500, seed=42).
+      session_vec = Σ decay^(T-t)·emb[i_t] / Σ decay^(T-t) — свежие взаимодействия весят больше.
+      Ранжирование: cosine(session_vec, emb[item]) — cosine = dot для L2-нормированных векторов.
+      Cold start (пустая сессия) → popular fallback по числу взаимодействий.
+      Sliding window: max_session_length обрезает старую историю (память сессии).
+      SessionState (item_history oldest→newest), InteractionEvent, SessionRecommendation,
+      SessionResult (method: "session"|"popular_fallback", session_vector_norm).
+      recsys/api/app.py: 4 новых endpoint:
+        POST /session/interact (запись взаимодействия, авто-создание сессии),
+        POST /session/recommend (GRU4Rec-инспированный next-item predict),
+        GET  /session/status/{user_id} (история сессии, 404 если нет),
+        GET  /session/stats (n_sessions, avg_session_length, decay_factor для мониторинга).
+      31 новый тест: TestSessionRecommender×17 (cold_start, creates_session, method_session,
+        length, sorted_by_rank, scores_descending, exclude_seen, exclude_false, sliding_window,
+        decay_one, independent_sessions, reset, reset_false, stats_empty, stats_len,
+        candidate_ids, popular_fallback), TestSessionAPIEndpoints×14 (interact 200,
+        structure, increments, recommend_200, cold_start_method, after_interact_session,
+        response_structure, rank_score_fields, sequential_ranks, status_404, status_200,
+        status_history, stats_endpoint, full_cycle).
+      191/191 тестов зелёных (+31, было 160). Lint clean.
+      Бизнес-эффект: сессионные рекомендации учитывают контекст текущей сессии
+        (не только долгосрочный профиль) — пользователь ищет "ноутбук" → рекомендуем аксессуары,
+        даже если исторически он покупал только книги. Hidasi et al. 2016: +20% Recall@20 vs
+        популярности. Дополняет существующий LinUCB (exploration) и MMR (diversity).
+      Источники: Hidasi et al. 2016 ICLR "Session-Based Recommendations with RNNs" (GRU4Rec),
+        Ludewig & Jannach 2018 RecSys "Evaluation of Session-based Rec Algorithms",
+        Koren et al. 2009 IEEE Computer (temporal decay weighting).
       scanner/preprocessing/layout.py: numpy-only horizontal/vertical projection profiles.
       compute_horizontal_projection() / compute_vertical_projection() — ink density per
         row/col. find_gaps() / find_text_zones() — boundary detection via density valleys.
