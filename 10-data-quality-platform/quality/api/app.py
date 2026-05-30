@@ -27,6 +27,7 @@ from quality.data.profiler import profile_dataframe
 from quality.lineage.tracker import RunState, get_tracker
 from quality.quality.drift import detect_drift
 from quality.quality.expectations import run_suite
+from quality.quality.stat_tests import batch_extended_drift
 from quality.schema_registry.registry import get_registry
 from quality.schema_registry.schema import ColumnSchema, ColumnType, Compatibility, DataSchema
 from quality.schema_registry.validator import (
@@ -198,6 +199,58 @@ async def drift_alert_endpoint(
         "alert_sent": alert is not None,
     }
     return JSONResponse(content=response_body)
+
+
+# ---------------------------------------------------------------------------
+# Extended drift test battery — Pydantic models
+# ---------------------------------------------------------------------------
+
+
+class ExtendedDriftRequest(BaseModel):
+    """
+    Запрос расширенной батареи тестов дрейфа / Extended drift test battery request.
+
+    reference: эталонные данные {column_name: [values...]}
+    current:   текущие данные   {column_name: [values...]}
+    feature_types: опциональный маппинг column → "continuous"|"categorical"|"auto"
+    bins: число бинов для Wasserstein/JS (по умолчанию 20)
+    """
+
+    reference: dict[str, list]
+    current: dict[str, list]
+    feature_types: dict[str, str] | None = None
+    bins: int = 20
+
+
+@app.post("/drift/extended")
+def drift_extended_endpoint(req: ExtendedDriftRequest) -> JSONResponse:
+    """
+    Расширенная батарея статистических тестов дрейфа / Extended statistical drift battery.
+
+    Запускает по каждому признаку:
+      - continuous: Wasserstein distance + Jensen-Shannon divergence
+      - categorical: Chi-squared test + Jensen-Shannon divergence
+      - auto: автоопределение типа (≤20 уникальных значений → categorical)
+
+    Runs per-feature tests:
+      continuous → Wasserstein distance + JS divergence
+      categorical → chi-squared + JS divergence
+      auto → type auto-detected by n_unique values
+
+    Returns:
+      columns_checked: число проверенных столбцов
+      columns_with_drift: столбцов с обнаруженным дрейфом
+      critical_columns: столбцы с severity="critical"
+      overall_drift: True если хотя бы один столбец в дрейфе
+      details: результаты по каждому столбцу
+    """
+    report = batch_extended_drift(
+        reference_data=req.reference,
+        current_data=req.current,
+        feature_types=req.feature_types,
+        bins=req.bins,
+    )
+    return JSONResponse(content=_make_serializable(report))
 
 
 # ---------------------------------------------------------------------------
