@@ -818,6 +818,26 @@
         Дополняет existing quality gate и GradCAM explainability.
       Источники: O'Gorman 1993 Document Spectral Analysis (IUPUI),
         Kise et al. 1998 ICDAR document segmentation.
+- [x] Extended Drift Test Battery — Wasserstein + JS + Chi-squared (Project 10) — 2026-05-30
+      quality/quality/stat_tests.py: три метода, дополняющие существующий PSI+KS:
+        wasserstein_distance(): W1 через квантильную аппроксимацию (O(n log n), numpy-only),
+          нормировка на std признака → unit-invariant severity пороги.
+        js_divergence(): симметричная KL-дивергенция [0,1] (Lin 1991), Laplace smoothing.
+        chi2_test(): Pearson χ² для categorical признаков, graceful fallback без scipy.
+        extended_drift_test(): single-feature батарея (continuous/categorical/auto-detect),
+          severity + confidence (доля тестов, зафиксировавших дрейф).
+        batch_extended_drift(): батарея по всем признакам → critical_columns list.
+      quality/api/app.py: POST /drift/extended — JSON endpoint (vs. multipart CSV /drift),
+        принимает reference/current как dict[str, list], feature_types override, bins param.
+      47 новых тестов: TestWassersteinDistance×6, TestWassersteinSeverity×5,
+        TestJSDivergence×6, TestJSSeverity×3, TestChi2Test×6,
+        TestExtendedDriftTest×7, TestBatchExtendedDrift×5, TestExtendedDriftAPIEndpoint×9.
+      368/368 тестов зелёных (было 321).
+      Бизнес-эффект: полное покрытие типов признаков — PSI+KS хорошо для continuous,
+        chi2+JS закрывают categorical; Wasserstein устойчив к outliers где KS чувствителен.
+        В 2026 MLOps стандарт — батарея ≥ 3 тестов для production drift мониторинга.
+      Источники: Villani 2008 "Optimal Transport", Lin 1991 IEEE Trans. Inf. Theory 37(1),
+        Pearson 1900 Philosophical Magazine 50(302), Evidently AI v0.5+, WhyLogs 1.3.
 
 ---
 
