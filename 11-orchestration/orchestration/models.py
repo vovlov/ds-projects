@@ -64,9 +64,7 @@ class PipelineEvent:
     transaction: TransactionData
     metrics: MetricSnapshot
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    timestamp: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
-    )
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 @dataclass

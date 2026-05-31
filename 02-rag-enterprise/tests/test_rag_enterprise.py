@@ -1139,11 +1139,13 @@ class TestChunkPreviewEndpoint:
 # Knowledge Graph: Entity Extractor
 # ---------------------------------------------------------------------------
 
+
 class TestEntityExtractor:
     """Tests for rag.knowledge_graph.extractor."""
 
     def setup_method(self):
         from rag.knowledge_graph.extractor import extract_entities
+
         self.extract = extract_entities
 
     def test_empty_text_returns_empty_list(self):
@@ -1200,6 +1202,7 @@ class TestEntityExtractor:
 # Knowledge Graph: Graph Construction and Retrieval
 # ---------------------------------------------------------------------------
 
+
 class TestKnowledgeGraph:
     """Tests for rag.knowledge_graph.graph.KnowledgeGraph."""
 
@@ -1208,6 +1211,7 @@ class TestKnowledgeGraph:
 
     def setup_method(self):
         from rag.knowledge_graph.graph import KnowledgeGraph
+
         self.KnowledgeGraph = KnowledgeGraph
 
     def test_is_built_false_before_build(self):
@@ -1235,9 +1239,7 @@ class TestKnowledgeGraph:
 
     def test_edges_for_co_occurring_entities(self):
         kg = self.KnowledgeGraph()
-        stats = kg.build_from_chunks(
-            self._make_chunks(["RAG with MLOps in production."])
-        )
+        stats = kg.build_from_chunks(self._make_chunks(["RAG with MLOps in production."]))
         # Two concepts in same chunk should create at least one edge
         assert stats.n_edges >= 0  # may be 0 if only one entity extracted
 
@@ -1285,9 +1287,7 @@ class TestKnowledgeGraph:
         assert isinstance(result, list)
 
     def test_query_graph_respects_n_results(self):
-        many_chunks = self._make_chunks([
-            f"RAG system {i} is deployed." for i in range(20)
-        ])
+        many_chunks = self._make_chunks([f"RAG system {i} is deployed." for i in range(20)])
         kg = self.KnowledgeGraph()
         kg.build_from_chunks(many_chunks)
         result = kg.query_graph("RAG", many_chunks, n_results=3)
@@ -1323,12 +1323,14 @@ class TestKnowledgeGraph:
 # Knowledge Graph: API Endpoints
 # ---------------------------------------------------------------------------
 
+
 class TestGraphRAGAPI:
     """Tests for /graph/* and retrieval_method='graph' endpoints."""
 
     def _get_client(self):
         from fastapi.testclient import TestClient
         from rag.api.app import app
+
         return TestClient(app)
 
     def test_graph_stats_returns_200(self):

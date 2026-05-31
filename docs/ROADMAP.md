@@ -655,6 +655,22 @@
 
 - [x] GraphRAG Knowledge Graph retrieval для RAG (Project 02) — 2026-05-22
 - [x] Fraud Ring Detection via Label Propagation (Project 04) — 2026-05-23
+- [x] Correlation Analysis Module (Pearson/Spearman/Cramér's V) для Data Quality (Project 10) — 2026-05-24
+      quality/analytics/correlation.py: CorrelationPair/CorrelationMatrix dataclasses.
+      pearson_matrix() + spearman_matrix() (с p-value через scipy.stats) для числовых столбцов.
+      cramers_v_matrix() (bias-corrected Bergsma & Wicher 2013) для категориальных + low-cardinality numeric.
+      Флагирование: "leakage" (|r|>=0.99 — утечка данных/алиасированные признаки),
+        "strong" (|r|>=0.95 — мультиколлинеарность). Сортировка по убыванию |r|.
+      correlation_report(): unified интерфейс, дедупликация пар между методами, top-10 suspicious.
+      quality/api/app.py: POST /analytics/correlation (CSV + methods → матрицы + summary),
+        POST /analytics/correlation/suspicious (быстрый sweep на утечку данных).
+      50 новых тестов: TestFlagHelper×8, TestCramersV×4, TestPearsonMatrix×11,
+        TestSpearmanMatrix×4, TestCramersVMatrix×5, TestCorrelationReport×8,
+        TestCorrelationAPIEndpoints×10. 371/371 зелёных (+50, было 321).
+      Бизнес-эффект: автоматический детектор data leakage (корреляция target → фича > 0.99)
+        и мультиколлинеарности перед обучением модели — стандартная проверка в production ML.
+      Источники: Bergsma & Wicher 2013 (bias-corrected V), Pearson 1895, Spearman 1904,
+        Cramér 1946, sklearn feature_selection docs.
       fraud/models/community.py: FraudRingDetector (Label Propagation, Raghavan et al. 2007),
       CommunityConfig (fraud_ratio_high/medium thresholds, min_ring_size, seed),
       CommunityResult (community_id, size, fraud_ratio, risk_level, node_ids),

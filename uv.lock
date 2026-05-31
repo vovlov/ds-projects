@@ -1213,6 +1213,7 @@ anomaly = [
     { name = "numpy" },
     { name = "prometheus-client" },
     { name = "redis" },
+    { name = "scikit-learn" },
     { name = "uvicorn" },
 ]
 churn = [
@@ -1401,6 +1402,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'anomaly'", specifier = ">=5.2" },
     { name = "river", marker = "extra == 'churn'", specifier = ">=0.21" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
+    { name = "scikit-learn", marker = "extra == 'anomaly'", specifier = ">=1.5" },
     { name = "scikit-learn", marker = "extra == 'churn'", specifier = ">=1.5" },
     { name = "scikit-learn", marker = "extra == 'cv'", specifier = ">=1.5" },
     { name = "scikit-learn", marker = "extra == 'fraud'", specifier = ">=1.5" },

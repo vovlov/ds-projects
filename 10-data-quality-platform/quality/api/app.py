@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from quality.alerts.alerting import AlertManager, LogAlertChannel, WebhookAlertChannel
+from quality.analytics.correlation import correlation_report
 from quality.data.profiler import profile_dataframe
 from quality.lineage.tracker import RunState, get_tracker
 from quality.quality.drift import detect_drift
@@ -1046,3 +1047,71 @@ def sla_reset() -> JSONResponse:
     """
     reset_monitor()
     return JSONResponse(content={"status": "reset", "message": "All SLOs and observations cleared"})
+
+
+# ---------------------------------------------------------------------------
+# Analytics — Correlation Analysis
+# ---------------------------------------------------------------------------
+
+
+@app.post("/analytics/correlation")
+async def analytics_correlation(
+    file: UploadFile = File(..., description="CSV-файл для анализа / CSV to analyze"),
+    methods: str = Form(
+        "pearson,spearman,cramers_v",
+        description=(
+            "Методы через запятую / Comma-separated methods: pearson, spearman, cramers_v"
+        ),
+    ),
+) -> JSONResponse:
+    """
+    Корреляционный анализ датасета / Dataset correlation analysis.
+
+    Возвращает матрицы корреляций для числовых (Пирсон, Спирмен) и
+    категориальных (Cramér's V) столбцов. Подозрительные пары флагируются:
+    - "leakage": |r| >= 0.99 — возможная утечка данных или алиасированные признаки
+    - "strong":  |r| >= 0.95 — сильная мультиколлинеарность
+
+    Returns correlation matrices for numeric (Pearson, Spearman) and
+    categorical (Cramér's V) columns. Suspicious pairs are flagged:
+    - "leakage": |r| >= 0.99 — possible data leakage or aliased features
+    - "strong":  |r| >= 0.95 — strong multicollinearity
+    """
+    df = _read_upload_csv(file)
+    method_list = [m.strip() for m in methods.split(",") if m.strip()]
+    valid = {"pearson", "spearman", "cramers_v"}
+    unknown = set(method_list) - valid
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown methods: {unknown}. Valid: {valid}",
+        )
+    report = correlation_report(df, methods=method_list)
+    return JSONResponse(content=_make_serializable(report))
+
+
+@app.post("/analytics/correlation/suspicious")
+async def analytics_correlation_suspicious(
+    file: UploadFile = File(..., description="CSV-файл для анализа / CSV to analyze"),
+) -> JSONResponse:
+    """
+    Только подозрительные корреляции / Only suspicious correlations.
+
+    Запускает все три метода и возвращает объединённый список подозрительных
+    пар (|r| >= 0.95 или Cramér's V >= 0.95), отсортированных по убыванию
+    силы корреляции. Удобно для быстрой проверки на утечку данных.
+
+    Runs all three methods and returns a merged list of suspicious pairs
+    (|r| >= 0.95 or Cramér's V >= 0.95), sorted by descending magnitude.
+    Convenient for a quick data-leakage sweep.
+    """
+    df = _read_upload_csv(file)
+    report = correlation_report(df, methods=["pearson", "spearman", "cramers_v"])
+    summary = report["summary"]
+    return JSONResponse(
+        content={
+            "suspicious_pairs": summary["top_suspicious_pairs"],
+            "n_suspicious_total": summary["n_suspicious_total"],
+            "leakage_risk": summary["leakage_risk"],
+        }
+    )
