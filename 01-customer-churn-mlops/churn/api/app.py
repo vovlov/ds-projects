@@ -19,6 +19,7 @@ from ..evaluation.model_comparison import (
     generate_json_report,
     generate_markdown_report,
 )
+from ..fairness.bias_detector import BiasDetector, FairnessReport
 from ..optimization.cost_tracker import CostTracker, estimate_monthly_cost
 from ..optimization.quantizer import (
     estimate_inference_speedup,
@@ -1092,3 +1093,150 @@ def uplift_segments() -> dict[str, Any]:
         },
         "tip": "Используйте POST /uplift/predict для сегментации новых клиентов.",
     }
+
+
+# ─────────────────────────── Fairness / Bias Detection ───────────────────────
+
+# Last fairness report cached in memory for GET /fairness/report
+_last_fairness_report: FairnessReport | None = None
+_fairness_detector = BiasDetector(protected_attribute="protected_group")
+
+
+def _reset_fairness_state() -> None:
+    """Reset fairness state for test isolation."""
+    global _last_fairness_report, _fairness_detector
+    _last_fairness_report = None
+    _fairness_detector = BiasDetector(protected_attribute="protected_group")
+
+
+class FairnessAnalyzeRequest(BaseModel):
+    """Request body for POST /fairness/analyze."""
+
+    y_true: list[int] = Field(..., description="Ground truth labels (0/1)")
+    y_pred: list[int] = Field(..., description="Model binary predictions (0/1)")
+    groups: list[str] = Field(..., description="Protected attribute value per sample")
+    protected_attribute: str = Field(
+        default="protected_group",
+        description="Name of the protected attribute (e.g. 'gender', 'age_group')",
+    )
+    group_a_label: str | None = Field(
+        default=None,
+        description="Override label for group A (privileged). Auto-detected if None.",
+    )
+    group_b_label: str | None = Field(
+        default=None,
+        description="Override label for group B (unprivileged). Auto-detected if None.",
+    )
+
+
+class FairnessThresholdsRequest(BaseModel):
+    """Request body for POST /fairness/thresholds."""
+
+    y_true: list[int] = Field(..., description="Ground truth labels (0/1)")
+    y_proba: list[float] = Field(..., description="Model probability scores [0, 1]")
+    groups: list[str] = Field(..., description="Protected attribute value per sample")
+    target_metric: str = Field(
+        default="equal_opportunity",
+        description="Metric to equalise: 'equal_opportunity' or 'demographic_parity'",
+    )
+
+
+@app.post("/fairness/analyze")
+def fairness_analyze(request: FairnessAnalyzeRequest) -> dict[str, Any]:
+    """Compute fairness metrics for binary predictions across protected groups.
+
+    Вычислить метрики справедливости для бинарных предсказаний.
+
+    Returns a FairnessReport with:
+    - Demographic parity, equal opportunity, equalized odds, predictive parity
+    - Disparate impact ratio (80% EEOC rule)
+    - Severity classification (LOW / MEDIUM / HIGH)
+    - Actionable recommendations for EU AI Act Article 9 compliance
+
+    Требуется минимум 2 уникальных группы и 2 образца на группу.
+    """
+    global _last_fairness_report, _fairness_detector
+
+    if len(request.y_true) != len(request.y_pred) or len(request.y_true) != len(request.groups):
+        raise HTTPException(
+            status_code=422,
+            detail="y_true, y_pred, and groups must have the same length.",
+        )
+    if len(request.y_true) < 4:
+        raise HTTPException(
+            status_code=422,
+            detail="Need at least 4 samples to compute fairness metrics.",
+        )
+
+    try:
+        detector = BiasDetector(protected_attribute=request.protected_attribute)
+        report = detector.analyze(
+            y_true=request.y_true,
+            y_pred=request.y_pred,
+            groups=request.groups,
+            group_a_label=request.group_a_label,
+            group_b_label=request.group_b_label,
+        )
+        _last_fairness_report = report
+        _fairness_detector = detector
+        return report.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/fairness/report")
+def fairness_report() -> dict[str, Any]:
+    """Retrieve the last fairness analysis report.
+
+    Получить последний отчёт по анализу справедливости.
+    Returns 404 if no analysis has been run yet.
+    """
+    if _last_fairness_report is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No fairness analysis has been run yet. Call POST /fairness/analyze first.",
+        )
+    return _last_fairness_report.to_dict()
+
+
+@app.post("/fairness/thresholds")
+def fairness_thresholds(request: FairnessThresholdsRequest) -> dict[str, Any]:
+    """Compute optimal per-group decision thresholds for fairness post-processing.
+
+    Вычислить оптимальные пороги решения для каждой группы.
+
+    Post-processing bias mitigation (Hardt et al. 2016): adjust decision
+    threshold per protected group to equalize TPR or positive rate,
+    without retraining the underlying model.
+
+    Returns dict mapping group label → recommended threshold.
+    """
+    if len(request.y_true) != len(request.y_proba) or len(request.y_true) != len(request.groups):
+        raise HTTPException(
+            status_code=422,
+            detail="y_true, y_proba, and groups must have the same length.",
+        )
+    if request.target_metric not in {"equal_opportunity", "demographic_parity"}:
+        raise HTTPException(
+            status_code=422,
+            detail="target_metric must be 'equal_opportunity' or 'demographic_parity'.",
+        )
+
+    try:
+        detector = BiasDetector()
+        thresholds = detector.optimal_thresholds(
+            y_true=request.y_true,
+            y_proba=request.y_proba,
+            groups=request.groups,
+            target_metric=request.target_metric,
+        )
+        return {
+            "target_metric": request.target_metric,
+            "thresholds": thresholds,
+            "note": (
+                "Apply these per-group thresholds to model probability outputs "
+                "to reduce fairness gap without retraining (Hardt et al. 2016)."
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

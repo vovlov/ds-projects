@@ -820,6 +820,24 @@
         Kise et al. 1998 ICDAR document segmentation.
 - [x] Extended Drift Test Battery — Wasserstein + JS + Chi-squared (Project 10) — 2026-05-30
       quality/quality/stat_tests.py: три метода, дополняющие существующий PSI+KS:
+- [x] Fair ML / Bias Detection (Project 01) — 2026-06-02
+      churn/fairness/bias_detector.py: BiasDetector, FairnessReport, FairnessMetrics,
+      GroupMetrics, FairnessSeverity (StrEnum). 4 метрики: demographic parity diff,
+      equal opportunity diff (|TPR_A - TPR_B|), equalized odds diff (max(|ΔTPR|,|ΔFPR|)),
+      predictive parity diff. Disparate impact ratio (80% EEOC rule).
+      _classify_severity(): HIGH (<0.80 DI или EOD>10%), MEDIUM (<0.90 DI или EOD>5%), LOW.
+      optimal_thresholds(): grid-search перебор порогов 0.01–0.99 → пер-групповые пороги
+      выравнивающие TPR/positive_rate без переобучения (Hardt et al. 2016 post-processing).
+      churn/api/app.py: POST /fairness/analyze (batch predictions → FairnessReport),
+        GET /fairness/report (последний отчёт или 404),
+        POST /fairness/thresholds (equal_opportunity / demographic_parity target).
+      33 новых теста: TestGroupMetrics×2, TestFairnessMetrics×8, TestBiasDetector×11,
+        TestFairnessAPIEndpoints×14. 234/234 тестов зелёные (было 199, +35 skipped fixed).
+      Источники: Hardt et al. 2016 NIPS (Equal Opportunity), Feldman et al. 2015 KDD
+        (Disparate Impact), EU AI Act Articles 9(7) и 10(2)(f), EEOC 1978 80% rule,
+        BiasGuard arxiv 2501.04142 (post-processing без переобучения).
+
+
         wasserstein_distance(): W1 через квантильную аппроксимацию (O(n log n), numpy-only),
           нормировка на std признака → unit-invariant severity пороги.
         js_divergence(): симметричная KL-дивергенция [0,1] (Lin 1991), Laplace smoothing.

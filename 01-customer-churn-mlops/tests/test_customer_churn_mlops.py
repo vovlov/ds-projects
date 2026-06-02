@@ -2193,3 +2193,425 @@ class TestOnlineAPIEndpoints:
         client.post("/online/reset")
         status = client.get("/online/status").json()
         assert status["n_samples_seen"] == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fairness / Bias Detection Tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+from churn.fairness.bias_detector import (
+    BiasDetector,
+    FairnessMetrics,
+    FairnessSeverity,
+    GroupMetrics,
+)
+
+
+class TestGroupMetrics:
+    """Unit tests for GroupMetrics dataclass."""
+
+    def test_to_dict_has_required_fields(self):
+        """GroupMetrics.to_dict() возвращает все 5 обязательных полей."""
+        gm = GroupMetrics(sample_size=100, positive_rate=0.3, tpr=0.7, fpr=0.15, ppv=0.6)
+        d = gm.to_dict()
+        for key in ("sample_size", "positive_rate", "tpr", "fpr", "ppv"):
+            assert key in d
+
+    def test_to_dict_nan_becomes_none(self):
+        """NaN значения (нет истинных позитивов) сериализуются как None."""
+        nan = float("nan")
+        gm = GroupMetrics(sample_size=10, positive_rate=0.0, tpr=nan, fpr=nan, ppv=nan)
+        d = gm.to_dict()
+        assert d["tpr"] is None
+        assert d["fpr"] is None
+        assert d["ppv"] is None
+
+
+class TestFairnessMetrics:
+    """Unit tests for FairnessMetrics dataclass and BiasDetector helpers."""
+
+    def _perfect_metrics(self):
+        """Метрики для модели без смещений."""
+        return FairnessMetrics(
+            demographic_parity_diff=0.0,
+            equal_opportunity_diff=0.0,
+            equalized_odds_diff=0.0,
+            predictive_parity_diff=0.0,
+            disparate_impact_ratio=1.0,
+        )
+
+    def test_to_dict_has_all_keys(self):
+        """FairnessMetrics.to_dict() содержит все 5 метрик."""
+        m = self._perfect_metrics()
+        keys = m.to_dict().keys()
+        for k in (
+            "demographic_parity_diff",
+            "equal_opportunity_diff",
+            "equalized_odds_diff",
+            "predictive_parity_diff",
+            "disparate_impact_ratio",
+        ):
+            assert k in keys
+
+    def test_severity_low_for_perfect_model(self):
+        """Perfect model (no gaps) → LOW severity."""
+        detector = BiasDetector()
+        severity = detector._classify_severity(self._perfect_metrics())
+        assert severity == FairnessSeverity.LOW
+
+    def test_severity_high_di_below_80_percent(self):
+        """DI ratio < 0.80 → HIGH severity (EEOC 80% rule)."""
+        detector = BiasDetector()
+        m = FairnessMetrics(
+            demographic_parity_diff=0.3,
+            equal_opportunity_diff=0.1,
+            equalized_odds_diff=0.1,
+            predictive_parity_diff=0.1,
+            disparate_impact_ratio=0.75,  # below 0.80 threshold
+        )
+        assert detector._classify_severity(m) == FairnessSeverity.HIGH
+
+    def test_severity_high_eod_above_10_percent(self):
+        """Equal opportunity diff > 0.10 → HIGH severity."""
+        detector = BiasDetector()
+        m = FairnessMetrics(
+            demographic_parity_diff=0.05,
+            equal_opportunity_diff=0.15,  # > 0.10
+            equalized_odds_diff=0.15,
+            predictive_parity_diff=0.05,
+            disparate_impact_ratio=0.95,
+        )
+        assert detector._classify_severity(m) == FairnessSeverity.HIGH
+
+    def test_severity_medium_di_between_80_and_90(self):
+        """DI ratio in [0.80, 0.90) → MEDIUM severity."""
+        detector = BiasDetector()
+        m = FairnessMetrics(
+            demographic_parity_diff=0.05,
+            equal_opportunity_diff=0.04,
+            equalized_odds_diff=0.04,
+            predictive_parity_diff=0.04,
+            disparate_impact_ratio=0.85,  # between 0.80 and 0.90
+        )
+        assert detector._classify_severity(m) == FairnessSeverity.MEDIUM
+
+    def test_severity_medium_eod_between_5_and_10(self):
+        """Equal opportunity diff in (5%, 10%] → MEDIUM severity."""
+        detector = BiasDetector()
+        m = FairnessMetrics(
+            demographic_parity_diff=0.03,
+            equal_opportunity_diff=0.08,  # between 0.05 and 0.10
+            equalized_odds_diff=0.08,
+            predictive_parity_diff=0.03,
+            disparate_impact_ratio=0.95,
+        )
+        assert detector._classify_severity(m) == FairnessSeverity.MEDIUM
+
+    def test_recommendations_not_empty_for_high_severity(self):
+        """HIGH severity генерирует хотя бы одну рекомендацию."""
+        detector = BiasDetector()
+        m = FairnessMetrics(
+            demographic_parity_diff=0.3,
+            equal_opportunity_diff=0.2,
+            equalized_odds_diff=0.2,
+            predictive_parity_diff=0.2,
+            disparate_impact_ratio=0.6,
+        )
+        recs = detector._build_recommendations(m, FairnessSeverity.HIGH)
+        assert len(recs) > 0
+        # Должна упоминать EU AI Act
+        assert any("EU AI Act" in r or "EEOC" in r for r in recs)
+
+    def test_recommendations_contain_quarterly_for_low(self):
+        """LOW severity рекомендует квартальный мониторинг."""
+        detector = BiasDetector()
+        m = self._perfect_metrics()
+        recs = detector._build_recommendations(m, FairnessSeverity.LOW)
+        assert any("quarterly" in r.lower() or "квартал" in r.lower() for r in recs)
+
+
+class TestBiasDetector:
+    """Integration tests for BiasDetector.analyze() and optimal_thresholds()."""
+
+    def _fair_data(self):
+        """Сгенерировать данные без смещений: одинаковые показатели для обеих групп.
+
+        Детерминированные данные: обе группы имеют одинаковый positive rate и точность,
+        что гарантирует DI ratio = 1.0 и LOW severity.
+        """
+        n_per_group = 50
+        # Одинаковое чередование меток 1/0 в обеих группах → positive_rate = 0.5
+        y_true_g = [1, 0] * (n_per_group // 2)
+        # Идеальные предсказания → DI = 1.0, DP_diff = 0.0, EOD = 0.0
+        y_pred_g = y_true_g[:]
+        y_true = np.array(y_true_g + y_true_g)
+        y_pred = np.array(y_pred_g + y_pred_g)
+        groups = np.array(["A"] * n_per_group + ["B"] * n_per_group)
+        return y_true, y_pred, groups
+
+    def _biased_data(self):
+        """Сгенерировать данные с явным смещением: группа B чаще получает предсказание 1."""
+        n = 200
+        y_true = np.array([1, 0] * (n // 2))
+        groups = np.array(["privileged"] * n + ["unprivileged"] * n)
+        # Group A (privileged): 30% positive rate
+        pred_a = np.array([1, 0, 0, 1, 0, 0, 0, 0, 0, 0] * (n // 10))
+        # Group B (unprivileged): 70% positive rate — clearly biased
+        pred_b = np.array([1, 1, 1, 1, 1, 1, 1, 0, 0, 0] * (n // 10))
+        y_pred = np.concatenate([pred_a, pred_b])
+        y_true_full = np.concatenate([y_true, y_true])
+        return y_true_full, y_pred, groups
+
+    def test_analyze_returns_fairness_report(self):
+        """analyze() возвращает FairnessReport с заполненными полями."""
+        detector = BiasDetector(protected_attribute="gender")
+        y_true, y_pred, groups = self._fair_data()
+        report = detector.analyze(y_true, y_pred, groups)
+        assert report.protected_attribute == "gender"
+        assert report.audit_id  # UUID не пустой
+        assert report.timestamp  # ISO 8601
+        valid = (FairnessSeverity.LOW, FairnessSeverity.MEDIUM, FairnessSeverity.HIGH)
+        assert report.severity in valid
+
+    def test_analyze_fair_data_low_severity(self):
+        """Одинаковые ошибки в обеих группах → LOW severity."""
+        detector = BiasDetector()
+        y_true, y_pred, groups = self._fair_data()
+        report = detector.analyze(y_true, y_pred, groups)
+        assert report.severity == FairnessSeverity.LOW
+
+    def test_analyze_biased_data_high_severity(self):
+        """Явно смещённые предсказания → HIGH severity."""
+        detector = BiasDetector()
+        y_true, y_pred, groups = self._biased_data()
+        report = detector.analyze(y_true, y_pred, groups)
+        assert report.severity == FairnessSeverity.HIGH
+
+    def test_analyze_disparate_impact_below_one_for_biased(self):
+        """Смещённые данные: DI ratio < 1.0."""
+        detector = BiasDetector()
+        y_true, y_pred, groups = self._biased_data()
+        report = detector.analyze(y_true, y_pred, groups)
+        assert report.metrics.disparate_impact_ratio < 1.0
+
+    def test_analyze_report_to_dict_serializable(self):
+        """FairnessReport.to_dict() возвращает JSON-сериализуемый dict."""
+        detector = BiasDetector()
+        y_true, y_pred, groups = self._fair_data()
+        report = detector.analyze(y_true, y_pred, groups)
+        d = report.to_dict()
+        import json
+
+        # Should not raise TypeError
+        json.dumps(d)
+
+    def test_analyze_raises_on_single_group(self):
+        """Одна группа → ValueError (нельзя сравнить с собой)."""
+        detector = BiasDetector()
+        with pytest.raises(ValueError, match="2 groups"):
+            detector.analyze([0, 1, 0, 1], [0, 1, 0, 1], ["A", "A", "A", "A"])
+
+    def test_analyze_group_labels_in_report(self):
+        """Метки групп из данных попадают в отчёт."""
+        detector = BiasDetector()
+        y_true = [0, 1, 0, 1, 0, 1, 0, 1]
+        y_pred = [0, 1, 0, 1, 1, 0, 1, 0]
+        groups = ["male"] * 4 + ["female"] * 4
+        report = detector.analyze(
+            y_true, y_pred, groups, group_a_label="male", group_b_label="female"
+        )
+        assert report.group_a_label == "male"
+        assert report.group_b_label == "female"
+
+    def test_analyze_sample_sizes_match_groups(self):
+        """sample_size в GroupMetrics совпадает с реальным числом в группе."""
+        detector = BiasDetector()
+        n_a, n_b = 60, 40
+        y_true = [0] * n_a + [0] * n_b
+        y_pred = [0] * n_a + [1] * n_b
+        groups = ["A"] * n_a + ["B"] * n_b
+        report = detector.analyze(y_true, y_pred, groups)
+        assert report.group_a.sample_size == n_a
+        assert report.group_b.sample_size == n_b
+
+    def test_demographic_parity_diff_is_nonnegative(self):
+        """demographic_parity_diff — абсолютная разница, всегда >= 0."""
+        detector = BiasDetector()
+        y_true, y_pred, groups = self._fair_data()
+        report = detector.analyze(y_true, y_pred, groups)
+        assert report.metrics.demographic_parity_diff >= 0.0
+
+    def test_optimal_thresholds_returns_per_group(self):
+        """optimal_thresholds() возвращает порог для каждой группы."""
+        detector = BiasDetector()
+        rng = np.random.default_rng(0)
+        n = 100
+        y_true = (rng.random(n) > 0.5).astype(int)
+        y_proba = np.clip(y_true.astype(float) + rng.normal(0, 0.3, n), 0, 1)
+        groups = ["A"] * (n // 2) + ["B"] * (n // 2)
+        thresholds = detector.optimal_thresholds(y_true, y_proba, groups)
+        assert "A" in thresholds
+        assert "B" in thresholds
+        assert 0.0 <= thresholds["A"] <= 1.0
+        assert 0.0 <= thresholds["B"] <= 1.0
+
+    def test_analyze_proba_wrapper(self):
+        """analyze_proba() с порогом 0.5 совпадает с analyze() после бинаризации."""
+        detector = BiasDetector()
+        y_true = [0, 1, 0, 1, 0, 1, 0, 1]
+        y_proba = [0.2, 0.8, 0.3, 0.7, 0.4, 0.6, 0.1, 0.9]
+        groups = ["A", "A", "A", "A", "B", "B", "B", "B"]
+        report = detector.analyze_proba(y_true, y_proba, groups, threshold=0.5)
+        assert report.severity is not None
+
+
+class TestFairnessAPIEndpoints:
+    """Integration tests for POST /fairness/analyze, GET /fairness/report,
+    and POST /fairness/thresholds."""
+
+    def _client(self):
+        from churn.api.app import _reset_fairness_state, app
+        from fastapi.testclient import TestClient
+
+        _reset_fairness_state()
+        return TestClient(app)
+
+    def _fair_payload(self):
+        """Полезная нагрузка для сбалансированных данных."""
+        n = 40  # n образцов на группу
+        y_true = [0, 1] * (n // 2)  # 40 samples: 20 negatives, 20 positives
+        y_pred = y_true[:]  # perfect predictions → DI ratio = 1.0
+        groups = ["male"] * n + ["female"] * n  # 80 total
+        return {
+            "y_true": y_true + y_true,  # 80 samples — matches groups length
+            "y_pred": y_pred + y_pred,  # 80 samples
+            "groups": groups,  # 80 samples
+            "protected_attribute": "gender",
+        }
+
+    def test_analyze_returns_200(self):
+        """POST /fairness/analyze возвращает 200."""
+        resp = self._client().post("/fairness/analyze", json=self._fair_payload())
+        assert resp.status_code == 200
+
+    def test_analyze_response_has_required_fields(self):
+        """Ответ содержит audit_id, metrics, severity, recommendations."""
+        data = self._client().post("/fairness/analyze", json=self._fair_payload()).json()
+        for field in (
+            "audit_id",
+            "timestamp",
+            "metrics",
+            "severity",
+            "recommendations",
+            "group_a",
+            "group_b",
+            "protected_attribute",
+        ):
+            assert field in data, f"Missing field: {field}"
+
+    def test_analyze_metrics_has_all_keys(self):
+        """metrics содержит все 5 метрик справедливости."""
+        data = self._client().post("/fairness/analyze", json=self._fair_payload()).json()
+        for k in (
+            "demographic_parity_diff",
+            "equal_opportunity_diff",
+            "equalized_odds_diff",
+            "disparate_impact_ratio",
+        ):
+            assert k in data["metrics"]
+
+    def test_analyze_severity_is_valid_enum(self):
+        """severity — одно из (low, medium, high)."""
+        data = self._client().post("/fairness/analyze", json=self._fair_payload()).json()
+        assert data["severity"] in ("low", "medium", "high")
+
+    def test_analyze_length_mismatch_returns_422(self):
+        """Несовпадение длин y_true/y_pred/groups → 422."""
+        payload = {"y_true": [0, 1], "y_pred": [0, 1, 0], "groups": ["A", "B"]}
+        resp = self._client().post("/fairness/analyze", json=payload)
+        assert resp.status_code == 422
+
+    def test_analyze_too_few_samples_returns_422(self):
+        """Менее 4 образцов → 422."""
+        payload = {"y_true": [0], "y_pred": [1], "groups": ["A"]}
+        resp = self._client().post("/fairness/analyze", json=payload)
+        assert resp.status_code == 422
+
+    def test_analyze_single_group_returns_422(self):
+        """Одна группа → 422."""
+        payload = {
+            "y_true": [0, 1, 0, 1],
+            "y_pred": [0, 1, 0, 1],
+            "groups": ["A", "A", "A", "A"],
+        }
+        resp = self._client().post("/fairness/analyze", json=payload)
+        assert resp.status_code == 422
+
+    def test_report_404_before_analysis(self):
+        """GET /fairness/report → 404 до первого анализа."""
+        resp = self._client().get("/fairness/report")
+        assert resp.status_code == 404
+
+    def test_report_200_after_analysis(self):
+        """GET /fairness/report → 200 после POST /fairness/analyze."""
+        client = self._client()
+        client.post("/fairness/analyze", json=self._fair_payload())
+        resp = client.get("/fairness/report")
+        assert resp.status_code == 200
+
+    def test_report_matches_last_analysis(self):
+        """GET /fairness/report возвращает последний audit_id."""
+        client = self._client()
+        analyze_data = client.post("/fairness/analyze", json=self._fair_payload()).json()
+        report_data = client.get("/fairness/report").json()
+        assert report_data["audit_id"] == analyze_data["audit_id"]
+
+    def test_thresholds_returns_200(self):
+        """POST /fairness/thresholds → 200 с equal_opportunity."""
+        n = 50
+        payload = {
+            "y_true": [0, 1] * n,
+            "y_proba": [0.3, 0.7] * n,
+            "groups": ["A"] * n + ["B"] * n,
+            "target_metric": "equal_opportunity",
+        }
+        resp = self._client().post("/fairness/thresholds", json=payload)
+        assert resp.status_code == 200
+
+    def test_thresholds_response_structure(self):
+        """POST /fairness/thresholds возвращает target_metric + thresholds dict."""
+        n = 50
+        payload = {
+            "y_true": [0, 1] * n,
+            "y_proba": [0.3, 0.7] * n,
+            "groups": ["A"] * n + ["B"] * n,
+            "target_metric": "demographic_parity",
+        }
+        data = self._client().post("/fairness/thresholds", json=payload).json()
+        assert "thresholds" in data
+        assert "A" in data["thresholds"]
+        assert "B" in data["thresholds"]
+
+    def test_thresholds_invalid_metric_422(self):
+        """Неверный target_metric → 422."""
+        payload = {
+            "y_true": [0, 1, 0, 1],
+            "y_proba": [0.2, 0.8, 0.3, 0.7],
+            "groups": ["A", "A", "B", "B"],
+            "target_metric": "invalid_metric",
+        }
+        resp = self._client().post("/fairness/thresholds", json=payload)
+        assert resp.status_code == 422
+
+    def test_thresholds_in_zero_one_range(self):
+        """Пороги находятся в диапазоне [0, 1]."""
+        n = 50
+        payload = {
+            "y_true": [0, 1] * n,
+            "y_proba": [0.3, 0.7] * n,
+            "groups": ["X"] * n + ["Y"] * n,
+        }
+        data = self._client().post("/fairness/thresholds", json=payload).json()
+        for grp, thresh in data["thresholds"].items():
+            assert 0.0 <= thresh <= 1.0, f"Threshold for {grp} out of range: {thresh}"
