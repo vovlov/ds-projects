@@ -856,6 +856,29 @@
         В 2026 MLOps стандарт — батарея ≥ 3 тестов для production drift мониторинга.
       Источники: Villani 2008 "Optimal Transport", Lin 1991 IEEE Trans. Inf. Theory 37(1),
         Pearson 1900 Philosophical Magazine 50(302), Evidently AI v0.5+, WhyLogs 1.3.
+- [x] Counterfactual Explanations / Actionable Recourse (Project 01) — 2026-06-03
+      churn/counterfactual/dice.py: DIcEChurn — gradient-free random-restart greedy search.
+      Меняет только actionable признаки (Contract, services, PaymentMethod, MonthlyCharges) —
+      не трогает gender, SeniorCitizen, Dependents (immutable demographic features).
+      Алгоритм: случайные 1–3 изменения → принимаем если P(churn) < target_probability.
+      Deduplication + greedy MMR-diversity для финального набора (как в RecSys diversity).
+      to_plain_text(): "Switch contract to 'Two year'" — человекочитаемые инструкции.
+      CounterfactualConfig/Counterfactual/CounterfactualResult dataclasses.
+      churn/api/app.py: POST /explain/counterfactual (n_counterfactuals, target_probability,
+        max_iterations параметры), исправлен guard feature_name_ is None в _predict_fn.
+      29 новых тестов: TestDIcEChurnUnit×17 (generate, success, failure, probability, n_tried,
+        below_target, sorted, immutable, changes, distance, feasibility, plain_text, diversity),
+        TestCounterfactualAPIEndpoints×12 (422 validation, 200 mock, structure, fields, rank,
+        explanation, n_found, n_tried, target echoed).
+      263/263 тестов зелёных (было 234, +29 новых). Lint clean.
+      Бизнес-эффект: retention-менеджер получает ТОП-3 конкретных действия ("предложи двухлетний
+        контракт + добавь TechSupport") вместо абстрактного "высокий риск оттока".
+        EU AI Act Article 22: право на объяснение + actionable recourse для автоматических
+        решений, затрагивающих физических лиц. Machine learning counterfactuals for business
+        rules (Springer 2026) — значительно повышает retention ROI vs. SHAP.
+      Источники: Wachter et al. 2017 Harvard JOLT 31:841 (algorithmic recourse),
+        Mothilal et al. 2020 FAT* (DiCE diverse counterfactuals), DiCE-Extended arxiv 2504.19027,
+        Springer 2026 ML counterfactuals for churn business rules, EU AI Act Articles 13 & 22.
 
 ---
 
