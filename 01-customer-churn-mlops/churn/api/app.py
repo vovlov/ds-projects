@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from ..ab_testing.experiment import ABExperiment, VariantConfig
+from ..counterfactual.dice import CounterfactualConfig, DIcEChurn
 from ..data.load import CATEGORICAL_FEATURES, add_features
 from ..evaluation.model_comparison import (
     ModelResult,
@@ -1240,3 +1241,95 @@ def fairness_thresholds(request: FairnessThresholdsRequest) -> dict[str, Any]:
         }
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Counterfactual Explanations (DiCE-style, EU AI Act Article 22)
+# ---------------------------------------------------------------------------
+
+
+class CounterfactualRequest(BaseModel):
+    """Request for counterfactual explanation generation.
+
+    Запрос на генерацию контрфактических объяснений.
+    """
+
+    customer: CustomerInput
+    n_counterfactuals: int = Field(default=3, ge=1, le=10)
+    target_probability: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description="Churn probability target threshold — CFs must fall below this",
+    )
+    max_iterations: int = Field(default=2000, ge=100, le=10000)
+
+
+@app.post("/explain/counterfactual")
+def explain_counterfactual(request: CounterfactualRequest) -> dict[str, Any]:
+    """Generate actionable counterfactual explanations for churn prediction.
+
+    Сгенерировать контрфактические объяснения: "Что изменить, чтобы клиент не ушёл?"
+
+    Returns up to n_counterfactuals diverse, actionable suggestions. Each
+    counterfactual shows the minimum feature changes needed to bring the
+    predicted churn probability below the target threshold.
+
+    Non-actionable features (gender, SeniorCitizen, Partner, Dependents)
+    are never changed — only contract, services, and payment features.
+
+    EU AI Act Article 22: right to meaningful explanation and actionable recourse.
+    """
+    model = get_model()
+    original_dict = request.customer.model_dump()
+
+    def _predict_fn(features: dict[str, Any]) -> float:
+        """Wrap the trained model for counterfactual search.
+
+        Обёртка модели для поиска контрфактических примеров.
+        """
+        row = {
+            "customerID": "cf-search",
+            **features,
+            "Churn": 0,
+        }
+        df = pl.DataFrame([row])
+        df = add_features(df)
+        cat_cols = [c for c in CATEGORICAL_FEATURES if c in df.columns] + ["TenureGroup"]
+        df_enc = df.to_dummies(columns=cat_cols)
+        feature_cols = [c for c in df_enc.columns if c not in ("customerID", "Churn")]
+        X = df_enc.select(feature_cols).to_pandas()
+        model_cols = getattr(model, "feature_name_", None)
+        if model_cols is not None:
+            for col in model_cols:
+                if col not in X.columns:
+                    X[col] = 0
+            X = X[model_cols]
+        return float(model.predict_proba(X)[0][1])
+
+    cfg = CounterfactualConfig(
+        n_counterfactuals=request.n_counterfactuals,
+        target_probability=request.target_probability,
+        max_iterations=request.max_iterations,
+    )
+    generator = DIcEChurn(cfg)
+    result = generator.generate(original_dict, _predict_fn)
+
+    return {
+        "original_probability": result.original_probability,
+        "target_probability": request.target_probability,
+        "success": result.success,
+        "n_found": len(result.counterfactuals),
+        "n_tried": result.n_tried,
+        "counterfactuals": [
+            {
+                "rank": i + 1,
+                "churn_probability": cf.churn_probability,
+                "distance": cf.distance,
+                "feasibility_score": cf.feasibility_score,
+                "changes": cf.changes,
+                "explanation": cf.to_plain_text(),
+            }
+            for i, cf in enumerate(result.counterfactuals)
+        ],
+    }

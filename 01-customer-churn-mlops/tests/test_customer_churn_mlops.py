@@ -2615,3 +2615,409 @@ class TestFairnessAPIEndpoints:
         data = self._client().post("/fairness/thresholds", json=payload).json()
         for grp, thresh in data["thresholds"].items():
             assert 0.0 <= thresh <= 1.0, f"Threshold for {grp} out of range: {thresh}"
+
+
+# ---------------------------------------------------------------------------
+# Counterfactual Explanations Tests (DiCE-style)
+# ---------------------------------------------------------------------------
+
+_CF_BASE_CUSTOMER = {
+    "gender": "Female",
+    "SeniorCitizen": 0,
+    "Partner": "No",
+    "Dependents": "No",
+    "tenure": 1,
+    "PhoneService": "Yes",
+    "MultipleLines": "No",
+    "InternetService": "Fiber optic",
+    "OnlineSecurity": "No",
+    "OnlineBackup": "No",
+    "DeviceProtection": "No",
+    "TechSupport": "No",
+    "StreamingTV": "No",
+    "StreamingMovies": "No",
+    "Contract": "Month-to-month",
+    "PaperlessBilling": "Yes",
+    "PaymentMethod": "Electronic check",
+    "MonthlyCharges": 80.0,
+    "TotalCharges": 80.0,
+}
+
+
+def _contract_sensitive_fn(features):
+    """High churn for month-to-month; low for Two year contract."""
+    if features.get("Contract") == "Two year":
+        return 0.1
+    return 0.9
+
+
+def _always_high_fn(features):
+    return 0.95
+
+
+class TestDIcEChurnUnit:
+    """Unit tests using synthetic predict_fn — no trained model needed.
+
+    Юнит-тесты с синтетической predict_fn — реальная модель не нужна.
+    """
+
+    def _gen(self, n=3, max_iter=500, target=0.35):
+        from churn.counterfactual.dice import CounterfactualConfig, DIcEChurn
+
+        cfg = CounterfactualConfig(
+            n_counterfactuals=n,
+            max_iterations=max_iter,
+            target_probability=target,
+        )
+        return DIcEChurn(cfg)
+
+    def test_generate_returns_counterfactual_result(self):
+        """generate() возвращает CounterfactualResult."""
+        from churn.counterfactual.dice import CounterfactualResult
+
+        result = self._gen().generate(dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn)
+        assert isinstance(result, CounterfactualResult)
+
+    def test_generate_success_when_contract_matters(self):
+        """success=True когда есть эффективный контрфакт (Two year contract)."""
+        result = self._gen().generate(dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn)
+        assert result.success is True
+        assert len(result.counterfactuals) > 0
+
+    def test_generate_no_success_when_all_high(self):
+        """success=False когда predict_fn всегда возвращает 0.95."""
+        result = self._gen(max_iter=200).generate(dict(_CF_BASE_CUSTOMER), _always_high_fn)
+        assert result.success is False
+        assert result.counterfactuals == []
+
+    def test_original_probability_recorded_correctly(self):
+        """original_probability совпадает с predict_fn(original)."""
+        result = self._gen().generate(dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn)
+        assert result.original_probability == pytest.approx(0.9, abs=1e-4)
+
+    def test_n_tried_equals_max_iterations(self):
+        """n_tried равно max_iterations."""
+        result = self._gen(max_iter=150).generate(dict(_CF_BASE_CUSTOMER), _always_high_fn)
+        assert result.n_tried == 150
+
+    def test_counterfactuals_below_target(self):
+        """Все найденные контрфакты имеют вероятность < target_probability."""
+        result = self._gen(target=0.35).generate(dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn)
+        for cf in result.counterfactuals:
+            assert cf.churn_probability < 0.35
+
+    def test_counterfactuals_sorted_ascending_by_probability(self):
+        """Контрфакты отсортированы по вероятности оттока по возрастанию."""
+        result = self._gen().generate(dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn)
+        probs = [cf.churn_probability for cf in result.counterfactuals]
+        assert probs == sorted(probs)
+
+    def test_immutable_features_unchanged(self):
+        """Признаки gender, SeniorCitizen, Dependents не меняются в контрфактах."""
+        result = self._gen().generate(dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn)
+        for cf in result.counterfactuals:
+            assert cf.features["gender"] == _CF_BASE_CUSTOMER["gender"]
+            assert cf.features["SeniorCitizen"] == _CF_BASE_CUSTOMER["SeniorCitizen"]
+            assert cf.features["Dependents"] == _CF_BASE_CUSTOMER["Dependents"]
+
+    def test_changes_dict_reflects_actual_differences(self):
+        """changes содержит только признаки, реально отличающиеся от оригинала."""
+        result = self._gen().generate(dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn)
+        for cf in result.counterfactuals:
+            for feat, val in cf.changes.items():
+                assert cf.features[feat] == val
+                assert val != _CF_BASE_CUSTOMER.get(feat)
+
+    def test_distance_in_zero_one_range(self):
+        """Расстояние от оригинала находится в [0, 1]."""
+        result = self._gen().generate(dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn)
+        for cf in result.counterfactuals:
+            assert 0.0 <= cf.distance <= 1.0
+
+    def test_feasibility_is_complement_of_distance(self):
+        """feasibility_score = round(1 - distance, 4)."""
+        result = self._gen().generate(dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn)
+        for cf in result.counterfactuals:
+            assert cf.feasibility_score == pytest.approx(1.0 - cf.distance, abs=1e-3)
+
+    def test_distance_zero_for_identical_inputs(self):
+        """Расстояние между идентичными наборами признаков равно 0."""
+        from churn.counterfactual.dice import DIcEChurn
+
+        gen = DIcEChurn()
+        d = gen._distance(dict(_CF_BASE_CUSTOMER), dict(_CF_BASE_CUSTOMER))
+        assert d == pytest.approx(0.0, abs=1e-6)
+
+    def test_n_counterfactuals_capped_by_config(self):
+        """Количество контрфактов не превышает n_counterfactuals."""
+        result = self._gen(n=2, max_iter=500).generate(
+            dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn
+        )
+        assert len(result.counterfactuals) <= 2
+
+    def test_to_plain_text_returns_nonempty_list(self):
+        """to_plain_text() возвращает непустой список строк."""
+        result = self._gen().generate(dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn)
+        for cf in result.counterfactuals:
+            texts = cf.to_plain_text()
+            assert isinstance(texts, list)
+            assert len(texts) > 0
+            assert all(isinstance(t, str) for t in texts)
+
+    def test_to_plain_text_contract_change(self):
+        """to_plain_text() упоминает 'contract' при изменении контракта."""
+        from churn.counterfactual.dice import Counterfactual
+
+        cf = Counterfactual(
+            features={"Contract": "Two year"},
+            changes={"Contract": "Two year"},
+            churn_probability=0.1,
+            distance=0.05,
+            feasibility_score=0.95,
+        )
+        texts = cf.to_plain_text()
+        assert any("contract" in t.lower() for t in texts)
+
+    def test_to_plain_text_paperless_billing(self):
+        """to_plain_text() корректно обрабатывает PaperlessBilling."""
+        from churn.counterfactual.dice import Counterfactual
+
+        cf = Counterfactual(
+            features={"PaperlessBilling": "No"},
+            changes={"PaperlessBilling": "No"},
+            churn_probability=0.2,
+            distance=0.07,
+            feasibility_score=0.93,
+        )
+        texts = cf.to_plain_text()
+        assert any("billing" in t.lower() or "Billing" in t for t in texts)
+
+    def test_diverse_counterfactuals_have_unique_changes(self):
+        """При достаточном числе итераций контрфакты не являются дубликатами."""
+        result = self._gen(n=3, max_iter=800).generate(
+            dict(_CF_BASE_CUSTOMER), _contract_sensitive_fn
+        )
+        if len(result.counterfactuals) >= 2:
+            fps = [
+                frozenset((k, str(v)) for k, v in cf.changes.items())
+                for cf in result.counterfactuals
+            ]
+            assert len(set(fps)) == len(fps), "Duplicate counterfactuals detected"
+
+
+class TestCounterfactualAPIEndpoints:
+    """API integration tests for POST /explain/counterfactual.
+
+    Используют mock-модель вместо артефакта обучения.
+    Правильный паттерн: patch внутри каждого теста — мок активен во время вызова.
+    """
+
+    _PAYLOAD = {"customer": _CF_BASE_CUSTOMER}
+
+    @staticmethod
+    def _make_mock_model():
+        """Mock LightGBM-compatible model: 0.1 for Two year contract, 0.85 otherwise."""
+        import numpy as np
+
+        class _MockModel:
+            feature_name_ = None
+
+            def predict_proba(self, x):  # noqa: N803
+                prob = 0.85
+                if hasattr(x, "columns"):
+                    col = "Contract_Two year"
+                    if col in x.columns and int(x[col].iloc[0]) == 1:
+                        prob = 0.1
+                return np.array([[1 - prob, prob]])
+
+        return _MockModel()
+
+    def test_missing_customer_returns_422(self):
+        """POST без customer → 422."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.post("/explain/counterfactual", json={"n_counterfactuals": 3})
+        assert resp.status_code == 422
+
+    def test_target_probability_out_of_range_returns_422(self):
+        """target_probability > 1 → 422."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.post(
+            "/explain/counterfactual",
+            json={**self._PAYLOAD, "target_probability": 1.5},
+        )
+        assert resp.status_code == 422
+
+    def test_n_counterfactuals_zero_returns_422(self):
+        """n_counterfactuals=0 → 422."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.post(
+            "/explain/counterfactual",
+            json={**self._PAYLOAD, "n_counterfactuals": 0},
+        )
+        assert resp.status_code == 422
+
+    def test_returns_200_with_mock_model(self):
+        """С mock-моделью → 200."""
+        import unittest.mock
+
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        with unittest.mock.patch("churn.api.app.get_model", return_value=self._make_mock_model()):
+            client = TestClient(app)
+            resp = client.post(
+                "/explain/counterfactual",
+                json={**self._PAYLOAD, "max_iterations": 400},
+            )
+        assert resp.status_code == 200
+
+    def test_response_top_level_fields_present(self):
+        """Ответ содержит все обязательные поля верхнего уровня."""
+        import unittest.mock
+
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        with unittest.mock.patch("churn.api.app.get_model", return_value=self._make_mock_model()):
+            client = TestClient(app)
+            data = client.post(
+                "/explain/counterfactual",
+                json={**self._PAYLOAD, "max_iterations": 400},
+            ).json()
+        required = (
+            "original_probability",
+            "target_probability",
+            "success",
+            "n_found",
+            "n_tried",
+            "counterfactuals",
+        )
+        for f in required:
+            assert f in data, f"Missing top-level field: {f}"
+
+    def test_original_probability_in_zero_one(self):
+        """original_probability ∈ [0, 1]."""
+        import unittest.mock
+
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        with unittest.mock.patch("churn.api.app.get_model", return_value=self._make_mock_model()):
+            client = TestClient(app)
+            data = client.post(
+                "/explain/counterfactual",
+                json={**self._PAYLOAD, "max_iterations": 300},
+            ).json()
+        assert 0.0 <= data["original_probability"] <= 1.0
+
+    def test_n_found_matches_counterfactuals_length(self):
+        """n_found совпадает с len(counterfactuals)."""
+        import unittest.mock
+
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        with unittest.mock.patch("churn.api.app.get_model", return_value=self._make_mock_model()):
+            client = TestClient(app)
+            data = client.post(
+                "/explain/counterfactual",
+                json={**self._PAYLOAD, "max_iterations": 400},
+            ).json()
+        assert data["n_found"] == len(data["counterfactuals"])
+
+    def test_n_tried_matches_requested_max_iterations(self):
+        """n_tried совпадает с max_iterations в запросе."""
+        import unittest.mock
+
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        with unittest.mock.patch("churn.api.app.get_model", return_value=self._make_mock_model()):
+            client = TestClient(app)
+            data = client.post(
+                "/explain/counterfactual",
+                json={**self._PAYLOAD, "max_iterations": 250},
+            ).json()
+        assert data["n_tried"] == 250
+
+    def test_counterfactual_item_has_required_keys(self):
+        """Каждый элемент counterfactuals содержит все обязательные ключи."""
+        import unittest.mock
+
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        with unittest.mock.patch("churn.api.app.get_model", return_value=self._make_mock_model()):
+            client = TestClient(app)
+            data = client.post(
+                "/explain/counterfactual",
+                json={**self._PAYLOAD, "max_iterations": 500},
+            ).json()
+        cf_keys = (
+            "rank",
+            "churn_probability",
+            "distance",
+            "feasibility_score",
+            "changes",
+            "explanation",
+        )  # noqa: E501
+        for cf in data["counterfactuals"]:
+            for key in cf_keys:
+                assert key in cf
+
+    def test_rank_is_sequential_starting_from_one(self):
+        """rank начинается с 1 и идёт последовательно."""
+        import unittest.mock
+
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        with unittest.mock.patch("churn.api.app.get_model", return_value=self._make_mock_model()):
+            client = TestClient(app)
+            data = client.post(
+                "/explain/counterfactual",
+                json={**self._PAYLOAD, "max_iterations": 500},
+            ).json()
+        ranks = [cf["rank"] for cf in data["counterfactuals"]]
+        assert ranks == list(range(1, len(ranks) + 1))
+
+    def test_explanation_is_list_of_strings(self):
+        """explanation — список строк для каждого контрфакта."""
+        import unittest.mock
+
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        with unittest.mock.patch("churn.api.app.get_model", return_value=self._make_mock_model()):
+            client = TestClient(app)
+            data = client.post(
+                "/explain/counterfactual",
+                json={**self._PAYLOAD, "max_iterations": 500},
+            ).json()
+        for cf in data["counterfactuals"]:
+            assert isinstance(cf["explanation"], list)
+            assert all(isinstance(s, str) for s in cf["explanation"])
+
+    def test_target_probability_echoed_in_response(self):
+        """target_probability из запроса отражается в ответе."""
+        import unittest.mock
+
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        with unittest.mock.patch("churn.api.app.get_model", return_value=self._make_mock_model()):
+            client = TestClient(app)
+            data = client.post(
+                "/explain/counterfactual",
+                json={**self._PAYLOAD, "target_probability": 0.4, "max_iterations": 300},
+            ).json()
+        assert data["target_probability"] == pytest.approx(0.4)
