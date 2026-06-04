@@ -20,10 +20,11 @@ import polars as pl
 import yaml
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from quality.alerts.alerting import AlertManager, LogAlertChannel, WebhookAlertChannel
 from quality.data.profiler import profile_dataframe
+from quality.label_quality.confid_learn import DecoupledConfidentLearning
 from quality.lineage.tracker import RunState, get_tracker
 from quality.quality.drift import detect_drift
 from quality.quality.expectations import run_suite
@@ -1046,3 +1047,149 @@ def sla_reset() -> JSONResponse:
     """
     reset_monitor()
     return JSONResponse(content={"status": "reset", "message": "All SLOs and observations cleared"})
+
+
+# ---------------------------------------------------------------------------
+# Label Quality — Decoupled Confident Learning (DeCoLe)
+# ---------------------------------------------------------------------------
+
+
+class LabelQualityRequest(BaseModel):
+    """Запрос на аудит качества разметки / Label quality audit request."""
+
+    labels: list[int] = Field(
+        ...,
+        description="Noisy labels ỹ_i ∈ {0,...,K-1}, shape [n]",
+    )
+    pred_probs: list[list[float]] = Field(
+        ...,
+        description=(
+            "Out-of-fold predicted probabilities P̂(Y=j|x_i), shape [n, K]. "
+            "Must come from cross-validation — not predictions on the full train set."
+        ),
+    )
+    groups: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional subgroup membership labels, shape [n]. "
+            "E.g. annotator_id, data_source, demographic_group. "
+            "When provided, DeCoLe builds a separate noise model per group."
+        ),
+    )
+    confidence_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Fallback threshold when a group has no examples of a given class.",
+    )
+
+
+@app.post("/label_quality/check", status_code=200)
+def label_quality_check(request: LabelQualityRequest) -> JSONResponse:
+    """
+    Обнаружение ошибок разметки методом Decoupled Confident Learning.
+    Detect label errors using Decoupled Confident Learning (DeCoLe).
+
+    Реализует DeCoLe (arXiv:2507.07216, 2025) — расширение стандартного Confident Learning
+    (Northcutt et al. 2021 JAIR), которое строит отдельную матрицу перехода шума
+    для каждой подгруппы данных. Это позволяет обнаруживать систематические ошибки
+    аннотации, характерные для конкретных слоёв данных (аннотатор, источник, демография).
+
+    Implements DeCoLe (arXiv:2507.07216, 2025) — an extension of standard Confident Learning
+    (Northcutt et al. 2021 JAIR) that builds a separate noise transition matrix for each
+    data subgroup. Detects systematic annotation errors specific to particular data slices
+    (annotator, data source, demographic group).
+
+    Важно / Important: pred_probs должны быть получены через cross-validation на train set.
+    pred_probs must come from cross-validation on the train set — not from a model
+    trained on all data (this would produce false negatives on memorized examples).
+
+    Returns:
+        LabelQualityReport с подозрительными индексами, типами ошибок и матрицами шума.
+        LabelQualityReport with suspect indices, error types, and per-group noise matrices.
+    """
+    import numpy as np
+
+    labels = request.labels
+    pred_probs = request.pred_probs
+
+    if len(labels) == 0:
+        raise HTTPException(status_code=422, detail="labels must not be empty")
+
+    if len(labels) != len(pred_probs):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"labels length ({len(labels)}) must match "
+                f"pred_probs length ({len(pred_probs)})"
+            ),
+        )
+
+    probs_arr = np.asarray(pred_probs, dtype=float)
+    n_classes = probs_arr.shape[1] if probs_arr.ndim == 2 else 0
+    if n_classes < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="pred_probs must have at least 2 columns (classes)",
+        )
+
+    if request.groups is not None and len(request.groups) != len(labels):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"groups length ({len(request.groups)}) must match "
+                f"labels length ({len(labels)})"
+            ),
+        )
+
+    dcl = DecoupledConfidentLearning(confidence_threshold=request.confidence_threshold)
+    report = dcl.find_label_errors(
+        labels=labels,
+        pred_probs=pred_probs,
+        groups=request.groups,
+    )
+    return JSONResponse(content=report.to_dict())
+
+
+@app.get("/label_quality/info")
+def label_quality_info() -> JSONResponse:
+    """
+    Справка о методе DeCoLe / Reference info about the DeCoLe method.
+
+    Возвращает краткое описание алгоритма, рекомендуемый workflow и ссылки.
+    Returns a brief algorithm description, recommended workflow, and references.
+    """
+    return JSONResponse(
+        content={
+            "method": "Decoupled Confident Learning (DeCoLe)",
+            "paper": "arXiv:2507.07216 (2025)",
+            "base_method": "Confident Learning — Northcutt et al. 2021 JAIR 74:1-65",
+            "key_idea": (
+                "Builds a separate noise transition matrix Q_g[s,y] per data subgroup g, "
+                "so high-noise groups don't inflate thresholds for clean groups. "
+                "Detects systematic annotation errors correlated with subgroup membership."
+            ),
+            "workflow": [
+                "1. Train classifier with K-fold cross-validation, save out-of-fold pred_probs.",
+                "2. POST /label_quality/check with labels + pred_probs + optional groups.",
+                "3. Inspect errors sorted by confidence (descending).",
+                "4. Prioritize 'confident_disagreement' errors (confidence ≥ 0.9).",
+                "5. Re-annotate or remove flagged examples, retrain, repeat.",
+            ],
+            "error_types": {
+                "confident_disagreement": (
+                    "Model confidence ≥ 0.9 in a different class — almost certainly mislabeled."
+                ),
+                "high_noise_group": "Error in a subgroup with estimated noise_rate > 10%.",
+                "off_diagonal": "Standard off-diagonal confident joint entry — probable mislabel.",
+            },
+            "when_to_use": [
+                "Before training: audit annotation quality by data source or annotator.",
+                "After training: investigate systematic underperformance on a subgroup.",
+                (
+                    "Compliance: EU AI Act Article 10 requires data quality processes "
+                    "including label error checks."
+                ),
+            ],
+        }
+    )
