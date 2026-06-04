@@ -880,6 +880,25 @@
         Mothilal et al. 2020 FAT* (DiCE diverse counterfactuals), DiCE-Extended arxiv 2504.19027,
         Springer 2026 ML counterfactuals for churn business rules, EU AI Act Articles 13 & 22.
 
+- [x] Decoupled Confident Learning (DeCoLe) для обнаружения ошибок разметки (Project 10) — 2026-06-04
+      quality/label_quality/confid_learn.py: DecoupledConfidentLearning.find_label_errors().
+      DeCoLe (arXiv:2507.07216, 2025) — расширение Confident Learning (Northcutt et al. 2021 JAIR):
+      отдельная матрица перехода шума Q_g[s,y] per subgroup g → высокошумные группы не занижают
+      пороги для чистых групп. Порог t_{g,j} = mean(P̂(Y=j|X)) для X: ỹ=j в группе g.
+      3 типа ошибок: confident_disagreement (confidence ≥ 0.9), high_noise_group (noise_rate > 10%),
+      off_diagonal. LabelError / NoiseMatrix / LabelQualityReport dataclasses с to_dict().
+      quality/api/app.py: POST /label_quality/check (JSON: labels+pred_probs+groups → report,
+        422 на пустые labels, несоответствие длин, < 2 класса, несоответствие groups),
+        GET /label_quality/info (алгоритм, workflow, error_types, EU AI Act Article 10).
+      47 новых тестов: TestDecoupledCLDataclasses×5, TestDecoupledCLCore×15,
+        TestDecoupledCLGroups×6, TestDecoupledCLEdgeCases×4, TestLabelQualityAPIEndpoints×17.
+      415/415 тестов зелёных (было 368). Lint clean.
+      Бизнес-эффект: обнаружение систематических ошибок аннотации по срезам данных —
+        невидимые при глобальном CL, но критичные для EU AI Act Art.10(2)(f) data quality.
+        Пример: аннотатор X плохо размечает класс Y только в документах от источника S.
+      Источники: Northcutt et al. 2021 JAIR 74:1-65 (Confident Learning),
+        arXiv:2507.07216 (DeCoLe 2025: Bias-Aware Mislabeling Detection via DCL).
+
 ---
 
 ## Ежедневный цикл улучшений
