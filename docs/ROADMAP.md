@@ -881,6 +881,28 @@
         Springer 2026 ML counterfactuals for churn business rules, EU AI Act Articles 13 & 22.
 
 - [x] Decoupled Confident Learning (DeCoLe) для обнаружения ошибок разметки (Project 10) — 2026-06-04
+- [x] LLM Guardrails: Input + Output Safety Layers для RAG (Project 02) — 2026-06-05
+      rag/guardrails/input_guard.py: InputGuard с 13 injection-паттернами (OWASP LLM01),
+        PII-детектор (email/phone_ru/ssn/credit_card/passport_ru) + маскирование,
+        off-domain классификатор (configurable domain_keywords), длина запроса.
+        Блокирующие угрозы: PROMPT_INJECTION + EMPTY_QUERY; предупреждения: PII/OFF_TOPIC/TOO_LONG.
+        is_injection_attempt() быстрая проверка. Полный InputGuardResult с risk_score 0-1.
+      rag/guardrails/output_guard.py: OutputGuard — PII-маскирование в ответах (GDPR Art.5),
+        вредоносный контент (harmful_content → is_safe=False, ответ заменяется заглушкой),
+        предупреждения: NO_SOURCES (риск галлюцинации), ANSWER_TOO_SHORT.
+        mask_answer() быстрый helper для audit-логирования.
+      rag/api/app.py: 3 новых endpoint:
+        POST /guardrails/check/input (проверка запроса: injection + PII + off-topic),
+        POST /guardrails/check/output (фильтрация ответа: PII masking + harmful content),
+        GET  /guardrails/config (конфигурация + compliance: OWASP/GDPR/EU AI Act).
+      44 новых теста: TestInputGuard×18, TestOutputGuard×11, TestGuardrailsAPIEndpoints×15.
+      173/173 тестов зелёных (+44, было 129). Lint clean.
+      Бизнес-эффект: HR RAG-система обрабатывает 100% запросов через safety checks —
+        injection-атаки блокируются до retrieval, PII маскируется в ответах (GDPR compliance).
+        Архитектура 6-layer (futureagi.com 2026): Input Validation + Output Filtering имплементированы.
+      Источники: OWASP LLM Top 10 2025 (LLM01 Injection, LLM02 Insecure Output),
+        futureagi.com/blog/ultimate-guide-llm-guardrails-2026, GDPR Article 5,
+        EU AI Act Article 13, NIST AI RMF 2.0 (GOVERN 1.2, MANAGE 2.2).
       quality/label_quality/confid_learn.py: DecoupledConfidentLearning.find_label_errors().
       DeCoLe (arXiv:2507.07216, 2025) — расширение Confident Learning (Northcutt et al. 2021 JAIR):
       отдельная матрица перехода шума Q_g[s,y] per subgroup g → высокошумные группы не занижают

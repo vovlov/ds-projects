@@ -12,6 +12,8 @@ from pydantic import BaseModel
 
 from ..generation.chain import generate_answer, generate_answer_with_gate
 from ..generation.stream import stream_answer
+from ..guardrails.input_guard import InputGuard
+from ..guardrails.output_guard import OutputGuard
 from ..ingestion.loader import chunk_documents, load_documents
 from ..knowledge_graph.graph import KnowledgeGraph
 from ..retrieval.hybrid import HybridIndex, hybrid_search
@@ -26,6 +28,8 @@ _collection = None
 _hybrid_index: HybridIndex | None = None
 _indexed_chunks: list[dict] = []
 _knowledge_graph: KnowledgeGraph = KnowledgeGraph()
+_input_guard: InputGuard = InputGuard()
+_output_guard: OutputGuard = OutputGuard()
 
 
 def _get_collection():
@@ -335,6 +339,120 @@ def graph_entity(entity_key: str):
     if not subgraph["found"] and not subgraph["nodes"]:
         raise HTTPException(status_code=404, detail=f"Entity '{entity_key}' not found in graph")
     return subgraph
+
+
+# ---------------------------------------------------------------------------
+# Guardrails endpoints
+# ---------------------------------------------------------------------------
+
+
+class InputGuardRequest(BaseModel):
+    """Запрос на проверку входного текста через Input Guardrail."""
+
+    query: str
+    domain_keywords: list[str] = []
+    block_pii: bool = False
+    block_off_topic: bool = False
+    max_query_length: int = 2000
+
+
+class InputGuardResponse(BaseModel):
+    """Результат проверки входного запроса."""
+
+    is_safe: bool
+    threats: list[str]
+    sanitized_query: str
+    risk_score: float
+    details: dict[str, str]
+
+
+class OutputGuardRequest(BaseModel):
+    """Запрос на проверку выходного ответа через Output Guardrail."""
+
+    answer: str
+    sources: list[str] = []
+    mask_pii: bool = True
+    min_answer_length: int = 10
+
+
+class OutputGuardResponse(BaseModel):
+    """Результат проверки выходного ответа."""
+
+    is_safe: bool
+    threats: list[str]
+    filtered_answer: str
+    risk_score: float
+    pii_types_found: list[str]
+
+
+@app.post("/guardrails/check/input", response_model=InputGuardResponse)
+def guardrails_check_input(request: InputGuardRequest) -> InputGuardResponse:
+    """Проверить запрос через Input Guardrail перед отправкой в RAG.
+
+    Детектирует prompt injection (OWASP LLM01), PII в запросе (GDPR Art.5),
+    off-domain запросы. Возвращает sanitized_query с замаскированными PII.
+
+    Prompt injection всегда блокирует (is_safe=False); PII и off-topic — только
+    при соответствующих флагах.
+    """
+    guard = InputGuard(
+        max_query_length=request.max_query_length,
+        domain_keywords=request.domain_keywords,
+        block_pii=request.block_pii,
+        block_off_topic=request.block_off_topic,
+    )
+    result = guard.check(request.query)
+    return InputGuardResponse(
+        is_safe=result.is_safe,
+        threats=[str(t) for t in result.threats],
+        sanitized_query=result.sanitized_query,
+        risk_score=result.risk_score,
+        details=result.details,
+    )
+
+
+@app.post("/guardrails/check/output", response_model=OutputGuardResponse)
+def guardrails_check_output(request: OutputGuardRequest) -> OutputGuardResponse:
+    """Проверить ответ через Output Guardrail перед отдачей пользователю.
+
+    Маскирует PII в ответе (GDPR Art.5), фильтрует вредоносный контент
+    (OWASP LLM02), предупреждает об ответах без источников (риск галлюцинации).
+
+    Вредоносный контент блокирует (is_safe=False, filtered_answer = заглушка).
+    PII маскируется в filtered_answer без блокировки.
+    """
+    guard = OutputGuard(
+        mask_pii=request.mask_pii,
+        min_answer_length=request.min_answer_length,
+    )
+    result = guard.check(request.answer, sources=request.sources)
+    return OutputGuardResponse(
+        is_safe=result.is_safe,
+        threats=[str(t) for t in result.threats],
+        filtered_answer=result.filtered_answer,
+        risk_score=result.risk_score,
+        pii_types_found=result.pii_types_found,
+    )
+
+
+@app.get("/guardrails/config")
+def guardrails_config() -> dict:
+    """Текущая конфигурация глобальных guardrails."""
+    return {
+        "input_guard": {
+            "max_query_length": _input_guard.max_query_length,
+            "domain_keywords_count": len(_input_guard.domain_keywords),
+            "block_pii": _input_guard.block_pii,
+            "block_off_topic": _input_guard.block_off_topic,
+            "injection_patterns_count": len(_input_guard._injection_re),
+        },
+        "output_guard": {
+            "mask_pii": _output_guard.mask_pii,
+            "min_answer_length": _output_guard.min_answer_length,
+            "harmful_patterns_count": len(_output_guard._harmful_re),
+        },
+        "compliance": ["OWASP LLM Top 10 2025", "GDPR Article 5", "EU AI Act Article 13"],
+    }
 
 
 def ask(question: str, n_results: int = 5, use_hybrid: bool = True) -> str:
