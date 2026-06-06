@@ -39,6 +39,7 @@ from quality.security.owasp import OWASPMLAudit
 from quality.security.pii_detector import detect_pii
 from quality.sla.monitor import get_monitor, reset_monitor
 from quality.sla.slo import SLIObservation, SLIType, SLODefinition
+from quality.synthetic.generator import SyntheticConfig, SyntheticDataGenerator
 
 app = FastAPI(
     title="Data Quality Platform",
@@ -1120,8 +1121,7 @@ def label_quality_check(request: LabelQualityRequest) -> JSONResponse:
         raise HTTPException(
             status_code=422,
             detail=(
-                f"labels length ({len(labels)}) must match "
-                f"pred_probs length ({len(pred_probs)})"
+                f"labels length ({len(labels)}) must match pred_probs length ({len(pred_probs)})"
             ),
         )
 
@@ -1137,8 +1137,7 @@ def label_quality_check(request: LabelQualityRequest) -> JSONResponse:
         raise HTTPException(
             status_code=422,
             detail=(
-                f"groups length ({len(request.groups)}) must match "
-                f"labels length ({len(labels)})"
+                f"groups length ({len(request.groups)}) must match labels length ({len(labels)})"
             ),
         )
 
@@ -1190,6 +1189,134 @@ def label_quality_info() -> JSONResponse:
                     "Compliance: EU AI Act Article 10 requires data quality processes "
                     "including label error checks."
                 ),
+            ],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Synthetic Data Generation / Генерация синтетических данных
+# ---------------------------------------------------------------------------
+
+
+class SyntheticGenerateRequest(BaseModel):
+    """Запрос на генерацию синтетических данных."""
+
+    data: dict[str, list[Any]] = Field(
+        ...,
+        description="Исходные данные: column_name → list of values (обучающая выборка).",
+        examples=[{"age": [25, 30, 45, 50, 22], "income": [50000, 60000, 80000, 90000, 40000]}],
+    )
+    n_samples: int = Field(100, ge=1, le=10000, description="Число синтетических строк.")
+    epsilon: float | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Бюджет ε-дифференциальной приватности. None = без шума. "
+            "Малые значения (ε<1) = сильная приватность, большие (ε>10) ≈ без шума."
+        ),
+    )
+    seed: int | None = Field(42, description="Seed для воспроизводимости.")
+    categorical_threshold: int = Field(
+        10,
+        ge=2,
+        le=100,
+        description="Порог уникальных значений для auto-detect categorical типа.",
+    )
+
+
+@app.post("/synthetic/generate", status_code=200)
+def synthetic_generate(request: SyntheticGenerateRequest) -> JSONResponse:
+    """
+    Генерация синтетических данных (Gaussian Copula).
+
+    Принимает реальные данные (dict column→values), возвращает синтетические
+    строки с сохранёнными статистиками и корреляциями.
+
+    **Алгоритм:**
+    - Continuous: Gaussian fit → Cholesky correlated sampling → clip to [min, max].
+    - Categorical: эмпирическое мультиномиальное распределение.
+    - ε-DP: Laplace mechanism для mean estimates (Dwork et al. 2006).
+
+    **Применение:** GDPR/EU AI Act тестирование без реальных данных, data augmentation,
+    sharing datasets without exposing individual records.
+
+    Generates synthetic tabular data preserving distributions and correlations.
+    Optional ε-differential privacy via Laplace mechanism on mean estimates.
+    """
+    if not request.data:
+        raise HTTPException(
+            status_code=422, detail="data не может быть пустым / data must not be empty"
+        )
+
+    # Проверяем, что хотя бы один столбец непустой
+    if all(len(v) == 0 for v in request.data.values()):
+        raise HTTPException(status_code=422, detail="Все столбцы пустые / All columns are empty")
+
+    config = SyntheticConfig(
+        n_samples=request.n_samples,
+        epsilon=request.epsilon,
+        seed=request.seed,
+        categorical_threshold=request.categorical_threshold,
+    )
+    gen = SyntheticDataGenerator(config)
+    result = gen.fit_generate(request.data, n_samples=request.n_samples)
+
+    response = result.to_dict()
+    response["data"] = result.data
+    return JSONResponse(content=_make_serializable(response))
+
+
+@app.get("/synthetic/info")
+def synthetic_info() -> JSONResponse:
+    """
+    Описание алгоритма генерации синтетических данных и EU AI Act compliance.
+    Algorithm description and compliance information.
+    """
+    return JSONResponse(
+        content={
+            "algorithm": "Gaussian Copula с ε-дифференциальной приватностью",
+            "description": (
+                "Генерирует синтетические табличные данные, сохраняя маргинальные "
+                "распределения (Gaussian для continuous, эмпирические частоты для categorical) "
+                "и линейные корреляции через разложение Холецкого."
+            ),
+            "continuous_columns": (
+                "Fit: μ (mean) + σ (std). Sampling: N(μ, σ) → Cholesky transform → clip [min, max]."
+            ),
+            "categorical_columns": (
+                "Empirical multinomial: sample proportionally to observed frequencies."
+            ),
+            "differential_privacy": {
+                "mechanism": "Laplace (additive noise on mean estimates)",
+                "guarantee": "(ε, 0)-DP для mean queries (Dwork et al. 2006 TCC)",
+                "sensitivity": "Δf = (max - min) / n — global sensitivity для mean query",
+                "note": "Малые ε = сильнее приватность, но ниже fidelity_score.",
+            },
+            "fidelity_score": (
+                "Нормализованная близость μ и σ: 1 - mean(|Δμ|/σ + |Δσ|/σ) / 2. "
+                "Диапазон [0, 1], выше = лучше."
+            ),
+            "compliance": {
+                "GDPR_Article_5": (
+                    "Анонимизация: синтетические данные не привязаны к реальным субъектам."
+                ),
+                "EU_AI_Act_Article_10": (
+                    "Data augmentation без использования персональных данных в production."
+                ),
+                "NIST_AI_RMF": "GOVERN 1.6 — privacy risk mitigation via synthetic data.",
+            },
+            "references": [
+                "Nelsen 2006 'An Introduction to Copulas', Springer (Gaussian Copula)",
+                "Dwork et al. 2006 TCC (ε-DP Laplace Mechanism)",
+                "Gentle 2009 'Computational Statistics' §6.2 (Cholesky sampling)",
+                "Jordon et al. 2022 NeurIPS (synthetic data evaluation)",
+            ],
+            "usage": [
+                "1. POST /synthetic/generate с реальными данными и n_samples.",
+                "2. Укажите epsilon для ε-DP (рекомендуется ε ∈ [1, 10]).",
+                "3. Используйте fidelity_score для оценки качества (>0.8 = хорошо).",
+                "4. Верифицируйте через /drift или /drift/extended: реальные vs синтетические.",
             ],
         }
     )

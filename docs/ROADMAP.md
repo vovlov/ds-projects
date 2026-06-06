@@ -882,6 +882,29 @@
 
 - [x] Decoupled Confident Learning (DeCoLe) для обнаружения ошибок разметки (Project 10) — 2026-06-04
 - [x] LLM Guardrails: Input + Output Safety Layers для RAG (Project 02) — 2026-06-05
+- [x] Synthetic Data Generation (Gaussian Copula + ε-DP) для Data Quality Platform (Project 10) — 2026-06-06
+      quality/synthetic/generator.py: SyntheticDataGenerator (Gaussian Copula).
+      SyntheticConfig (n_samples, epsilon, seed, categorical_threshold),
+      ColumnStats (continuous: μ/σ/range; categorical: empirical frequencies),
+      SyntheticResult (data, fidelity_score, privacy_budget).
+      Алгоритм: fit() → per-column stats + Cholesky(corr_matrix) для continuous.
+      generate(): Cholesky-коррелированные стандартные нормальные → rescale → clip [min, max].
+      ε-DP: Laplace механизм Дворка 2006 — шум добавляется к μ (не к выборкам):
+        чувствительность Δf = (max - min) / n для mean query.
+      fidelity_score = 1 - mean(|Δμ|/σ + |Δσ|/σ) / 2 — нормализованная близость статистик.
+      quality/api/app.py: 2 новых endpoint:
+        POST /synthetic/generate (SyntheticGenerateRequest → data + stats + fidelity_score),
+        GET  /synthetic/info (алгоритм + EU AI Act / GDPR compliance info).
+      37 новых тестов: TestSyntheticConfigDefaults×2, TestColumnStats×2, TestSyntheticResult×1,
+        TestSyntheticDataGeneratorFit×8, TestSyntheticDataGeneratorGenerate×13,
+        TestSyntheticAPIEndpoints×11. 452/452 тестов зелёных (было 415).
+      Бизнес-эффект: GDPR/EU AI Act безопасное тестирование — разработчики работают с
+        синтетическими данными вместо реальных PII; fidelity_score >0.8 подтверждает
+        статистическую репрезентативность синтетики. Дополняет OWASP+PII detection Platform.
+      Источники: Nelsen 2006 "An Introduction to Copulas" Springer (Gaussian Copula),
+        Dwork et al. 2006 TCC "Calibrating Noise to Sensitivity" (ε-DP Laplace),
+        Gentle 2009 "Computational Statistics" §6.2 (Cholesky sampling),
+        Jordon et al. 2022 NeurIPS "Synthetic Data — what, why, and how".
       rag/guardrails/input_guard.py: InputGuard с 13 injection-паттернами (OWASP LLM01),
         PII-детектор (email/phone_ru/ssn/credit_card/passport_ru) + маскирование,
         off-domain классификатор (configurable domain_keywords), длина запроса.
