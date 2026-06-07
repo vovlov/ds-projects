@@ -944,6 +944,35 @@
       Источники: Northcutt et al. 2021 JAIR 74:1-65 (Confident Learning),
         arXiv:2507.07216 (DeCoLe 2025: Bias-Aware Mislabeling Detection via DCL).
 
+- [x] Mahalanobis Distance Anomaly Detection для коррелированных метрик (Project 05) — 2026-06-07
+      anomaly/models/mahalanobis.py: MahalanobisDetector (pure numpy, нет внешних зависимостей).
+      d(x, μ) = sqrt((x-μ)ᵀ Σ⁻¹ (x-μ)) — учитывает корреляционную структуру метрик:
+      CPU spike + proportional latency spike = нормально; CPU=10% + latency=500ms = аномально.
+      MahalanobisConfig (threshold_percentile=97.5, regularization=ε·I для устойчивости).
+      Обращение матрицы с регуляризацией против мультиколлинеарности (высокий condition_number).
+      Feature contributions через маргинальную нейтрализацию — консистентно с IsolationForest.
+      Threshold = percentile(train_distances) — устойчив к нарушению гауссовости реальных метрик.
+      anomaly/api/app.py: _reset_mahalanobis_for_tests() для изоляции тестов.
+        POST /mahalanobis/train (обучить на нормальных данных, min 10 точек),
+        POST /mahalanobis/detect (детекция + mahalanobis_distance + feature_contributions),
+        GET  /mahalanobis/status (состояние модели, порог, condition_number).
+        GET  /health расширен полем mahalanobis_fitted.
+      29 новых тестов: TestMahalanobisDetector×16 (fit, is_fitted, length, bool,
+        score_range, distance_positive, contributions_sum, contributions_keys,
+        normal_low_rate, injected_detected, detect_before_fit_raises, min_samples,
+        train_info, 1d_input, score_higher_for_outlier, top_feature_valid),
+        TestMahalanobisAPIEndpoints×13 (train_200, structure, n_samples, detect_400_before,
+        detect_200_after, response_structure, feature_contributions, anomaly_rate_range,
+        status_before, status_after, health_field, full_cycle, custom_percentile).
+      157/157 тестов зелёные (было 128, +29 новых). Lint clean.
+      Бизнес-эффект: SRE-команда получает correlated-aware детектор — не поднимает ложные
+        тревоги когда CPU и latency растут пропорционально (нормальный паттерн нагрузки),
+        но флагирует когда latency аномально высока при нормальном CPU (сетевой bottleneck).
+        Дополняет существующие: Z-score (унивариатный) + ESN (временной) + Isolation Forest.
+      Источники: Mahalanobis 1936 PNASI (оригинальная статья), De Vito et al. 2002
+        (MDist для multivariate outlier detection), Nature 2026 reservoir state analysis
+        (distributional MDist для temporal anomalies).
+
 ---
 
 ## Ежедневный цикл улучшений

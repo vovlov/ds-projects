@@ -12,12 +12,13 @@ from ..models.detector import MultiMetricDetector
 from ..models.isolation import IsolationConfig, IsolationForestDetector
 from ..models.isolation import is_available as isolation_available
 from ..models.lstm_autoencoder import LSTMConfig, create_autoencoder
+from ..models.mahalanobis import MahalanobisConfig, MahalanobisDetector
 
 app = FastAPI(
     title="Realtime Anomaly Detection API",
     description="Detect anomalies in metric time series with Prometheus observability, "
-    "MMD drift detection, LSTM/ESN autoencoder serving, and Isolation Forest with "
-    "feature-level explainability",
+    "MMD drift detection, LSTM/ESN autoencoder serving, Isolation Forest with "
+    "feature-level explainability, and Mahalanobis Distance for correlated metrics",
     version="5.0.0",
 )
 
@@ -47,6 +48,10 @@ _lstm_train_result: dict | None = None
 # Isolation Forest — инициализируется при /isolation/train.
 _isolation_model = IsolationForestDetector()
 _isolation_train_result: dict | None = None
+
+# Mahalanobis Distance — инициализируется при /mahalanobis/train.
+_mahalanobis_model = MahalanobisDetector()
+_mahalanobis_train_result: dict | None = None
 
 
 class MetricPoint(BaseModel):
@@ -126,6 +131,7 @@ def health() -> dict:
             "timestamp": _last_drift_result["timestamp"],
         }
     response["isolation_fitted"] = _isolation_model.is_fitted
+    response["mahalanobis_fitted"] = _mahalanobis_model.is_fitted
     return response
 
 
@@ -575,4 +581,188 @@ def isolation_status() -> dict:
         status["train_metrics"] = _isolation_train_result
     else:
         status["message"] = "Model not trained. Call POST /isolation/train to initialize."
+    return status
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Mahalanobis Distance endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class MahalanobisTrainRequest(BaseModel):
+    """Обучить Mahalanobis детектор на нормальных метриках инфраструктуры.
+
+    data: список точек [cpu, latency, requests] нормального поведения.
+    threshold_percentile: перцентиль дистанций на train данных для порога (97.5 = 2.5% FPR).
+    regularization: коэффициент ε регуляризации ковариационной матрицы (ε·I).
+    """
+
+    data: list[list[float]] = Field(
+        ...,
+        description="Normal metric points: list of [cpu, latency, requests]",
+        min_length=10,
+    )
+    threshold_percentile: float = Field(
+        default=97.5,
+        ge=80.0,
+        le=99.9,
+        description="Percentile of train distances used as anomaly threshold",
+    )
+    regularization: float = Field(
+        default=1e-6,
+        ge=1e-10,
+        le=1.0,
+        description="Regularisation coefficient added to covariance diagonal",
+    )
+
+
+class MahalanobisTrainResponse(BaseModel):
+    n_samples: int
+    n_features: int
+    mean: list[float]
+    condition_number: float
+    threshold: float
+
+
+class MahalanobisPointResult(BaseModel):
+    is_anomaly: bool
+    mahalanobis_distance: float
+    anomaly_score: float
+    threshold: float
+    feature_contributions: dict[str, float]
+    top_feature: str
+
+
+class MahalanobisDetectRequest(BaseModel):
+    """Обнаружить аномалии через Mahalanobis расстояние.
+
+    data: список точек [cpu, latency, requests].
+    Требует предварительного обучения: POST /mahalanobis/train.
+    """
+
+    data: list[list[float]] = Field(
+        ...,
+        description="Metric points to analyze: list of [cpu, latency, requests]",
+        min_length=1,
+    )
+
+
+class MahalanobisDetectResponse(BaseModel):
+    results: list[MahalanobisPointResult]
+    n_anomalies: int
+    anomaly_rate: float
+    top_anomalous_feature: str | None
+    mean_distance: float
+
+
+@app.post("/mahalanobis/train", response_model=MahalanobisTrainResponse)
+def mahalanobis_train(request: MahalanobisTrainRequest) -> MahalanobisTrainResponse:
+    """Обучить Mahalanobis детектор на нормальных метриках инфраструктуры.
+
+    Mahalanobis расстояние учитывает корреляционную структуру метрик:
+    CPU spike + proportional latency spike = нормально (ожидаемая корреляция).
+    CPU=10% + latency=500ms = аномально (нарушение нормальной корреляции).
+
+    Преимущества над Z-score: многомерный анализ корреляций.
+    Преимущества над Isolation Forest: явная параметрическая модель ковариации.
+    Pure numpy — нет внешних зависимостей.
+    """
+    global _mahalanobis_model, _mahalanobis_train_result
+
+    cfg = MahalanobisConfig(
+        threshold_percentile=request.threshold_percentile,
+        regularization=request.regularization,
+    )
+    _mahalanobis_model = MahalanobisDetector(cfg)
+
+    X = np.array(request.data, dtype=float)
+    result = _mahalanobis_model.fit(X)
+
+    _mahalanobis_train_result = {
+        "n_samples": result.n_samples,
+        "n_features": result.n_features,
+        "mean": result.mean,
+        "condition_number": result.condition_number,
+        "threshold": result.threshold,
+    }
+
+    return MahalanobisTrainResponse(
+        n_samples=result.n_samples,
+        n_features=result.n_features,
+        mean=result.mean,
+        condition_number=result.condition_number,
+        threshold=result.threshold,
+    )
+
+
+@app.post("/mahalanobis/detect", response_model=MahalanobisDetectResponse)
+def mahalanobis_detect(request: MahalanobisDetectRequest) -> MahalanobisDetectResponse:
+    """Обнаружить аномалии и объяснить вклад каждого признака.
+
+    Для каждой точки возвращает:
+    - is_anomaly: флаг аномалии
+    - mahalanobis_distance: сырое расстояние Махаланобиса
+    - anomaly_score: нормализованный score [0, 1]
+    - feature_contributions: вклад каждого признака (сумма = 1)
+    - top_feature: главная причина аномалии
+
+    Требует предварительного обучения: POST /mahalanobis/train.
+    """
+    if not _mahalanobis_model.is_fitted:
+        raise HTTPException(
+            status_code=400,
+            detail="Model not trained. Call POST /mahalanobis/train with normal data first.",
+        )
+
+    X = np.array(request.data, dtype=float)
+    results = _mahalanobis_model.detect(X)
+
+    point_results = [
+        MahalanobisPointResult(
+            is_anomaly=r.is_anomaly,
+            mahalanobis_distance=r.mahalanobis_distance,
+            anomaly_score=r.anomaly_score,
+            threshold=r.threshold,
+            feature_contributions=r.feature_contributions,
+            top_feature=r.top_feature,
+        )
+        for r in results
+    ]
+
+    n_anomalies = sum(1 for r in results if r.is_anomaly)
+    anomaly_rate = n_anomalies / len(results) if results else 0.0
+    mean_distance = float(np.mean([r.mahalanobis_distance for r in results]))
+
+    anomaly_features = [r.top_feature for r in results if r.is_anomaly]
+    top_anomalous_feature: str | None = None
+    if anomaly_features:
+        top_anomalous_feature = max(set(anomaly_features), key=anomaly_features.count)
+
+    return MahalanobisDetectResponse(
+        results=point_results,
+        n_anomalies=n_anomalies,
+        anomaly_rate=anomaly_rate,
+        top_anomalous_feature=top_anomalous_feature,
+        mean_distance=mean_distance,
+    )
+
+
+def _reset_mahalanobis_for_tests() -> None:
+    """Сбросить глобальное состояние Mahalanobis детектора для изоляции тестов."""
+    global _mahalanobis_model, _mahalanobis_train_result
+    _mahalanobis_model = MahalanobisDetector()
+    _mahalanobis_train_result = None
+
+
+@app.get("/mahalanobis/status")
+def mahalanobis_status() -> dict:
+    """Статус Mahalanobis детектора: обучен / не обучен, порог.
+
+    Полезно для health-check и Grafana мониторинга состояния модели.
+    """
+    status: dict = {"fitted": _mahalanobis_model.is_fitted}
+    if _mahalanobis_train_result is not None:
+        status["train_metrics"] = _mahalanobis_train_result
+    else:
+        status["message"] = "Model not trained. Call POST /mahalanobis/train to initialize."
     return status

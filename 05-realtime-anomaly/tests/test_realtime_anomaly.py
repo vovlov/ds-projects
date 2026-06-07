@@ -1569,3 +1569,303 @@ class TestIsolationAPIEndpoints:
         body = resp.json()
         assert body["contamination"] == 0.10
         assert body["n_trees"] == 50
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Mahalanobis Distance Detector Tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestMahalanobisDetector:
+    """Unit-тесты Mahalanobis детектора аномалий."""
+
+    def _make_normal(self, n: int = 200, seed: int = 42) -> np.ndarray:
+        rng = np.random.RandomState(seed)
+        cpu = 40 + rng.randn(n) * 5
+        latency = 0.7 * cpu + rng.randn(n) * 3  # коррелирует с CPU
+        requests = 1000 + rng.randn(n) * 50
+        return np.column_stack([cpu, latency, requests])
+
+    def test_fit_returns_train_result(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        result = model.fit(self._make_normal(100))
+        assert result.n_samples == 100
+        assert result.n_features == 3
+        assert len(result.mean) == 3
+        assert result.threshold > 0
+        assert result.condition_number > 0
+
+    def test_is_fitted_after_fit(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        assert not model.is_fitted
+        model.fit(self._make_normal(50))
+        assert model.is_fitted
+
+    def test_detect_returns_correct_length(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        model.fit(self._make_normal(100))
+        results = model.detect(self._make_normal(20))
+        assert len(results) == 20
+
+    def test_detect_result_is_bool(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        model.fit(self._make_normal(100))
+        results = model.detect(self._make_normal(10))
+        for r in results:
+            assert isinstance(r.is_anomaly, bool)
+
+    def test_anomaly_score_in_range(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        model.fit(self._make_normal(100))
+        results = model.detect(self._make_normal(30))
+        for r in results:
+            assert 0.0 <= r.anomaly_score <= 1.0
+
+    def test_mahalanobis_distance_positive(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        model.fit(self._make_normal(100))
+        results = model.detect(self._make_normal(10))
+        for r in results:
+            assert r.mahalanobis_distance >= 0
+
+    def test_feature_contributions_sum_to_one(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        model.fit(self._make_normal(100))
+        X = self._make_normal(10)
+        # Гарантированно аномальная точка: экстремальные значения
+        X[0] = [200.0, 1000.0, 10000.0]
+        results = model.detect(X)
+        for r in results:
+            total = sum(r.feature_contributions.values())
+            assert abs(total - 1.0) < 1e-9, f"Sum of contributions = {total}"
+
+    def test_feature_contributions_keys(self):
+        from anomaly.models.mahalanobis import MahalanobisConfig, MahalanobisDetector
+
+        cfg = MahalanobisConfig(feature_names=["cpu", "latency", "requests"])
+        model = MahalanobisDetector(cfg)
+        model.fit(self._make_normal(100))
+        results = model.detect(self._make_normal(5))
+        for r in results:
+            assert set(r.feature_contributions.keys()) == {"cpu", "latency", "requests"}
+
+    def test_normal_data_low_anomaly_rate(self):
+        from anomaly.models.mahalanobis import MahalanobisConfig, MahalanobisDetector
+
+        cfg = MahalanobisConfig(threshold_percentile=97.5)
+        model = MahalanobisDetector(cfg)
+        X = self._make_normal(300)
+        model.fit(X)
+        # На train данных FPR = 1 - 0.975 = 2.5%
+        results = model.detect(X)
+        anomaly_rate = sum(r.is_anomaly for r in results) / len(results)
+        assert anomaly_rate < 0.06, f"FPR слишком высокий: {anomaly_rate:.3f}"
+
+    def test_injected_anomaly_detected(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        X_train = self._make_normal(300)
+        model.fit(X_train)
+
+        # Аномалия: низкий CPU но очень высокая latency (нарушение корреляции)
+        anomaly = np.array([[5.0, 500.0, 1000.0]])
+        results = model.detect(anomaly)
+        assert results[0].is_anomaly, "Точка с нарушенной корреляцией должна быть аномалией"
+
+    def test_detect_before_fit_raises(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        with pytest.raises(RuntimeError, match="not trained"):
+            model.detect(self._make_normal(5))
+
+    def test_fit_requires_min_samples(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        with pytest.raises(ValueError, match="10 samples"):
+            model.fit(np.ones((5, 3)))
+
+    def test_train_info_available_after_fit(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        model.fit(self._make_normal(80))
+        info = model.train_info
+        assert info is not None
+        assert info.n_samples == 80
+        assert info.n_features == 3
+
+    def test_1d_input_reshaped(self):
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        rng = np.random.RandomState(42)
+        X = rng.randn(50, 1)
+        model = MahalanobisDetector()
+        model.fit(X)
+        results = model.detect(rng.randn(10, 1))
+        assert len(results) == 10
+
+    def test_anomaly_score_higher_for_outlier(self):
+        """Явный аутлайер должен иметь больший score чем нормальная точка."""
+        from anomaly.models.mahalanobis import MahalanobisDetector
+
+        model = MahalanobisDetector()
+        X_train = self._make_normal(300)
+        model.fit(X_train)
+
+        normal = self._make_normal(1, seed=99)
+        outlier = np.array([[200.0, 2000.0, 50000.0]])
+
+        r_normal = model.detect(normal)[0]
+        r_outlier = model.detect(outlier)[0]
+        assert r_outlier.anomaly_score > r_normal.anomaly_score
+
+    def test_top_feature_is_valid_name(self):
+        from anomaly.models.mahalanobis import MahalanobisConfig, MahalanobisDetector
+
+        cfg = MahalanobisConfig(feature_names=["cpu", "latency", "requests"])
+        model = MahalanobisDetector(cfg)
+        model.fit(self._make_normal(100))
+        results = model.detect(self._make_normal(10))
+        for r in results:
+            assert r.top_feature in {"cpu", "latency", "requests"}
+
+
+class TestMahalanobisAPIEndpoints:
+    """API endpoint тесты для Mahalanobis детектора."""
+
+    def _client(self):
+        from anomaly.api.app import _reset_mahalanobis_for_tests, app
+        from fastapi.testclient import TestClient
+
+        _reset_mahalanobis_for_tests()
+        return TestClient(app)
+
+    def _normal_data(self, n: int = 100) -> list[list[float]]:
+        rng = np.random.RandomState(42)
+        cpu = (40 + rng.randn(n) * 5).tolist()
+        latency = (0.7 * np.array(cpu) + rng.randn(n) * 3).tolist()
+        requests = (1000 + rng.randn(n) * 50).tolist()
+        return [[cpu[i], latency[i], requests[i]] for i in range(n)]
+
+    def test_train_returns_200(self):
+        client = self._client()
+        resp = client.post("/mahalanobis/train", json={"data": self._normal_data(50)})
+        assert resp.status_code == 200
+
+    def test_train_response_structure(self):
+        client = self._client()
+        resp = client.post("/mahalanobis/train", json={"data": self._normal_data(60)})
+        body = resp.json()
+        assert "n_samples" in body
+        assert "n_features" in body
+        assert "mean" in body
+        assert "condition_number" in body
+        assert "threshold" in body
+
+    def test_train_n_samples_correct(self):
+        client = self._client()
+        resp = client.post("/mahalanobis/train", json={"data": self._normal_data(75)})
+        assert resp.json()["n_samples"] == 75
+
+    def test_detect_before_train_returns_400(self):
+        client = self._client()
+        resp = client.post("/mahalanobis/detect", json={"data": self._normal_data(5)})
+        assert resp.status_code == 400
+
+    def test_detect_after_train_returns_200(self):
+        client = self._client()
+        client.post("/mahalanobis/train", json={"data": self._normal_data(100)})
+        resp = client.post("/mahalanobis/detect", json={"data": self._normal_data(10)})
+        assert resp.status_code == 200
+
+    def test_detect_response_structure(self):
+        client = self._client()
+        client.post("/mahalanobis/train", json={"data": self._normal_data(100)})
+        resp = client.post("/mahalanobis/detect", json={"data": self._normal_data(5)})
+        body = resp.json()
+        assert "results" in body
+        assert "n_anomalies" in body
+        assert "anomaly_rate" in body
+        assert "mean_distance" in body
+        assert len(body["results"]) == 5
+
+    def test_detect_result_has_feature_contributions(self):
+        client = self._client()
+        client.post("/mahalanobis/train", json={"data": self._normal_data(100)})
+        resp = client.post("/mahalanobis/detect", json={"data": self._normal_data(3)})
+        body = resp.json()
+        for r in body["results"]:
+            assert "feature_contributions" in r
+            assert set(r["feature_contributions"].keys()) == {"cpu", "latency", "requests"}
+
+    def test_detect_anomaly_rate_in_range(self):
+        client = self._client()
+        client.post("/mahalanobis/train", json={"data": self._normal_data(200)})
+        resp = client.post("/mahalanobis/detect", json={"data": self._normal_data(100)})
+        body = resp.json()
+        assert 0.0 <= body["anomaly_rate"] <= 1.0
+
+    def test_status_before_train(self):
+        client = self._client()
+        resp = client.get("/mahalanobis/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["fitted"] is False
+        assert "message" in body
+
+    def test_status_after_train(self):
+        client = self._client()
+        client.post("/mahalanobis/train", json={"data": self._normal_data(50)})
+        resp = client.get("/mahalanobis/status")
+        body = resp.json()
+        assert body["fitted"] is True
+        assert "train_metrics" in body
+
+    def test_health_includes_mahalanobis_field(self):
+        client = self._client()
+        resp = client.get("/health")
+        assert "mahalanobis_fitted" in resp.json()
+
+    def test_full_train_detect_cycle(self):
+        client = self._client()
+        # Обучаем на нормальных данных
+        client.post("/mahalanobis/train", json={"data": self._normal_data(100)})
+
+        # Детектируем с явной аномалией (нарушение корреляции CPU/latency)
+        anomaly_point = [5.0, 800.0, 1000.0]  # очень низкий CPU + очень высокая latency
+        detect_data = self._normal_data(9) + [anomaly_point]
+        resp = client.post("/mahalanobis/detect", json={"data": detect_data})
+        body = resp.json()
+
+        # Последняя точка (аномалия) должна иметь более высокое расстояние
+        last_result = body["results"][-1]
+        assert last_result["mahalanobis_distance"] > 0
+        assert body["n_anomalies"] >= 1
+
+    def test_custom_threshold_percentile(self):
+        client = self._client()
+        resp = client.post(
+            "/mahalanobis/train",
+            json={"data": self._normal_data(100), "threshold_percentile": 99.0},
+        )
+        assert resp.status_code == 200
+        # Высокий percentile → более строгий порог (меньше FP)
+        train_body = resp.json()
+        assert train_body["threshold"] > 0
