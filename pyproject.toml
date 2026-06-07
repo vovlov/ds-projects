@@ -73,6 +73,7 @@ fraud = [
 ]
 anomaly = [
     "numpy>=1.26",
+    "scikit-learn>=1.5",
     "kafka-python>=2.0",
     "redis>=5.2",
     "prometheus-client>=0.21",
