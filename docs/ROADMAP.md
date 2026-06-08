@@ -883,6 +883,36 @@
 - [x] Decoupled Confident Learning (DeCoLe) для обнаружения ошибок разметки (Project 10) — 2026-06-04
 - [x] LLM Guardrails: Input + Output Safety Layers для RAG (Project 02) — 2026-06-05
 - [x] Synthetic Data Generation (Gaussian Copula + ε-DP) для Data Quality Platform (Project 10) — 2026-06-06
+- [x] Prediction Distribution Monitoring (concept drift на выходе модели) — 2026-06-08
+      quality/monitoring/prediction_monitor.py: PredictionMonitor (скользящее окно, FIFO deque).
+      PSI на гистограмме предсказаний (BCBS Basel II критерии, адаптированные для outputs),
+      Welch z-test для mean shift, rate_delta для positive_rate shift.
+      Автоматическое установление reference window после min_reference_size наблюдений.
+      set_reference() для явной ротации версий модели (champion/challenger swap).
+      severity: PSI ≥ 0.2 → critical, PSI ≥ 0.1 → warning, < 0.1 → ok.
+      quality/api/app.py: 5 новых endpoint:
+        POST /predictions/observe (добавить батч предсказаний в скользящее окно, 201),
+        POST /predictions/reference (явно установить reference window, 201),
+        GET  /predictions/drift (PSI + z-test + rate_delta + severity, 400 если не готов),
+        GET  /predictions/status (is_ready, window sizes, total_observed, last_drift_check),
+        POST /predictions/reset (сброс для тестовой изоляции / новая версия модели).
+      44 новых теста: TestComputeHist×4, TestPSI×3, TestWelchZ×3,
+        TestPredictionMonitorCore×17 (observe, reference auto/explicit, detect, stats,
+        hist bins, rate_delta, status, reset, window_size, set_ref_requires_two),
+        TestPredictionMonitorAPI×17 (observe 201, structure, empty 422, reference 201,
+        drift 400 before/insufficient, drift 200 after, response structure,
+        critical detection, status, reset, full cycle).
+      496/496 тестов зелёных (+44, было 452). Lint clean.
+      Бизнес-эффект: Дополняет input feature drift (PSI/KS/Wasserstein/JS/χ²) мониторингом
+        выходного распределения — обнаруживает концептуальный дрейф (P(Y|X) меняется)
+        который невидим при стабильных входных признаках. Тройной охват: input + output + perf.
+        Пример: модель churn начинает предсказывать 90% вместо обычных 20% позитивных →
+        PSI > 0.2 → alert → переобучение. Без output monitoring это заметят только по
+        бизнес-метрикам через 2-4 недели.
+      Источники: Gama et al. 2014 ACM CSUR 46(4) (concept drift survey),
+        Bifet & Gavalda 2007 SDM'07 (ADWIN adaptive windowing),
+        BCBS Basel II PSI thresholds (адаптированы для prediction distribution),
+        Sculley et al. 2015 NeurIPS "Hidden Technical Debt in ML Systems".
       quality/synthetic/generator.py: SyntheticDataGenerator (Gaussian Copula).
       SyntheticConfig (n_samples, epsilon, seed, categorical_threshold),
       ColumnStats (continuous: μ/σ/range; categorical: empirical frequencies),

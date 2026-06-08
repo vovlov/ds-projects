@@ -26,6 +26,12 @@ from quality.alerts.alerting import AlertManager, LogAlertChannel, WebhookAlertC
 from quality.data.profiler import profile_dataframe
 from quality.label_quality.confid_learn import DecoupledConfidentLearning
 from quality.lineage.tracker import RunState, get_tracker
+from quality.monitoring.prediction_monitor import (
+    get_monitor as get_prediction_monitor,
+)
+from quality.monitoring.prediction_monitor import (
+    reset_prediction_monitor,
+)
 from quality.quality.drift import detect_drift
 from quality.quality.expectations import run_suite
 from quality.quality.stat_tests import batch_extended_drift
@@ -1320,3 +1326,115 @@ def synthetic_info() -> JSONResponse:
             ],
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Prediction Distribution Monitoring — concept drift на выходе модели
+# ---------------------------------------------------------------------------
+
+
+class ObserveRequest(BaseModel):
+    """Запрос на добавление предсказаний в монитор."""
+
+    predictions: list[float] = Field(
+        ...,
+        description="Вероятности или метки [0, 1]. Probabilities or binary labels.",
+        min_length=1,
+    )
+    window_size: int = Field(
+        default=1000, ge=10, description="Ёмкость скользящего окна / Sliding window capacity."
+    )
+    min_reference_size: int = Field(
+        default=200, ge=10, description="Минимум наблюдений для установки reference."
+    )
+
+
+class SetReferenceRequest(BaseModel):
+    """Явная установка референсного окна."""
+
+    predictions: list[float] = Field(
+        ..., min_length=2, description="Базовые предсказания модели (после деплоя)."
+    )
+
+
+@app.post("/predictions/observe", status_code=201, tags=["prediction_monitor"])
+def predictions_observe(req: ObserveRequest) -> JSONResponse:
+    """
+    Добавить предсказания в скользящее окно монитора.
+    Submit predictions to the sliding monitoring window.
+
+    Первые min_reference_size наблюдений автоматически формируют
+    reference window. Последующие наблюдения заполняют current window.
+    First min_reference_size observations auto-establish the reference.
+    Subsequent observations populate the current window.
+    """
+    monitor = get_prediction_monitor(
+        window_size=req.window_size,
+        min_reference_size=req.min_reference_size,
+    )
+    n_added = monitor.observe(req.predictions)
+    status = monitor.get_status()
+    return JSONResponse(
+        status_code=201,
+        content={
+            "n_added": n_added,
+            "status": status.to_dict(),
+        },
+    )
+
+
+@app.post("/predictions/reference", status_code=201, tags=["prediction_monitor"])
+def predictions_set_reference(req: SetReferenceRequest) -> JSONResponse:
+    """
+    Явно установить референсное окно (например, при ротации версии модели).
+    Explicitly set reference window (e.g., on model version rotation).
+
+    Сбрасывает current window и устанавливает новый reference.
+    Resets current window and sets new reference (champion/challenger swap).
+    """
+    monitor = get_prediction_monitor()
+    ref_stats = monitor.set_reference(req.predictions)
+    return JSONResponse(
+        status_code=201,
+        content={
+            "message": "Reference window set.",
+            "reference_stats": ref_stats.to_dict(),
+        },
+    )
+
+
+@app.get("/predictions/drift", tags=["prediction_monitor"])
+def predictions_detect_drift() -> JSONResponse:
+    """
+    Сравнить текущее окно с референсным и вернуть результат дрейфа.
+    Compare current window with reference and return drift result.
+
+    PSI ≥ 0.2 → critical drift, PSI ≥ 0.1 → warning, < 0.1 → ok.
+    Также вычисляется Welch z-test на разность средних и delta positive_rate.
+    """
+    monitor = get_prediction_monitor()
+    try:
+        result = monitor.detect_drift()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(content=result.to_dict())
+
+
+@app.get("/predictions/status", tags=["prediction_monitor"])
+def predictions_status() -> JSONResponse:
+    """
+    Текущее состояние монитора (размеры окон, is_ready).
+    Current monitor state (window sizes, is_ready flag).
+    """
+    monitor = get_prediction_monitor()
+    return JSONResponse(content=monitor.get_status().to_dict())
+
+
+@app.post("/predictions/reset", tags=["prediction_monitor"])
+def predictions_reset() -> JSONResponse:
+    """
+    Сбросить монитор предсказаний (новая версия модели или тест).
+    Reset prediction monitor (new model version or test isolation).
+    """
+    reset_prediction_monitor()
+    return JSONResponse(content={"message": "Prediction monitor reset."})
