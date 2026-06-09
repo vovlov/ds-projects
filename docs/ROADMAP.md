@@ -883,6 +883,29 @@
 - [x] Decoupled Confident Learning (DeCoLe) для обнаружения ошибок разметки (Project 10) — 2026-06-04
 - [x] LLM Guardrails: Input + Output Safety Layers для RAG (Project 02) — 2026-06-05
 - [x] Synthetic Data Generation (Gaussian Copula + ε-DP) для Data Quality Platform (Project 10) — 2026-06-06
+- [x] Entity Resolution / Record Deduplication (Project 10) — 2026-06-09
+      quality/deduplication/entity_resolver.py: EntityResolver — блокировка + попарное сравнение.
+      FieldConfig (name, weight, similarity_type: jaccard|exact|numeric, numeric_tolerance),
+      BlockingConfig (blocking_keys, threshold, max_comparisons), RecordPair, DeduplicationResult.
+      Алгоритм: prefix blocking (first 3 chars) → O(n²) → O(n·b); Jaccard на 3-граммах,
+        exact match (case-insensitive), numeric relative tolerance с линейным спадом.
+      Взвешенная агрегация field_similarities → record-level similarity score.
+      Дедупликация пар (normalized key set). deduplication_ratio в summary.
+      quality/api/app.py: 2 новых endpoint:
+        POST /deduplication/find (records + field_configs + blocking_keys + threshold → pairs),
+        GET  /deduplication/info (алгоритм + GDPR/EU AI Act/ISO 8000 compliance).
+      59 новых тестов: TestFieldConfig×4, TestBlockingConfig×4, TestRecordPair×2,
+        TestDeduplicationResult×2, TestJaccardSimilarity×7, TestExactSimilarity×4,
+        TestNumericSimilarity×6, TestEntityResolverCore×15, TestDeduplicationAPI×15.
+      143/143 тестов зелёных (+59, было 84 в доступных файлах). Lint clean.
+      Бизнес-эффект: CRM-дедупликация (MDM — Master Data Management) без внешних зависимостей.
+        GDPR Art.17 right-to-erasure: найти все записи о человеке перед удалением.
+        EU AI Act Art.10(3): governance над обучающими данными — дубликаты искажают обучение.
+        Пример: CRM-база 100K клиентов → blocking снижает сравнения с 5B до ~50K → за секунды.
+      Источники: Christen 2012 "Data Matching" Springer (blocking, Jaccard 3-grams),
+        Köpcke & Rahm 2010 VLDB J "Frameworks for entity matching" (weighted field aggregation),
+        Fellegi & Sunter 1969 JASA "A theory for record linkage" (probabilistic foundations).
+
 - [x] Prediction Distribution Monitoring (concept drift на выходе модели) — 2026-06-08
       quality/monitoring/prediction_monitor.py: PredictionMonitor (скользящее окно, FIFO deque).
       PSI на гистограмме предсказаний (BCBS Basel II критерии, адаптированные для outputs),

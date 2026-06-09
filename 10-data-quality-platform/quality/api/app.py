@@ -45,6 +45,12 @@ from quality.security.owasp import OWASPMLAudit
 from quality.security.pii_detector import detect_pii
 from quality.sla.monitor import get_monitor, reset_monitor
 from quality.sla.slo import SLIObservation, SLIType, SLODefinition
+from quality.deduplication.entity_resolver import (
+    BlockingConfig,
+    DeduplicationResult,
+    EntityResolver,
+    FieldConfig,
+)
 from quality.synthetic.generator import SyntheticConfig, SyntheticDataGenerator
 
 app = FastAPI(
@@ -1438,3 +1444,121 @@ def predictions_reset() -> JSONResponse:
     """
     reset_prediction_monitor()
     return JSONResponse(content={"message": "Prediction monitor reset."})
+
+
+# ---------------------------------------------------------------------------
+# Entity Resolution / Record Deduplication
+# ---------------------------------------------------------------------------
+
+
+class DeduplicationFieldConfig(BaseModel):
+    """Конфигурация поля для дедупликации / Field config for deduplication."""
+
+    name: str = Field(..., description="Имя поля / Field name")
+    weight: float = Field(1.0, gt=0, description="Вес поля в итоговом скоре / Field weight")
+    similarity_type: str = Field(
+        "jaccard",
+        description="Тип сходства: 'jaccard' (строки), 'exact' (категории), 'numeric' (числа)",
+    )
+    numeric_tolerance: float = Field(
+        0.1,
+        ge=0,
+        description="Относительный допуск для numeric / Relative tolerance for numeric fields",
+    )
+
+
+class DeduplicationRequest(BaseModel):
+    """Запрос на поиск дубликатов / Deduplication request."""
+
+    records: list[dict[str, Any]] = Field(
+        ..., min_length=2, description="Список записей для дедупликации / Records list"
+    )
+    id_field: str = Field(..., description="Поле-идентификатор записи / Record ID field")
+    field_configs: list[DeduplicationFieldConfig] = Field(
+        ..., min_length=1, description="Конфигурация полей сравнения / Fields to compare"
+    )
+    blocking_keys: list[str] = Field(
+        ..., min_length=1, description="Поля для блокировки (снижение O(n²)) / Blocking keys"
+    )
+    threshold: float = Field(
+        0.8, gt=0, le=1.0, description="Минимальное сходство для пары / Minimum similarity"
+    )
+    max_comparisons: int = Field(
+        100_000, ge=1, description="Лимит попарных сравнений / Max pairwise comparisons"
+    )
+
+
+@app.post("/deduplication/find", status_code=200, tags=["deduplication"])
+def deduplication_find(request: DeduplicationRequest) -> JSONResponse:
+    """
+    Найти дублирующиеся записи (Entity Resolution).
+
+    Алгоритм:
+      1. Blocking по блокирующим ключам → снижение числа сравнений с O(n²) до O(n·b)
+      2. Попарное сравнение в блоках: Jaccard (строки), exact (категории), numeric (числа)
+      3. Взвешенная агрегация по полям → record-level similarity
+      4. Пары с similarity >= threshold → дубликаты
+
+    Find duplicate records via blocking + pairwise field comparison.
+    """
+    field_cfgs = [
+        FieldConfig(
+            name=fc.name,
+            weight=fc.weight,
+            similarity_type=fc.similarity_type,
+            numeric_tolerance=fc.numeric_tolerance,
+        )
+        for fc in request.field_configs
+    ]
+    blocking_cfg = BlockingConfig(
+        blocking_keys=request.blocking_keys,
+        threshold=request.threshold,
+        max_comparisons=request.max_comparisons,
+    )
+    resolver = EntityResolver()
+    result: DeduplicationResult = resolver.resolve(
+        records=request.records,
+        id_field=request.id_field,
+        field_configs=field_cfgs,
+        blocking_config=blocking_cfg,
+    )
+    return JSONResponse(content=result.to_dict())
+
+
+@app.get("/deduplication/info", tags=["deduplication"])
+def deduplication_info() -> JSONResponse:
+    """
+    Информация об алгоритме дедупликации и соответствии стандартам.
+    Algorithm info and compliance metadata.
+    """
+    return JSONResponse(
+        content={
+            "algorithm": "Entity Resolution via Blocking + Jaccard/Exact/Numeric similarity",
+            "complexity": "O(n·b) where b = avg block size (vs O(n²) brute force)",
+            "similarity_types": {
+                "jaccard": "3-gram Jaccard similarity — robust to typos and reordering",
+                "exact": "Exact match after lowercase/strip normalization",
+                "numeric": "Relative difference with configurable tolerance",
+            },
+            "blocking": (
+                "Prefix blocking (first 3 chars per key) — tolerates minor typos "
+                "while reducing comparison space"
+            ),
+            "use_cases": [
+                "CRM customer deduplication (MDM — Master Data Management)",
+                "GDPR Art.17 right-to-erasure: find all records for a person",
+                "Data quality: detect duplicate entities before model training",
+                "EU AI Act Art.10(3): data governance and deduplication requirements",
+            ],
+            "compliance": {
+                "GDPR": "Article 5(1)(d) accuracy, Article 17 right to erasure",
+                "EU_AI_Act": "Article 10(3) data governance — training data quality",
+                "ISO_8000": "Data quality — entity identification and deduplication",
+            },
+            "references": [
+                "Christen 2012 'Data Matching' Springer — blocking & similarity",
+                "Köpcke & Rahm 2010 VLDB J 'Frameworks for entity matching'",
+                "Fellegi & Sunter 1969 JASA 'A theory for record linkage'",
+            ],
+        }
+    )
