@@ -32,6 +32,7 @@ from ..forecast.price_forecast import (
     HoltWintersForecaster,
     generate_price_history,
 )
+from ..models.comps import ComparableSearch, CompsConfig
 from ..models.quantile import QuantileRegressionModel
 from ..models.quantile import is_available as lgbm_available
 
@@ -49,6 +50,7 @@ _model = None
 _results = None
 _quantile_model: QuantileRegressionModel | None = None
 _quantile_calibration: dict | None = None
+_comps_search: ComparableSearch | None = None
 
 
 def _load_artifacts() -> tuple:
@@ -387,6 +389,115 @@ def _build_feature_array(prop: PropertyInput) -> np.ndarray:
         ],
         dtype=np.float64,
     ).reshape(1, -1)
+
+
+def _get_comps_search() -> ComparableSearch:
+    """Lazy-init базы аналогов (1000 объектов, seed=42)."""
+    global _comps_search
+    if _comps_search is None:
+        from ..data.load import generate_dataset
+
+        df = generate_dataset(n_rows=1000, seed=42)
+        records = df.to_dicts()
+        # Добавляем bedrooms для кодирования (уже есть в датасете)
+        _comps_search = ComparableSearch(CompsConfig()).fit(records)
+    return _comps_search
+
+
+def _reset_comps_search() -> None:
+    """Сбросить кэш базы аналогов (для тестовой изоляции)."""
+    global _comps_search
+    _comps_search = None
+
+
+class CompsRequest(BaseModel):
+    """Запрос на поиск аналогов."""
+
+    sqft: int = Field(..., ge=15, le=500, description="Площадь, кв.м")
+    bedrooms: int = Field(..., ge=1, le=10, description="Комнат")
+    year_built: int = Field(..., ge=1900, le=2026, description="Год постройки")
+    neighborhood: str = Field(..., description="Район Москвы")
+    condition: str = Field(..., description="Состояние квартиры")
+    estimated_price: int | None = Field(
+        None, ge=0, description="Оценочная цена для вычисления market_position"
+    )
+    n_comps: int = Field(5, ge=1, le=20, description="Число аналогов")
+
+
+class ComparableItem(BaseModel):
+    """Один объект-аналог."""
+
+    sqft: int
+    bedrooms: int
+    year_built: int
+    neighborhood: str
+    condition: str
+    price: int
+    price_per_sqft: float
+    similarity_score: float
+    distance: float
+
+
+class CompsResponse(BaseModel):
+    """Результат поиска аналогов с рыночным позиционированием."""
+
+    comparables: list[ComparableItem]
+    subject_price: int | None
+    median_comp_price: int
+    mean_comp_price: int
+    price_deviation_pct: float | None = Field(
+        None, description="Отклонение от медианного аналога, % (None если цена не передана)"
+    )
+    market_position: str | None = Field(
+        None,
+        description="above_market | at_market | below_market (None если цена не передана)",
+    )
+    n_comparables: int
+
+
+@app.post("/estimate/comps", response_model=CompsResponse)
+def estimate_comps(req: CompsRequest) -> CompsResponse:
+    """Найти K аналогичных объектов для обоснования оценки.
+
+    Возвращает K ближайших объектов из синтетической базы московской недвижимости
+    (1000 объектов, seed=42) по взвешенной нормализованной евклидовой дистанции.
+    Если передана estimated_price, вычисляет market_position относительно медианы аналогов.
+    """
+    searcher = _get_comps_search()
+
+    subject = {
+        "sqft": req.sqft,
+        "bedrooms": req.bedrooms,
+        "year_built": req.year_built,
+        "neighborhood": req.neighborhood,
+        "condition": req.condition,
+        "price": req.estimated_price,
+    }
+
+    result = searcher.find_comps(subject, n_comps=req.n_comps)
+
+    return CompsResponse(
+        comparables=[
+            ComparableItem(
+                sqft=c.sqft,
+                bedrooms=c.bedrooms,
+                year_built=c.year_built,
+                neighborhood=c.neighborhood,
+                condition=c.condition,
+                price=c.price,
+                price_per_sqft=c.price_per_sqft,
+                similarity_score=c.similarity_score,
+                distance=c.distance,
+            )
+            for c in result.comparables
+        ],
+        subject_price=result.subject_price,
+        median_comp_price=result.median_comp_price,
+        mean_comp_price=result.mean_comp_price,
+        price_deviation_pct=result.price_deviation_pct,
+        market_position=result.market_position,
+        n_comparables=result.n_comparables,
+    )
 
 
 @app.post("/estimate/intervals", response_model=PriceIntervalEstimate)

@@ -997,6 +997,31 @@
       Источники: Northcutt et al. 2021 JAIR 74:1-65 (Confident Learning),
         arXiv:2507.07216 (DeCoLe 2025: Bias-Aware Mislabeling Detection via DCL).
 
+- [x] Comparable Properties Analysis / K-NN Market Comps (Project 07) — 2026-06-10
+      pricing/models/comps.py: ComparableSearch — взвешенная нормализованная евклидова дистанция.
+      CompsConfig (n_comps, market_at_threshold_pct=5%, feature_weights: район×3 > состояние×1.5 > площадь×2).
+      _encode(): числовые признаки → min-max нормализация, категориальные (район/состояние) → ценовой
+        коэффициент из NEIGHBORHOODS/CONDITION_MAP → семантически точнее алфавитного кодирования:
+        «Раменки» (1.2) ближе к «Строгино» (0.95), чем к «Арбату» (1.9).
+      similarity_score = exp(-dist): 0 дистанция → 1.0, большая → ≈ 0 (интуитивный 0-1 диапазон).
+      market_position: (subject_price - median_comp) / median_comp × 100 → above/at/below_market (±5%).
+      pricing/api/app.py: _get_comps_search() lazy-init синтетической базы 1000 объектов (seed=42),
+        _reset_comps_search() для тестовой изоляции.
+        POST /estimate/comps (CompsRequest → CompsResponse): K аналогов + market_position + deviation_pct.
+      27 новых тестов: TestComparableSearchCore×16 (empty_raises, fit_sets_fitted, before_fit_raises,
+        n_comps, capped_by_db_size, sorted_by_distance, highest_similarity, similarity_range,
+        same_neighborhood_preferred, above_market, below_market, at_market, no_price_null,
+        median_in_range, price_per_sqft, to_dict_keys),
+        TestCompsAPIEndpoints×11 (200, structure, n_comps, comparable_fields, median_positive,
+        no_price_null, with_price_market_pos, sorted, 422_missing, 422_n_comps_zero, similarity_range).
+      111/111 тестов зелёных (+27, было 84). Lint clean.
+      Бизнес-эффект: риелтор/листинг-платформа видит «объект на 8% выше рынка — вот 5 похожих
+        квартир по 14-16М» вместо абстрактной оценки «чёрного ящика». Ключевой компонент AVM:
+        Zillow Zestimate, CoreLogic, ЦИАН AI-оценка используют comp-based adjustment.
+      Источники: Shiller 1993 "Measuring Asset Values for Cash Settlement in Derivative Markets"
+        (comparable sales), Zillow Zestimate methodology 2023 (KNN + hedonic adjustment),
+        ATTOM AVM Guide 2026 (weighted feature distance), CoreLogic AVM white paper 2024.
+
 ---
 
 ## Ежедневный цикл улучшений

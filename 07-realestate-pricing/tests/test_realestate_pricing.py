@@ -1008,3 +1008,252 @@ class TestPriceForecastAPI:
             assert item["trend_direction"] in ("rising", "stable"), (
                 f"{item['neighborhood']}: unexpected direction '{item['trend_direction']}'"
             )
+
+
+# ---------------------------------------------------------------------------
+# Comparable Properties Analysis (Market Comps)
+# ---------------------------------------------------------------------------
+
+
+def _make_prop(sqft, bedrooms, year_built, neighborhood, condition, price=None):
+    """Хелпер для создания словаря объекта недвижимости."""
+    d = {
+        "sqft": sqft,
+        "bedrooms": bedrooms,
+        "year_built": year_built,
+        "neighborhood": neighborhood,
+        "condition": condition,
+    }
+    if price is not None:
+        d["price"] = price
+    return d
+
+
+_SAMPLE_DB = [
+    _make_prop(60, 2, 2010, "Хамовники", "хорошее", 15_000_000),
+    _make_prop(70, 2, 2012, "Хамовники", "хорошее", 16_000_000),
+    _make_prop(55, 1, 2008, "Арбат", "хорошее", 14_000_000),
+    _make_prop(80, 3, 2015, "Хамовники", "отличное", 20_000_000),
+    _make_prop(45, 1, 2000, "Марьино", "удовлетворительное", 5_000_000),
+    _make_prop(90, 3, 2018, "Пресненский", "отличное", 22_000_000),
+    _make_prop(50, 2, 1980, "Бирюлёво", "удовлетворительное", 4_500_000),
+    _make_prop(65, 2, 2005, "Строгино", "хорошее", 9_000_000),
+]
+
+
+class TestComparableSearchCore:
+    """Юнит-тесты ComparableSearch на малой синтетической базе."""
+
+    @pytest.fixture
+    def fitted(self):
+        from pricing.models.comps import ComparableSearch, CompsConfig
+
+        config = CompsConfig(n_comps=3, market_at_threshold_pct=5.0)
+        return ComparableSearch(config).fit(_SAMPLE_DB)
+
+    def test_empty_database_raises(self) -> None:
+        from pricing.models.comps import ComparableSearch
+
+        with pytest.raises(ValueError, match="at least 1"):
+            ComparableSearch().fit([])
+
+    def test_fit_sets_is_fitted(self) -> None:
+        from pricing.models.comps import ComparableSearch
+
+        cs = ComparableSearch()
+        assert not cs._is_fitted
+        cs.fit(_SAMPLE_DB)
+        assert cs._is_fitted
+
+    def test_find_comps_before_fit_raises(self) -> None:
+        from pricing.models.comps import ComparableSearch
+
+        cs = ComparableSearch()
+        with pytest.raises(RuntimeError, match="fit"):
+            cs.find_comps(_make_prop(60, 2, 2010, "Хамовники", "хорошее"))
+
+    def test_find_comps_returns_n_comps(self, fitted) -> None:
+        subject = _make_prop(65, 2, 2011, "Хамовники", "хорошее")
+        result = fitted.find_comps(subject, n_comps=3)
+        assert result.n_comparables == 3
+        assert len(result.comparables) == 3
+
+    def test_find_comps_n_capped_by_database_size(self) -> None:
+        from pricing.models.comps import ComparableSearch
+
+        cs = ComparableSearch().fit(_SAMPLE_DB[:3])
+        result = cs.find_comps(_make_prop(60, 2, 2010, "Хамовники", "хорошее"), n_comps=10)
+        assert result.n_comparables <= 3
+
+    def test_comps_sorted_by_distance_ascending(self, fitted) -> None:
+        subject = _make_prop(65, 2, 2012, "Хамовники", "хорошее")
+        result = fitted.find_comps(subject, n_comps=3)
+        dists = [c.distance for c in result.comparables]
+        assert dists == sorted(dists), "Аналоги должны быть отсортированы по дистанции"
+
+    def test_nearest_has_highest_similarity(self, fitted) -> None:
+        subject = _make_prop(65, 2, 2012, "Хамовники", "хорошее")
+        result = fitted.find_comps(subject, n_comps=3)
+        sims = [c.similarity_score for c in result.comparables]
+        assert sims[0] >= sims[-1], "Первый аналог должен быть наиболее похожим"
+
+    def test_similarity_in_zero_one_range(self, fitted) -> None:
+        subject = _make_prop(60, 2, 2010, "Хамовники", "хорошее")
+        result = fitted.find_comps(subject)
+        for c in result.comparables:
+            assert 0.0 <= c.similarity_score <= 1.0
+
+    def test_same_neighborhood_preferred(self, fitted) -> None:
+        """Объект в том же районе должен иметь меньшую дистанцию, чем в другом."""
+        same = _make_prop(60, 2, 2010, "Хамовники", "хорошее")
+        diff = _make_prop(60, 2, 2010, "Бирюлёво", "хорошее")
+        r_same = fitted.find_comps(same, n_comps=1)
+        r_diff = fitted.find_comps(diff, n_comps=1)
+        assert r_same.comparables[0].distance < r_diff.comparables[0].distance
+
+    def test_market_position_above_market(self) -> None:
+        from pricing.models.comps import ComparableSearch, CompsConfig
+
+        db = [_make_prop(60, 2, 2010, "Хамовники", "хорошее", 10_000_000)] * 5
+        cs = ComparableSearch(CompsConfig(n_comps=5, market_at_threshold_pct=5.0)).fit(db)
+        subject = _make_prop(60, 2, 2010, "Хамовники", "хорошее", 12_000_000)
+        result = cs.find_comps(subject)
+        assert result.market_position == "above_market"
+
+    def test_market_position_below_market(self) -> None:
+        from pricing.models.comps import ComparableSearch, CompsConfig
+
+        db = [_make_prop(60, 2, 2010, "Хамовники", "хорошее", 10_000_000)] * 5
+        cs = ComparableSearch(CompsConfig(n_comps=5, market_at_threshold_pct=5.0)).fit(db)
+        subject = _make_prop(60, 2, 2010, "Хамовники", "хорошее", 8_000_000)
+        result = cs.find_comps(subject)
+        assert result.market_position == "below_market"
+
+    def test_market_position_at_market(self) -> None:
+        from pricing.models.comps import ComparableSearch, CompsConfig
+
+        db = [_make_prop(60, 2, 2010, "Хамовники", "хорошее", 10_000_000)] * 5
+        cs = ComparableSearch(CompsConfig(n_comps=5, market_at_threshold_pct=5.0)).fit(db)
+        subject = _make_prop(60, 2, 2010, "Хамовники", "хорошее", 10_200_000)
+        result = cs.find_comps(subject)
+        assert result.market_position == "at_market"
+
+    def test_no_price_gives_none_market_position(self, fitted) -> None:
+        subject = _make_prop(60, 2, 2010, "Хамовники", "хорошее")
+        result = fitted.find_comps(subject)
+        assert result.market_position is None
+        assert result.price_deviation_pct is None
+        assert result.subject_price is None
+
+    def test_median_price_within_comp_range(self, fitted) -> None:
+        subject = _make_prop(65, 2, 2010, "Хамовники", "хорошее")
+        result = fitted.find_comps(subject)
+        prices = [c.price for c in result.comparables]
+        assert min(prices) <= result.median_comp_price <= max(prices)
+
+    def test_price_per_sqft_positive(self, fitted) -> None:
+        subject = _make_prop(65, 2, 2010, "Хамовники", "хорошее")
+        for c in fitted.find_comps(subject).comparables:
+            assert c.price_per_sqft > 0
+
+    def test_to_dict_keys(self, fitted) -> None:
+        subject = _make_prop(65, 2, 2010, "Хамовники", "хорошее")
+        result = fitted.find_comps(subject)
+        d = result.to_dict()
+        expected_keys = (
+            "comparables",
+            "subject_price",
+            "median_comp_price",
+            "mean_comp_price",
+            "market_position",
+            "n_comparables",
+        )
+        for key in expected_keys:
+            assert key in d, f"Missing key: {key}"
+
+
+class TestCompsAPIEndpoints:
+    """Тесты POST /estimate/comps endpoint."""
+
+    @pytest.fixture
+    def client(self):
+        import pricing.api.app as api_module
+        from fastapi.testclient import TestClient
+        from pricing.api.app import app
+
+        api_module._reset_comps_search()
+        yield TestClient(app)
+        api_module._reset_comps_search()
+
+    _VALID = {
+        "sqft": 65,
+        "bedrooms": 2,
+        "year_built": 2010,
+        "neighborhood": "Хамовники",
+        "condition": "хорошее",
+        "n_comps": 5,
+    }
+
+    def test_comps_status_200(self, client) -> None:
+        resp = client.post("/estimate/comps", json=self._VALID)
+        assert resp.status_code == 200
+
+    def test_comps_response_structure(self, client) -> None:
+        data = client.post("/estimate/comps", json=self._VALID).json()
+        for key in ("comparables", "median_comp_price", "mean_comp_price", "n_comparables"):
+            assert key in data, f"Missing key: {key}"
+
+    def test_comps_n_comparables_matches_request(self, client) -> None:
+        resp = client.post("/estimate/comps", json={**self._VALID, "n_comps": 7}).json()
+        assert resp["n_comparables"] == 7
+        assert len(resp["comparables"]) == 7
+
+    def test_comps_comparable_fields(self, client) -> None:
+        data = client.post("/estimate/comps", json=self._VALID).json()
+        comp = data["comparables"][0]
+        expected = (
+            "sqft",
+            "bedrooms",
+            "year_built",
+            "neighborhood",
+            "condition",
+            "price",
+            "price_per_sqft",
+            "similarity_score",
+        )
+        for field in expected:
+            assert field in comp, f"Missing comparable field: {field}"
+
+    def test_comps_median_price_positive(self, client) -> None:
+        data = client.post("/estimate/comps", json=self._VALID).json()
+        assert data["median_comp_price"] > 0
+
+    def test_comps_no_price_market_position_null(self, client) -> None:
+        data = client.post("/estimate/comps", json=self._VALID).json()
+        assert data["market_position"] is None
+        assert data["price_deviation_pct"] is None
+
+    def test_comps_with_price_gives_market_position(self, client) -> None:
+        req = {**self._VALID, "estimated_price": 15_000_000}
+        data = client.post("/estimate/comps", json=req).json()
+        assert data["market_position"] in ("above_market", "at_market", "below_market")
+        assert data["price_deviation_pct"] is not None
+        assert data["subject_price"] == 15_000_000
+
+    def test_comps_sorted_by_distance(self, client) -> None:
+        data = client.post("/estimate/comps", json=self._VALID).json()
+        dists = [c["distance"] for c in data["comparables"]]
+        assert dists == sorted(dists)
+
+    def test_comps_validation_error_missing_fields(self, client) -> None:
+        resp = client.post("/estimate/comps", json={"sqft": 65})
+        assert resp.status_code == 422
+
+    def test_comps_validation_error_n_comps_zero(self, client) -> None:
+        resp = client.post("/estimate/comps", json={**self._VALID, "n_comps": 0})
+        assert resp.status_code == 422
+
+    def test_comps_similarity_scores_in_range(self, client) -> None:
+        data = client.post("/estimate/comps", json=self._VALID).json()
+        for c in data["comparables"]:
+            assert 0.0 <= c["similarity_score"] <= 1.0
