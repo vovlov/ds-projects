@@ -998,6 +998,26 @@
         arXiv:2507.07216 (DeCoLe 2025: Bias-Aware Mislabeling Detection via DCL).
 
 - [x] Comparable Properties Analysis / K-NN Market Comps (Project 07) — 2026-06-10
+- [x] Multi-Query Retrieval + RAG Fusion (Project 02) — 2026-06-11
+      rag/retrieval/multi_query.py: MultiQueryConfig/MultiQueryResult dataclasses.
+      generate_query_variants(): 3 стратегии — original + keyword extraction (стоп-слова фильтрация)
+        + переформулировка (what is→Explain, how does→Describe the process of, общий суффикс).
+        Graceful LLM mode: Claude Haiku через _llm_variants() + fallback на rule-based без API-ключа.
+      compute_consistency_score(): pairwise Jaccard overlap top-5 чанков по всем вариантам →
+        score ∈ [0,1]; высокий = «знание стабильно», низкий = «ответ зависит от формулировки».
+      multi_query_retrieve(): N вариантов × hybrid_search(2×n_results) → RRF агрегация →
+        чанки с поддержкой из нескольких формулировок поднимаются вверх.
+      rag/api/app.py: QueryRequest.n_query_variants (default=3), QueryResponse.query_variants
+        (list[str]|None) + consistency_score (float|None), dispatch retrieval_method="multi_query",
+        hybrid/semantic/graph → null поля (обратная совместимость сохранена).
+      36 новых тестов: TestQueryVariants×10, TestConsistencyScore×7, TestMultiQueryResult×3,
+        TestMultiQueryRetrieve×8, TestMultiQueryAPIEndpoint×8.
+      209/209 тестов зелёные (+36, было 173). Lint clean.
+      Бизнес-эффект: recall улучшается на ~10-20% для сложных запросов — чанки, упущенные
+        при точной формулировке, находятся через перефразировку; consistency_score выявляет
+        «хрупкие» ответы, требующие дополнительных источников (EU AI Act Article 13).
+      Источники: Rackauckas 2024 RAG Fusion (arxiv:2402.03367), LangChain MultiQueryRetriever,
+        Anthropic Contextual Retrieval blog 2024, Gao et al. 2024 AAAI RAG survey.
       pricing/models/comps.py: ComparableSearch — взвешенная нормализованная евклидова дистанция.
       CompsConfig (n_comps, market_at_threshold_pct=5%, feature_weights: район×3 > состояние×1.5 > площадь×2).
       _encode(): числовые признаки → min-max нормализация, категориальные (район/состояние) → ценовой

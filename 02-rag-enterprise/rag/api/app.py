@@ -17,6 +17,7 @@ from ..guardrails.output_guard import OutputGuard
 from ..ingestion.loader import chunk_documents, load_documents
 from ..knowledge_graph.graph import KnowledgeGraph
 from ..retrieval.hybrid import HybridIndex, hybrid_search
+from ..retrieval.multi_query import MultiQueryConfig, multi_query_retrieve
 from ..retrieval.store import get_client, get_or_create_collection, index_chunks
 
 app = FastAPI(title="RAG Enterprise API", version="2.0.0")
@@ -57,7 +58,8 @@ class QueryRequest(BaseModel):
     n_results: int = 5
     check_faithfulness: bool = True
     faithfulness_threshold: float = 0.5
-    retrieval_method: str = "hybrid"  # "hybrid" | "semantic" | "graph"
+    retrieval_method: str = "hybrid"  # "hybrid" | "semantic" | "graph" | "multi_query"
+    n_query_variants: int = 3  # для multi_query: число переформулировок
 
 
 class QueryResponse(BaseModel):
@@ -69,6 +71,8 @@ class QueryResponse(BaseModel):
     is_faithful: bool
     faithfulness_method: str
     retrieval_method: str
+    query_variants: list[str] | None = None  # заполняется при retrieval_method="multi_query"
+    consistency_score: float | None = None  # Jaccard overlap вариантов, 0–1
 
 
 @app.get("/health")
@@ -97,7 +101,19 @@ def query(request: QueryRequest) -> QueryResponse:
             retrieval_method=request.retrieval_method,
         )
 
-    if request.retrieval_method == "hybrid":
+    mq_result = None  # populated only for multi_query method
+
+    if request.retrieval_method == "multi_query":
+        mq_result = multi_query_retrieve(
+            request.question,
+            collection,
+            _hybrid_index,
+            n_results=request.n_results,
+            config=MultiQueryConfig(n_variants=request.n_query_variants),
+        )
+        context = mq_result.chunks
+        used_method = "multi_query"
+    elif request.retrieval_method == "hybrid":
         context = hybrid_search(
             request.question,
             collection,
@@ -150,6 +166,8 @@ def query(request: QueryRequest) -> QueryResponse:
         is_faithful=result["is_faithful"],
         faithfulness_method=result["faithfulness_method"],
         retrieval_method=used_method,
+        query_variants=mq_result.query_variants if mq_result else None,
+        consistency_score=mq_result.consistency_score if mq_result else None,
     )
 
 
