@@ -1042,6 +1042,32 @@
         (comparable sales), Zillow Zestimate methodology 2023 (KNN + hedonic adjustment),
         ATTOM AVM Guide 2026 (weighted feature distance), CoreLogic AVM white paper 2024.
 
+- [x] AST-based Code Complexity Metrics (Project 08) — 2026-06-12
+      review/analysis/ast_metrics.py: ASTAnalyzer — статический анализ без внешних зависимостей.
+      _cyclomatic_complexity(): McCabe 1976 CC (decision branches + 1), вложенные функции
+        не считаются в родительскую CC — у каждой своя независимая метрика.
+      _cognitive_complexity(): SonarQube-инспированная нагрузка на понимание (nesting-weighted):
+        +1 + nesting_level за if/for/while/except/with, +1 за вложенные функции/лямбды,
+        +1 за последовательность BoolOp независимо от числа операндов.
+      _halstead_volume(): (N1+N2)·log2(n1+n2) через AST-операторы (BinOp/UnaryOp/BoolOp/Compare)
+        и операнды (Name/Constant).
+      _maintainability_index(): Welker 1997 MI = max(0, (171-5.2ln(V)-0.23CC-16.2ln(LOC))·100/171).
+      Классификация риска: low(CC≤5) / medium(≤10) / high(≤15) / very_high(16+) (NIST SP 500-235).
+      review/api/app.py: 2 новых endpoint:
+        POST /analyze/complexity (Python code → per-function FunctionMetrics + high_risk_functions),
+        POST /analyze/complexity/review (генерирует review-комментарии для CC > threshold,
+          совместимые с POST /review для pipeline-интеграции как pre-filter перед LLM).
+      40 новых тестов: TestCyclomaticComplexity×8, TestCognitiveComplexity×6,
+        TestHalsteadVolume×4, TestMaintainabilityIndex×3, TestASTAnalyzer×9,
+        TestComplexityAPIEndpoints×10. 179/179 тестов зелёные (+40, было 139). Lint clean.
+      Бизнес-эффект: статический анализ как pre-filter перед LLM снижает стоимость ревью —
+        высококомплексные функции (CC>10) получают LLM review первыми, простые (CC≤5) пропускаются.
+        SonarQube: функции с CC>15 имеют дефектность в 4-8× выше среднего.
+      Источники: McCabe 1976 IEEE TSE 2(4), SonarQube Cognitive Complexity whitepaper v1.5 2023,
+        Halstead 1977 "Elements of Software Science" Elsevier,
+        Welker et al. 1997 CrossTalk "Software Maintainability Index Revisited",
+        arXiv:CEUR-2025 Decompositional Semantic Analysis via AST for LLM code quality.
+
 ---
 
 ## Ежедневный цикл улучшений
