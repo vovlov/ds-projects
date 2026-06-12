@@ -7,6 +7,7 @@ import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from ..analysis.ast_metrics import ASTAnalyzer, CodeMetrics
 from ..data.pr_dataset import get_pr_dataset, get_pr_stats
 from ..evaluation.golden_dataset import get_golden_dataset
 from ..evaluation.judge import JudgeVerdict, RegressionResult
@@ -354,3 +355,113 @@ def get_adapter_dataset_stats() -> dict:
     PR dataset statistics: total, by_category, by_domain, by_severity.
     """
     return get_pr_stats()
+
+
+# ── AST Complexity endpoints ──────────────────────────────────────────────────
+
+_ast_analyzer = ASTAnalyzer()
+
+
+class ComplexityRequest(BaseModel):
+    """Запрос на анализ сложности Python-кода. / Python code complexity analysis."""
+
+    code: str
+    """Исходный код Python. / Python source code to analyze."""
+
+    high_risk_threshold: int = 10
+    """CC выше этого значения → high risk. / CC above this → flagged as high risk."""
+
+
+class ComplexityReviewRequest(BaseModel):
+    """Запрос на code review с акцентом на сложные функции.
+
+    Анализирует сложность кода и генерирует review-комментарии
+    только для функций с CC > threshold (приоритизация LLM review).
+
+    Reviews high-complexity functions and returns review comments
+    in the same format as POST /review for pipeline integration.
+    """
+
+    code: str
+    cc_threshold: int = 10
+    """Функции с CC выше порога получают комментарий. / Functions above this get flagged."""
+
+
+@app.post("/analyze/complexity")
+def post_analyze_complexity(req: ComplexityRequest) -> dict:
+    """Статический AST-анализ Python-кода: CC + Cognitive + Halstead + MI.
+
+    Возвращает метрики сложности для каждой top-level функции и метода класса.
+    Функции с CC > high_risk_threshold попадают в high_risk_functions.
+
+    Static AST analysis: Cyclomatic Complexity (McCabe 1976),
+    Cognitive Complexity (SonarQube 2023), Halstead Volume,
+    Maintainability Index (Welker 1997).
+    """
+    if not req.code.strip():
+        return CodeMetrics(total_lines=0, parse_error="empty source").to_dict()
+
+    _ast_analyzer.HIGH_RISK_CC = req.high_risk_threshold
+    metrics: CodeMetrics = _ast_analyzer.analyze(req.code)
+
+    if metrics.parse_error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Python parse error: {metrics.parse_error}",
+        )
+
+    return metrics.to_dict()
+
+
+@app.post("/analyze/complexity/review")
+def post_analyze_complexity_review(req: ComplexityReviewRequest) -> dict:
+    """Автоматические review-комментарии для сложных функций.
+
+    Приоритизирует LLM-ревью: находит функции с CC > threshold,
+    генерирует структурированные комментарии в формате POST /review.
+    Позволяет использовать статический анализ как pre-filter перед LLM.
+
+    Generates structured review comments for high-complexity functions,
+    compatible with the ReviewResponse format for pipeline integration.
+    Saves LLM API budget by pre-filtering obvious structural issues.
+    """
+    if not req.code.strip():
+        return {"comments": [], "n_functions_analyzed": 0, "high_risk_count": 0}
+
+    _ast_analyzer.HIGH_RISK_CC = req.cc_threshold
+    metrics: CodeMetrics = _ast_analyzer.analyze(req.code)
+
+    if metrics.parse_error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Python parse error: {metrics.parse_error}",
+        )
+
+    comments = []
+    for func in metrics.functions:
+        if func.cyclomatic_complexity <= req.cc_threshold:
+            continue
+
+        severity = "major" if func.cyclomatic_complexity <= 15 else "critical"
+        comment_text = (
+            f"Function `{func.name}` has cyclomatic complexity {func.cyclomatic_complexity} "
+            f"(cognitive: {func.cognitive_complexity}, MI: {func.maintainability_index:.0f}/100). "
+            f"Risk: {func.risk_level.upper()}. Consider extracting decision branches into "
+            f"smaller helper functions to improve testability and maintainability."
+        )
+        comments.append(
+            {
+                "line": str(func.lineno),
+                "category": "performance",
+                "comment": comment_text,
+                "severity": severity,
+            }
+        )
+
+    return {
+        "comments": comments,
+        "n_functions_analyzed": metrics.n_functions,
+        "high_risk_count": len(metrics.high_risk_functions),
+        "average_cc": metrics.average_cc,
+        "max_cc": metrics.max_cc,
+    }

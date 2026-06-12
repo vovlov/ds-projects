@@ -1341,3 +1341,393 @@ class TestLoRAAdapterAPI:
         }
         resp = client.post("/adapter/train", json=payload)
         assert resp.status_code == 422
+
+
+# ── AST Metrics Unit Tests ────────────────────────────────────────────────────
+
+
+import ast as _ast
+
+from review.analysis.ast_metrics import (  # noqa: E402
+    ASTAnalyzer,
+    _cc_risk,
+    _cognitive_complexity,
+    _cyclomatic_complexity,
+    _halstead_volume,
+    _maintainability_index,
+)
+
+
+def _parse_func(src: str):
+    """Helper: parse a single top-level function."""
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            return node
+    raise ValueError("No function found in source")
+
+
+class TestCyclomaticComplexity:
+    """McCabe CC correctness tests."""
+
+    def test_simple_function_cc1(self):
+        src = "def f():\n    return 1\n"
+        assert _cyclomatic_complexity(_parse_func(src)) == 1
+
+    def test_one_if_cc2(self):
+        src = "def f(x):\n    if x:\n        return 1\n    return 0\n"
+        assert _cyclomatic_complexity(_parse_func(src)) == 2
+
+    def test_if_elif_cc3(self):
+        src = (
+            "def f(x):\n    if x > 0:\n        return 1\n"
+            "    elif x < 0:\n        return -1\n    return 0\n"
+        )
+        assert _cyclomatic_complexity(_parse_func(src)) == 3
+
+    def test_for_loop_cc2(self):
+        src = "def f(xs):\n    for x in xs:\n        pass\n    return xs\n"
+        assert _cyclomatic_complexity(_parse_func(src)) == 2
+
+    def test_except_handler_cc2(self):
+        src = "def f():\n    try:\n        pass\n    except ValueError:\n        pass\n"
+        assert _cyclomatic_complexity(_parse_func(src)) == 2
+
+    def test_boolean_and_adds_branch(self):
+        # 'a and b' → 1 additional branch (2 operands - 1)
+        src = "def f(a, b):\n    return a and b\n"
+        assert _cyclomatic_complexity(_parse_func(src)) == 2
+
+    def test_triple_and_adds_two(self):
+        src = "def f(a, b, c):\n    return a and b and c\n"
+        assert _cyclomatic_complexity(_parse_func(src)) == 3
+
+    def test_nested_function_not_counted(self):
+        # Inner function's if should NOT be counted in outer CC
+        src = (
+            "def outer():\n"
+            "    def inner(x):\n"
+            "        if x:\n"
+            "            return 1\n"
+            "    return inner\n"
+        )
+        # outer: no decisions → CC=1
+        assert _cyclomatic_complexity(_parse_func(src)) == 1
+
+
+class TestCognitiveComplexity:
+    """SonarQube-inspired Cognitive CC tests."""
+
+    def test_simple_function_zero(self):
+        src = "def f():\n    return 1\n"
+        assert _cognitive_complexity(_parse_func(src)) == 0
+
+    def test_one_if_increments(self):
+        src = "def f(x):\n    if x:\n        return 1\n    return 0\n"
+        # nesting=0 → +1
+        assert _cognitive_complexity(_parse_func(src)) == 1
+
+    def test_nested_if_has_nesting_bonus(self):
+        src = (
+            "def f(x, y):\n"
+            "    if x:\n"  # nesting=0 → +1
+            "        if y:\n"  # nesting=1 → +2
+            "            return 1\n"
+            "    return 0\n"
+        )
+        assert _cognitive_complexity(_parse_func(src)) == 3
+
+    def test_for_inside_if_nesting(self):
+        src = (
+            "def f(xs):\n"
+            "    if xs:\n"  # +1 (nesting=0)
+            "        for x in xs:\n"  # +2 (nesting=1)
+            "            pass\n"
+        )
+        assert _cognitive_complexity(_parse_func(src)) == 3
+
+    def test_boolean_sequence_counts_one(self):
+        src = "def f(a, b, c):\n    return a and b and c\n"
+        # One and/or sequence → +1
+        assert _cognitive_complexity(_parse_func(src)) == 1
+
+    def test_nested_function_increments(self):
+        src = (
+            "def outer():\n"
+            "    def inner():\n"  # nested func at nesting=0 → +1
+            "        pass\n"
+            "    return inner\n"
+        )
+        assert _cognitive_complexity(_parse_func(src)) == 1
+
+
+class TestHalsteadVolume:
+    """Halstead volume: volume > 0 for non-trivial code."""
+
+    def test_non_negative(self):
+        src = "def f():\n    return 1\n"
+        assert _halstead_volume(_parse_func(src)) >= 0
+
+    def test_complex_has_higher_volume(self):
+        simple = "def f(x):\n    return x\n"
+        complex_ = (
+            "def f(x, y, z):\n"
+            "    result = x + y * z\n"
+            "    if result > 0:\n"
+            "        return result / (x + 1)\n"
+            "    return -result\n"
+        )
+        v_simple = _halstead_volume(_parse_func(simple))
+        v_complex = _halstead_volume(_parse_func(complex_))
+        assert v_complex > v_simple
+
+    def test_operators_detected(self):
+        # BinOp should register operators
+        src = "def f(a, b):\n    return a + b - a * b\n"
+        vol = _halstead_volume(_parse_func(src))
+        assert vol > 0
+
+    def test_empty_body_no_crash(self):
+        src = "def f():\n    pass\n"
+        vol = _halstead_volume(_parse_func(src))
+        assert vol >= 0
+
+
+class TestMaintainabilityIndex:
+    """MI formula and range tests."""
+
+    def test_mi_in_0_100_range(self):
+        src = "def f(x):\n    return x + 1\n"
+        node = _parse_func(src)
+        hv = _halstead_volume(node)
+        cc = _cyclomatic_complexity(node)
+        loc = 1
+        mi = _maintainability_index(hv, cc, loc)
+        assert 0.0 <= mi <= 100.0
+
+    def test_simple_code_high_mi(self):
+        src = "def f(x):\n    return x + 1\n"
+        node = _parse_func(src)
+        hv = _halstead_volume(node)
+        cc = _cyclomatic_complexity(node)
+        loc = 2
+        mi = _maintainability_index(hv, cc, loc)
+        assert mi > 50.0
+
+    def test_risk_levels_correct(self):
+        assert _cc_risk(1) == "low"
+        assert _cc_risk(5) == "low"
+        assert _cc_risk(6) == "medium"
+        assert _cc_risk(10) == "medium"
+        assert _cc_risk(11) == "high"
+        assert _cc_risk(15) == "high"
+        assert _cc_risk(16) == "very_high"
+        assert _cc_risk(100) == "very_high"
+
+
+class TestASTAnalyzer:
+    """Full analyzer integration tests."""
+
+    def test_parse_valid_code(self):
+        src = "def f(x):\n    return x + 1\n"
+        analyzer = ASTAnalyzer()
+        result = analyzer.analyze(src)
+        assert result.parse_error is None
+        assert result.n_functions == 1
+
+    def test_parse_invalid_python(self):
+        analyzer = ASTAnalyzer()
+        result = analyzer.analyze("def f(\n  syntax error here\n")
+        assert result.parse_error is not None
+
+    def test_finds_class_methods(self):
+        src = (
+            "class Foo:\n"
+            "    def method_a(self, x):\n"
+            "        return x\n"
+            "    def method_b(self):\n"
+            "        pass\n"
+        )
+        analyzer = ASTAnalyzer()
+        result = analyzer.analyze(src)
+        assert result.n_functions == 2
+        names = {f.name for f in result.functions}
+        assert "method_a" in names and "method_b" in names
+
+    def test_metrics_fields_present(self):
+        src = "def f(x):\n    if x:\n        return 1\n    return 0\n"
+        analyzer = ASTAnalyzer()
+        result = analyzer.analyze(src)
+        d = result.functions[0].to_dict()
+        for key in [
+            "name",
+            "lineno",
+            "cyclomatic_complexity",
+            "cognitive_complexity",
+            "n_lines",
+            "n_params",
+            "halstead_volume",
+            "maintainability_index",
+            "risk_level",
+        ]:
+            assert key in d, f"Missing key: {key}"
+
+    def test_risk_level_high_for_complex(self):
+        # Build a function with CC > 10
+        branches = "\n".join(f"    elif x == {i}:\n        return {i}" for i in range(11))
+        src = f"def f(x):\n    if x == 0:\n        return 0\n{branches}\n    return -1\n"
+        analyzer = ASTAnalyzer()
+        result = analyzer.analyze(src)
+        assert result.functions[0].risk_level in ("high", "very_high")
+
+    def test_high_risk_functions_detected(self):
+        branches = "\n".join(f"    elif x == {i}:\n        return {i}" for i in range(12))
+        src = f"def f(x):\n    if x == 0:\n        return 0\n{branches}\n    return -1\n"
+        analyzer = ASTAnalyzer()
+        analyzer.HIGH_RISK_CC = 10
+        result = analyzer.analyze(src)
+        assert "f" in result.high_risk_functions
+
+    def test_no_functions_empty_result(self):
+        src = "x = 1\ny = 2\n"
+        analyzer = ASTAnalyzer()
+        result = analyzer.analyze(src)
+        assert result.n_functions == 0
+        assert result.high_risk_functions == []
+        assert result.max_cc == 0
+
+    def test_average_cc_computed(self):
+        src = "def f():\n    return 1\ndef g(x):\n    if x:\n        return 1\n    return 0\n"
+        analyzer = ASTAnalyzer()
+        result = analyzer.analyze(src)
+        # f: CC=1, g: CC=2 → average=1.5
+        assert result.average_cc == pytest.approx(1.5)
+
+    def test_empty_source(self):
+        analyzer = ASTAnalyzer()
+        result = analyzer.analyze("")
+        assert result.n_functions == 0
+
+
+# ── AST Complexity API Tests ─────────────────────────────────────────────────
+
+
+class TestComplexityAPIEndpoints:
+    """Integration tests for /analyze/complexity endpoints."""
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        from review.api.app import app
+
+        return TestClient(app)
+
+    _SIMPLE_CODE = "def add(a, b):\n    return a + b\n"
+
+    _COMPLEX_CODE = (
+        "def complex_func(x, y, z):\n"
+        "    if x > 0:\n"
+        "        if y > 0:\n"
+        "            for i in range(z):\n"
+        "                if i % 2 == 0:\n"
+        "                    x += i\n"
+        "    elif x < 0:\n"
+        "        while y > 0:\n"
+        "            try:\n"
+        "                y -= 1\n"
+        "            except Exception:\n"
+        "                break\n"
+        "    elif z > 100:\n"
+        "        return x and y and z\n"
+        "    return x + y + z\n"
+    )
+
+    def test_complexity_200(self):
+        resp = self._client().post("/analyze/complexity", json={"code": self._SIMPLE_CODE})
+        assert resp.status_code == 200
+
+    def test_complexity_response_structure(self):
+        data = self._client().post("/analyze/complexity", json={"code": self._SIMPLE_CODE}).json()
+        for key in [
+            "total_lines",
+            "n_functions",
+            "average_cc",
+            "max_cc",
+            "high_risk_functions",
+            "functions",
+        ]:
+            assert key in data, f"Missing key: {key}"
+
+    def test_function_found(self):
+        data = self._client().post("/analyze/complexity", json={"code": self._SIMPLE_CODE}).json()
+        assert data["n_functions"] == 1
+        assert data["functions"][0]["name"] == "add"
+
+    def test_high_risk_detected(self):
+        data = (
+            self._client()
+            .post(
+                "/analyze/complexity",
+                json={"code": self._COMPLEX_CODE, "high_risk_threshold": 5},
+            )
+            .json()
+        )
+        assert data["max_cc"] > 5
+        assert "complex_func" in data["high_risk_functions"]
+
+    def test_invalid_python_422(self):
+        resp = self._client().post(
+            "/analyze/complexity", json={"code": "def f(\n  broken syntax\n"}
+        )
+        assert resp.status_code == 422
+
+    def test_complexity_review_200(self):
+        resp = self._client().post(
+            "/analyze/complexity/review",
+            json={"code": self._COMPLEX_CODE, "cc_threshold": 5},
+        )
+        assert resp.status_code == 200
+
+    def test_complexity_review_structure(self):
+        data = (
+            self._client()
+            .post(
+                "/analyze/complexity/review",
+                json={"code": self._COMPLEX_CODE, "cc_threshold": 5},
+            )
+            .json()
+        )
+        for key in ["comments", "n_functions_analyzed", "high_risk_count", "average_cc", "max_cc"]:
+            assert key in data
+
+    def test_complexity_review_comment_for_high_cc(self):
+        data = (
+            self._client()
+            .post(
+                "/analyze/complexity/review",
+                json={"code": self._COMPLEX_CODE, "cc_threshold": 5},
+            )
+            .json()
+        )
+        assert len(data["comments"]) >= 1
+        c = data["comments"][0]
+        assert "cyclomatic complexity" in c["comment"].lower()
+        assert c["severity"] in ("major", "critical")
+
+    def test_simple_code_no_review_comments(self):
+        # CC=1 → below any threshold ≥ 1 → no comments
+        data = (
+            self._client()
+            .post(
+                "/analyze/complexity/review",
+                json={"code": self._SIMPLE_CODE, "cc_threshold": 10},
+            )
+            .json()
+        )
+        assert data["comments"] == []
+
+    def test_empty_code_no_crash(self):
+        resp = self._client().post(
+            "/analyze/complexity/review", json={"code": "   ", "cc_threshold": 5}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["comments"] == []
