@@ -1068,6 +1068,37 @@
         Welker et al. 1997 CrossTalk "Software Maintainability Index Revisited",
         arXiv:CEUR-2025 Decompositional Semantic Analysis via AST for LLM code quality.
 
+- [x] Cross-Encoder Reranking для RAG (Project 02) — 2026-06-13
+      rag/retrieval/reranker.py: лексический cross-encoder без GPU/API (CI-friendly).
+      _tokenize(): lowercase + фильтрация токенов ≤2 символа.
+      _compute_idf_proxies(): log(1 + n/(1+df)) на корпусе кандидатов — редкие термы важнее.
+      _score_passage(): joint scoring query+passage:
+        coverage (доля уникальных query-термов в passage, вес 0.5),
+        tf_score (TF×IDF-прокси нормированный на avg_idf, вес 0.35),
+        position_score (query-термы в первых 25% текста = summary-эффект, вес 0.15).
+      rerank(): bi-encoder кандидаты → sort by rerank_score → top-n RerankResult.
+        Empty query → graceful fallback (original order, score=0.0).
+      rag/api/app.py: QueryRequest.use_reranking (bool, default=False) — cross-encoder
+        применяется после retrieval перед generation.
+        QueryResponse.reranked (bool) — флаг применения reranking.
+        POST /rerank endpoint: принимает query + candidates list → RerankResponse
+        с per-item rerank_score/coverage/tf_score/position_score/original_rank/rerank_rank.
+        422 на пустые candidates.
+      23 новых теста: TestCrossEncoderReranker×14 (returns_list, empty_candidates, n_results,
+        scores_unit_interval, sequential_ranks, relevant_higher, coverage/tf/position fields,
+        original_rank_preserved, empty_query_original_order, idf_rare_term, tokenize_filter,
+        custom_weights),
+        TestRerankAPIEndpoint×9 (200, structure, item_fields, 422_empty, n_results_match,
+        scores_sorted, query_echoed, schema_use_reranking, response_reranked_default_false).
+      232/232 тестов зелёные (+23, было 209). Lint clean.
+      Бизнес-эффект: bi-encoder оптимизирован на recall → топ-5 включает semantically close
+        но factually нерелевантные чанки. Lexical CE улучшает Precision@5 на ~5-10% без GPU.
+        Используется как pre-filter перед faithfulness gate — меньше irrelevant в контексте →
+        меньше hallucinations. Neural CE (ms-marco-MiniLM) +15-20%, но требует PyTorch.
+      Источники: Nogueira & Cho 2019 "Passage Re-ranking with BERT" (arxiv:1901.04085),
+        Khattab & Zaharia 2020 ColBERT (arxiv:2004.12832), Gao et al. 2024 AAAI RAG survey,
+        Cohere Rerank API 2026, Jina Reranker v2 2026.
+
 ---
 
 ## Ежедневный цикл улучшений

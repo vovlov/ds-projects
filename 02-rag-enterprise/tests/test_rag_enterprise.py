@@ -1791,3 +1791,280 @@ class TestGuardrailsAPIEndpoints:
         client = self._get_client()
         data = client.get("/guardrails/config").json()
         assert data["input_guard"]["injection_patterns_count"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Cross-Encoder Reranking (unit tests)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossEncoderReranker:
+    """Unit-тесты для лексического cross-encoder reranker."""
+
+    def _make_chunks(self, texts: list[str]) -> list[dict]:
+        return [{"text": t, "metadata": {"source": f"doc_{i}.txt"}} for i, t in enumerate(texts)]
+
+    def test_rerank_returns_list(self):
+        from rag.retrieval.reranker import rerank
+
+        chunks = self._make_chunks(["machine learning overview", "deep neural networks"])
+        results = rerank("machine learning", chunks, n_results=2)
+        assert isinstance(results, list)
+
+    def test_rerank_empty_candidates_returns_empty(self):
+        from rag.retrieval.reranker import rerank
+
+        assert rerank("query", [], n_results=5) == []
+
+    def test_rerank_n_results_respected(self):
+        from rag.retrieval.reranker import rerank
+
+        chunks = self._make_chunks(["a b c", "d e f", "g h i", "j k l", "m n o"])
+        results = rerank("a b", chunks, n_results=3)
+        assert len(results) <= 3
+
+    def test_rerank_scores_in_unit_interval(self):
+        from rag.retrieval.reranker import rerank
+
+        chunks = self._make_chunks(["neural network training", "random forest classifier"])
+        results = rerank("neural network", chunks)
+        for r in results:
+            assert 0.0 <= r.rerank_score <= 1.0
+
+    def test_rerank_ranks_are_sequential(self):
+        from rag.retrieval.reranker import rerank
+
+        chunks = self._make_chunks(["cats and dogs", "dogs and cats", "fish and birds"])
+        results = rerank("cats dogs", chunks, n_results=3)
+        for i, r in enumerate(results):
+            assert r.rerank_rank == i
+
+    def test_relevant_chunk_scores_higher(self):
+        from rag.retrieval.reranker import rerank
+
+        relevant = "gradient descent optimization for neural networks training"
+        irrelevant = "cooking recipes pasta carbonara italian cuisine"
+        chunks = self._make_chunks([irrelevant, relevant])
+        results = rerank("gradient descent neural network", chunks, n_results=2)
+        # Relevant chunk should appear first
+        assert results[0].chunk["text"] == relevant
+
+    def test_coverage_field_in_result(self):
+        from rag.retrieval.reranker import rerank
+
+        chunks = self._make_chunks(["machine learning pipeline"])
+        results = rerank("machine learning", chunks)
+        assert hasattr(results[0], "coverage")
+        assert 0.0 <= results[0].coverage <= 1.0
+
+    def test_tf_score_field_in_result(self):
+        from rag.retrieval.reranker import rerank
+
+        chunks = self._make_chunks(["deep learning model training"])
+        results = rerank("deep learning", chunks)
+        assert hasattr(results[0], "tf_score")
+        assert 0.0 <= results[0].tf_score <= 1.0
+
+    def test_position_score_field_in_result(self):
+        from rag.retrieval.reranker import rerank
+
+        chunks = self._make_chunks(["recommendation system for ecommerce"])
+        results = rerank("recommendation", chunks)
+        assert hasattr(results[0], "position_score")
+        assert 0.0 <= results[0].position_score <= 1.0
+
+    def test_original_rank_preserved(self):
+        from rag.retrieval.reranker import rerank
+
+        chunks = self._make_chunks(["irrelevant text", "machine learning model"])
+        results = rerank("machine learning", chunks, n_results=2)
+        # The ML chunk is at index 1, so its original_rank should be 1
+        ml_result = next(r for r in results if "machine learning" in r.chunk["text"])
+        assert ml_result.original_rank == 1
+
+    def test_empty_query_returns_original_order(self):
+        from rag.retrieval.reranker import rerank
+
+        chunks = self._make_chunks(["alpha", "beta", "gamma"])
+        results = rerank("", chunks, n_results=3)
+        # Empty query: no reranking possible, returns in original order
+        assert len(results) == 3
+        for i, r in enumerate(results):
+            assert r.rerank_rank == i
+
+    def test_idf_proxies_rare_term_gets_higher_weight(self):
+        from rag.retrieval.reranker import _compute_idf_proxies
+
+        passages = ["machine learning", "deep learning", "machine learning model"]
+        proxies = _compute_idf_proxies({"machine", "learning", "rare_term"}, passages)
+        # "rare_term" not in any passage → higher IDF than "machine" (in 2/3)
+        assert proxies["rare_term"] > proxies["machine"]
+
+    def test_tokenize_filters_short_tokens(self):
+        from rag.retrieval.reranker import _tokenize
+
+        tokens = _tokenize("a bb ccc dddd")
+        # "a" and "bb" should be filtered (len ≤ 2)
+        assert "a" not in tokens
+        assert "bb" not in tokens
+        assert "ccc" in tokens
+        assert "dddd" in tokens
+
+    def test_rerank_config_custom_weights(self):
+        from rag.retrieval.reranker import RerankConfig, rerank
+
+        config = RerankConfig(coverage_weight=1.0, tf_weight=0.0, position_weight=0.0)
+        chunks = self._make_chunks(["policy rules for remote vpn access", "unrelated content here"])
+        results = rerank("policy vpn remote", chunks, n_results=2, config=config)
+        # With coverage_weight=1.0, the chunk with more query terms scores highest
+        assert results[0].rerank_score == results[0].coverage
+
+
+# ---------------------------------------------------------------------------
+# Cross-Encoder Reranking (API tests)
+# ---------------------------------------------------------------------------
+
+
+class TestRerankAPIEndpoint:
+    """API-тесты для POST /rerank endpoint."""
+
+    def _get_client(self):
+        from fastapi.testclient import TestClient
+        from rag.api.app import app
+
+        return TestClient(app)
+
+    def _make_candidates(self, texts: list[str]) -> list[dict]:
+        return [{"text": t, "metadata": {"source": "test.txt"}} for t in texts]
+
+    def test_rerank_returns_200(self):
+        client = self._get_client()
+        resp = client.post(
+            "/rerank",
+            json={
+                "query": "machine learning",
+                "candidates": self._make_candidates(["ml model", "cooking tips"]),
+                "n_results": 2,
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_rerank_response_structure(self):
+        client = self._get_client()
+        data = client.post(
+            "/rerank",
+            json={
+                "query": "retrieval augmented generation",
+                "candidates": self._make_candidates(
+                    ["rag pipeline for documents", "weather forecast"]
+                ),
+                "n_results": 2,
+            },
+        ).json()
+        assert "results" in data
+        assert "n_candidates" in data
+        assert "n_results" in data
+        assert "query" in data
+
+    def test_rerank_result_item_fields(self):
+        client = self._get_client()
+        data = client.post(
+            "/rerank",
+            json={
+                "query": "fraud detection",
+                "candidates": self._make_candidates(["fraud detection neural network"]),
+                "n_results": 1,
+            },
+        ).json()
+        item = data["results"][0]
+        assert "text" in item
+        assert "rerank_score" in item
+        assert "original_rank" in item
+        assert "rerank_rank" in item
+        assert "coverage" in item
+        assert "tf_score" in item
+        assert "position_score" in item
+
+    def test_rerank_422_on_empty_candidates(self):
+        client = self._get_client()
+        resp = client.post(
+            "/rerank",
+            json={"query": "test", "candidates": [], "n_results": 5},
+        )
+        assert resp.status_code == 422
+
+    def test_rerank_n_results_field_reflects_actual_count(self):
+        client = self._get_client()
+        data = client.post(
+            "/rerank",
+            json={
+                "query": "neural network",
+                "candidates": self._make_candidates(["a", "b", "c"]),
+                "n_results": 2,
+            },
+        ).json()
+        assert data["n_results"] == len(data["results"])
+        assert data["n_candidates"] == 3
+
+    def test_rerank_scores_sorted_descending(self):
+        client = self._get_client()
+        data = client.post(
+            "/rerank",
+            json={
+                "query": "machine learning classification",
+                "candidates": self._make_candidates(
+                    [
+                        "classification using random forest machine learning",
+                        "pasta carbonara recipe italian",
+                        "machine learning model for classification tasks",
+                    ]
+                ),
+                "n_results": 3,
+            },
+        ).json()
+        scores = [item["rerank_score"] for item in data["results"]]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_query_echoed_in_response(self):
+        client = self._get_client()
+        data = client.post(
+            "/rerank",
+            json={
+                "query": "unique query string xyz",
+                "candidates": self._make_candidates(["some text here"]),
+            },
+        ).json()
+        assert data["query"] == "unique query string xyz"
+
+    def test_query_request_use_reranking_field_in_schema(self):
+        """QueryRequest schema should accept use_reranking field."""
+        from rag.api.app import QueryRequest, QueryResponse
+
+        req = QueryRequest(question="what is vpn?", use_reranking=True)
+        assert req.use_reranking is True
+
+        # QueryResponse должен иметь поле reranked
+        resp = QueryResponse(
+            answer="test",
+            sources=[],
+            confidence_score=1.0,
+            is_faithful=True,
+            faithfulness_method="lexical",
+            retrieval_method="hybrid",
+            reranked=True,
+        )
+        assert resp.reranked is True
+
+    def test_query_response_reranked_defaults_false(self):
+        """QueryResponse.reranked должен по умолчанию быть False."""
+        from rag.api.app import QueryResponse
+
+        resp = QueryResponse(
+            answer="test",
+            sources=[],
+            confidence_score=1.0,
+            is_faithful=True,
+            faithfulness_method="lexical",
+            retrieval_method="hybrid",
+        )
+        assert resp.reranked is False

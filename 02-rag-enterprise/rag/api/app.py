@@ -18,6 +18,7 @@ from ..ingestion.loader import chunk_documents, load_documents
 from ..knowledge_graph.graph import KnowledgeGraph
 from ..retrieval.hybrid import HybridIndex, hybrid_search
 from ..retrieval.multi_query import MultiQueryConfig, multi_query_retrieve
+from ..retrieval.reranker import RerankConfig, rerank
 from ..retrieval.store import get_client, get_or_create_collection, index_chunks
 
 app = FastAPI(title="RAG Enterprise API", version="2.0.0")
@@ -60,6 +61,7 @@ class QueryRequest(BaseModel):
     faithfulness_threshold: float = 0.5
     retrieval_method: str = "hybrid"  # "hybrid" | "semantic" | "graph" | "multi_query"
     n_query_variants: int = 3  # для multi_query: число переформулировок
+    use_reranking: bool = False  # cross-encoder lexical reranking после первичного поиска
 
 
 class QueryResponse(BaseModel):
@@ -73,6 +75,7 @@ class QueryResponse(BaseModel):
     retrieval_method: str
     query_variants: list[str] | None = None  # заполняется при retrieval_method="multi_query"
     consistency_score: float | None = None  # Jaccard overlap вариантов, 0–1
+    reranked: bool = False  # был ли применён cross-encoder reranking
 
 
 @app.get("/health")
@@ -144,6 +147,13 @@ def query(request: QueryRequest) -> QueryResponse:
         context = semantic_search(request.question, collection, n_results=request.n_results)
         used_method = "semantic"
 
+    # Optional cross-encoder lexical reranking
+    did_rerank = False
+    if request.use_reranking and context:
+        rerank_results = rerank(request.question, context, n_results=request.n_results)
+        context = [r.chunk for r in rerank_results]
+        did_rerank = True
+
     if request.check_faithfulness:
         result = generate_answer_with_gate(
             query=request.question,
@@ -168,6 +178,7 @@ def query(request: QueryRequest) -> QueryResponse:
         retrieval_method=used_method,
         query_variants=mq_result.query_variants if mq_result else None,
         consistency_score=mq_result.consistency_score if mq_result else None,
+        reranked=did_rerank,
     )
 
 
@@ -357,6 +368,92 @@ def graph_entity(entity_key: str):
     if not subgraph["found"] and not subgraph["nodes"]:
         raise HTTPException(status_code=404, detail=f"Entity '{entity_key}' not found in graph")
     return subgraph
+
+
+# ---------------------------------------------------------------------------
+# Reranking endpoint
+# ---------------------------------------------------------------------------
+
+
+class RerankRequest(BaseModel):
+    """Запрос на cross-encoder reranking списка чанков по запросу."""
+
+    query: str
+    candidates: list[dict]  # список чанков {"text": ..., "metadata": {...}}
+    n_results: int = 5
+    coverage_weight: float = 0.5
+    tf_weight: float = 0.35
+    position_weight: float = 0.15
+
+
+class RerankResponseItem(BaseModel):
+    """Один переранжированный чанк с объяснением скора."""
+
+    text: str
+    rerank_score: float
+    original_rank: int
+    rerank_rank: int
+    coverage: float
+    tf_score: float
+    position_score: float
+    metadata: dict = {}
+
+
+class RerankResponse(BaseModel):
+    """Результат cross-encoder reranking."""
+
+    results: list[RerankResponseItem]
+    n_candidates: int
+    n_results: int
+    query: str
+
+
+@app.post("/rerank", response_model=RerankResponse)
+def rerank_chunks(request: RerankRequest) -> RerankResponse:
+    """Переранжировать чанки по запросу через лексический cross-encoder.
+
+    Полезно когда bi-encoder (ChromaDB) возвращает семантически близкие,
+    но фактически нерелевантные чанки. Cross-encoder даёт joint scoring
+    (query + passage вместе) — лучше precision без GPU/API overhead.
+
+    Алгоритм:
+    - Coverage: доля query-термов найденных в passage
+    - TF-weighted score с IDF-прокси (редкие термы важнее)
+    - Position bonus: термы в первой 25% пассажа (summary-эффект)
+
+    Источники: Nogueira & Cho 2019 (arxiv:1901.04085), Khattab & Zaharia 2020 ColBERT.
+    """
+    if not request.candidates:
+        raise HTTPException(status_code=422, detail="candidates list is empty")
+
+    config = RerankConfig(
+        coverage_weight=request.coverage_weight,
+        tf_weight=request.tf_weight,
+        position_weight=request.position_weight,
+    )
+
+    results = rerank(request.query, request.candidates, n_results=request.n_results, config=config)
+
+    items = [
+        RerankResponseItem(
+            text=r.chunk.get("text", ""),
+            rerank_score=r.rerank_score,
+            original_rank=r.original_rank,
+            rerank_rank=r.rerank_rank,
+            coverage=r.coverage,
+            tf_score=r.tf_score,
+            position_score=r.position_score,
+            metadata=r.chunk.get("metadata", {}),
+        )
+        for r in results
+    ]
+
+    return RerankResponse(
+        results=items,
+        n_candidates=len(request.candidates),
+        n_results=len(items),
+        query=request.query,
+    )
 
 
 # ---------------------------------------------------------------------------
