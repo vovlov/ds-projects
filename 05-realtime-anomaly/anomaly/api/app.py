@@ -8,6 +8,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from ..metrics.prometheus_exporter import AnomalyMetrics, is_available
+from ..models.cusum import CUSUMConfig, CUSUMDetector
 from ..models.detector import MultiMetricDetector
 from ..models.isolation import IsolationConfig, IsolationForestDetector
 from ..models.isolation import is_available as isolation_available
@@ -16,9 +17,9 @@ from ..models.lstm_autoencoder import LSTMConfig, create_autoencoder
 app = FastAPI(
     title="Realtime Anomaly Detection API",
     description="Detect anomalies in metric time series with Prometheus observability, "
-    "MMD drift detection, LSTM/ESN autoencoder serving, and Isolation Forest with "
-    "feature-level explainability",
-    version="5.0.0",
+    "MMD drift detection, LSTM/ESN autoencoder serving, Isolation Forest with "
+    "feature-level explainability, and CUSUM sequential change detection",
+    version="6.0.0",
 )
 
 detector = MultiMetricDetector(window_size=50, threshold_sigma=3.0)
@@ -47,6 +48,16 @@ _lstm_train_result: dict | None = None
 # Isolation Forest — инициализируется при /isolation/train.
 _isolation_model = IsolationForestDetector()
 _isolation_train_result: dict | None = None
+
+# CUSUM детектор — инициализируется при /cusum/calibrate.
+# Один детектор на сервис (production singleton pattern).
+_cusum_detector = CUSUMDetector()
+
+
+def _reset_cusum() -> None:
+    """Пересоздать детектор — используется в тестах для изоляции."""
+    global _cusum_detector
+    _cusum_detector = CUSUMDetector()
 
 
 class MetricPoint(BaseModel):
@@ -576,3 +587,190 @@ def isolation_status() -> dict:
     else:
         status["message"] = "Model not trained. Call POST /isolation/train to initialize."
     return status
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CUSUM Change Detection endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class CUSUMCalibrateRequest(BaseModel):
+    """Откалибровать CUSUM на нормальных данных (оценить μ₀ и σ₀).
+
+    data: одномерный ряд значений в нормальном режиме (без аномалий).
+    Рекомендуется: не менее 50 точек для стабильной оценки.
+    k: slack параметр — 0.5σ для обнаружения сдвига в 1σ (стандарт).
+    h: порог решения — 5 (ARL₀ ≈ 465, т.е. одна ложная тревога на ~500 норм. точек).
+    """
+
+    data: list[float] = Field(
+        ...,
+        description="Univariate normal-regime time series for calibration",
+        min_length=10,
+    )
+    k: float = Field(default=0.5, ge=0.1, le=2.0, description="Slack parameter")
+    h: float = Field(default=5.0, ge=1.0, le=20.0, description="Decision threshold")
+
+
+class CUSUMCalibrateResponse(BaseModel):
+    mu_ref: float
+    sigma_ref: float
+    n_calibration: int
+    k: float
+    h: float
+
+
+class CUSUMDetectRequest(BaseModel):
+    """Батч-детекция CUSUM по временному ряду.
+
+    data: одномерный ряд значений (может содержать аномалии).
+    Требует предварительной калибровки: POST /cusum/calibrate.
+    """
+
+    data: list[float] = Field(
+        ...,
+        description="Univariate time series to scan for change points",
+        min_length=1,
+    )
+
+
+class CUSUMDetectResponse(BaseModel):
+    s_pos: list[float]
+    s_neg: list[float]
+    predictions: list[int]
+    change_points: list[int]
+    mu_ref: float
+    sigma_ref: float
+    threshold_k: float
+    threshold_h: float
+    n_alerts: int
+
+
+class CUSUMUpdateRequest(BaseModel):
+    """Онлайн-обновление CUSUM одной точкой (streaming mode).
+
+    value: новое наблюдение метрики.
+    Возвращает текущие S⁺/S⁻ и флаг тревоги. Состояние сохраняется между вызовами.
+    """
+
+    value: float = Field(..., description="Single new observation")
+
+
+class CUSUMUpdateResponse(BaseModel):
+    s_pos: float
+    s_neg: float
+    is_alert: bool
+    n_updates: int
+    n_alerts: int
+
+
+@app.post("/cusum/calibrate", response_model=CUSUMCalibrateResponse)
+def cusum_calibrate(request: CUSUMCalibrateRequest) -> CUSUMCalibrateResponse:
+    """Откалибровать CUSUM детектор на нормальных данных.
+
+    Оценивает μ₀ и σ₀ по выборке нормального режима.
+    Сбрасывает накопленные S⁺ и S⁻ в 0 (готов к новому мониторингу).
+
+    CUSUM улавливает персистентный сдвиг, который Z-score игнорирует:
+    если CPU каждые 5 минут растёт на 0.5σ, через 10 точек S⁺ > h.
+    Z-score в этот момент показывает лишь «нормальные» 0.5σ всплески.
+    """
+    _reset_cusum()
+    cfg = CUSUMConfig(k=request.k, h=request.h)
+    global _cusum_detector
+    _cusum_detector = CUSUMDetector(cfg)
+
+    data = np.array(request.data, dtype=float)
+    result = _cusum_detector.calibrate(data)
+
+    return CUSUMCalibrateResponse(
+        mu_ref=result.mu_ref,
+        sigma_ref=result.sigma_ref,
+        n_calibration=result.n_calibration,
+        k=result.k,
+        h=result.h,
+    )
+
+
+@app.post("/cusum/detect", response_model=CUSUMDetectResponse)
+def cusum_detect(request: CUSUMDetectRequest) -> CUSUMDetectResponse:
+    """Батч-детекция точек смены режима в временном ряду.
+
+    Self-resetting: после каждой тревоги CUSUM сбрасывается,
+    что позволяет обнаружить несколько смен в одном вызове.
+
+    change_points: индексы, где произошло обнаружение смены.
+    s_pos / s_neg: полный путь статистик — полезно для визуализации в Grafana.
+
+    Требует предварительной калибровки: POST /cusum/calibrate.
+    """
+    if not _cusum_detector.is_calibrated:
+        raise HTTPException(
+            status_code=400,
+            detail="CUSUM not calibrated. Call POST /cusum/calibrate with normal data first.",
+        )
+
+    data = np.array(request.data, dtype=float)
+    result = _cusum_detector.detect(data)
+
+    return CUSUMDetectResponse(
+        s_pos=result.s_pos,
+        s_neg=result.s_neg,
+        predictions=result.predictions,
+        change_points=result.change_points,
+        mu_ref=result.mu_ref,
+        sigma_ref=result.sigma_ref,
+        threshold_k=result.threshold_k,
+        threshold_h=result.threshold_h,
+        n_alerts=result.n_alerts,
+    )
+
+
+@app.post("/cusum/update", response_model=CUSUMUpdateResponse)
+def cusum_update(request: CUSUMUpdateRequest) -> CUSUMUpdateResponse:
+    """Онлайн-обновление CUSUM одной точкой (режим стриминга).
+
+    Предназначен для real-time мониторинга: каждые N секунд новая метрика →
+    немедленный ответ is_alert. Не требует хранения истории — весь контекст
+    в S⁺ и S⁻. Идеален как Prometheus AlertManager hook.
+
+    Требует предварительной калибровки: POST /cusum/calibrate.
+    """
+    if not _cusum_detector.is_calibrated:
+        raise HTTPException(
+            status_code=400,
+            detail="CUSUM not calibrated. Call POST /cusum/calibrate with normal data first.",
+        )
+
+    result = _cusum_detector.update(request.value)
+
+    return CUSUMUpdateResponse(
+        s_pos=result.s_pos,
+        s_neg=result.s_neg,
+        is_alert=result.is_alert,
+        n_updates=result.n_updates,
+        n_alerts=result.n_alerts,
+    )
+
+
+@app.get("/cusum/status")
+def cusum_status() -> dict:
+    """Состояние CUSUM детектора: откалиброван ли, текущие S⁺/S⁻, счётчики.
+
+    Полезно для Grafana dashboard: построить gauge S⁺ и S⁻,
+    нарисовать горизонтальную линию h — визуальный proximity-to-alert.
+    """
+    state = _cusum_detector.get_state()
+    result: dict = {
+        "is_calibrated": state.is_calibrated,
+        "s_pos": state.s_pos,
+        "s_neg": state.s_neg,
+        "n_updates": state.n_updates,
+        "n_alerts": state.n_alerts,
+    }
+    if state.is_calibrated:
+        result["mu_ref"] = state.mu_ref
+        result["sigma_ref"] = state.sigma_ref
+    else:
+        result["message"] = "Not calibrated. Call POST /cusum/calibrate first."
+    return result

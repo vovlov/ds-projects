@@ -1569,3 +1569,329 @@ class TestIsolationAPIEndpoints:
         body = resp.json()
         assert body["contamination"] == 0.10
         assert body["n_trees"] == 50
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CUSUM Change Detection
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestCUSUMDetector:
+    """Юнит-тесты алгоритма CUSUM Page 1954."""
+
+    def _normal_series(self, n: int = 200, seed: int = 7) -> np.ndarray:
+        rng = np.random.RandomState(seed)
+        return rng.randn(n)
+
+    def test_calibrate_returns_mu_sigma(self):
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        data = self._normal_series(100)
+        res = det.calibrate(data)
+        assert abs(res.mu_ref - float(data.mean())) < 1e-10
+        assert res.sigma_ref > 0
+        assert res.n_calibration == 100
+
+    def test_calibrate_sets_is_calibrated(self):
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        assert not det.is_calibrated
+        det.calibrate(self._normal_series(50))
+        assert det.is_calibrated
+
+    def test_calibrate_too_few_raises(self):
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        with pytest.raises(ValueError):
+            det.calibrate(np.array([1.0, 2.0, 3.0]))
+
+    def test_detect_before_calibrate_raises(self):
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        with pytest.raises(RuntimeError):
+            det.detect(np.array([1.0, 2.0, 3.0]))
+
+    def test_detect_returns_correct_length(self):
+        from anomaly.models.cusum import CUSUMConfig, CUSUMDetector
+
+        det = CUSUMDetector(CUSUMConfig(k=0.5, h=5.0))
+        det.calibrate(self._normal_series(100))
+        series = self._normal_series(80, seed=13)
+        res = det.detect(series)
+        assert len(res.s_pos) == 80
+        assert len(res.s_neg) == 80
+        assert len(res.predictions) == 80
+
+    def test_detect_normal_data_few_alerts(self):
+        """Нормальные данные → CUSUM редко превышает порог h=5."""
+        from anomaly.models.cusum import CUSUMConfig, CUSUMDetector
+
+        rng = np.random.RandomState(99)
+        det = CUSUMDetector(CUSUMConfig(k=0.5, h=5.0))
+        det.calibrate(rng.randn(300))
+        # Тест на 1000 точках — при ARL₀≈465 ожидаем ~2 ложных тревоги
+        series = rng.randn(1000)
+        res = det.detect(series)
+        alert_rate = sum(res.predictions) / len(res.predictions)
+        assert alert_rate < 0.05  # менее 5% ложных тревог
+
+    def test_detect_persistent_shift_triggers_alert(self):
+        """CUSUM обнаруживает устойчивый сдвиг среднего на 2σ."""
+        from anomaly.models.cusum import CUSUMConfig, CUSUMDetector
+
+        rng = np.random.RandomState(0)
+        det = CUSUMDetector(CUSUMConfig(k=0.5, h=5.0))
+        det.calibrate(rng.randn(200))
+        # Ряд: сначала нормально, потом устойчивый сдвиг +2σ
+        normal_part = rng.randn(50)
+        shifted_part = rng.randn(100) + 3.0  # явный сдвиг вверх
+        series = np.concatenate([normal_part, shifted_part])
+        res = det.detect(series)
+        # Должны найти хотя бы одну тревогу в shifted_part (после индекса 50)
+        alerts_in_shift = [cp for cp in res.change_points if cp >= 50]
+        assert len(alerts_in_shift) >= 1
+
+    def test_detect_change_points_are_valid_indices(self):
+        from anomaly.models.cusum import CUSUMConfig, CUSUMDetector
+
+        rng = np.random.RandomState(5)
+        det = CUSUMDetector(CUSUMConfig(k=0.5, h=4.0))
+        det.calibrate(rng.randn(100))
+        series = np.concatenate([rng.randn(50), rng.randn(50) + 4.0])
+        res = det.detect(series)
+        for cp in res.change_points:
+            assert 0 <= cp < len(series)
+
+    def test_s_pos_non_negative(self):
+        """S⁺ₜ = max(0, ...) всегда ≥ 0."""
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        det.calibrate(self._normal_series(100))
+        res = det.detect(self._normal_series(200, seed=99))
+        assert all(s >= 0 for s in res.s_pos)
+
+    def test_s_neg_non_negative(self):
+        """S⁻ₜ = max(0, ...) всегда ≥ 0."""
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        det.calibrate(self._normal_series(100))
+        res = det.detect(self._normal_series(200, seed=99))
+        assert all(s >= 0 for s in res.s_neg)
+
+    def test_n_alerts_matches_change_points(self):
+        from anomaly.models.cusum import CUSUMConfig, CUSUMDetector
+
+        det = CUSUMDetector(CUSUMConfig(h=3.0))
+        det.calibrate(self._normal_series(100))
+        series = np.concatenate([self._normal_series(50), self._normal_series(50) + 4.0])
+        res = det.detect(series)
+        assert res.n_alerts == len(res.change_points)
+
+    def test_update_before_calibrate_raises(self):
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        with pytest.raises(RuntimeError):
+            det.update(1.5)
+
+    def test_update_increments_counter(self):
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        det.calibrate(self._normal_series(50))
+        r1 = det.update(0.5)
+        r2 = det.update(0.5)
+        assert r1.n_updates == 1
+        assert r2.n_updates == 2
+
+    def test_update_triggers_alert_on_large_shift(self):
+        """Большой устойчивый сдвиг вызывает тревогу при онлайн-обновлении."""
+        from anomaly.models.cusum import CUSUMConfig, CUSUMDetector
+
+        rng = np.random.RandomState(42)
+        det = CUSUMDetector(CUSUMConfig(k=0.5, h=4.0))
+        det.calibrate(rng.randn(200))
+        # Подаём сильный сдвиг (+5σ) — должна сработать тревога
+        results = [det.update(5.0) for _ in range(20)]
+        assert any(r.is_alert for r in results)
+
+    def test_reset_clears_statistics(self):
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        det.calibrate(self._normal_series(50))
+        # Накапливаем сдвиг
+        for _ in range(10):
+            det.update(10.0)
+        state_before = det.get_state()
+        det.reset()
+        state_after = det.get_state()
+        # После reset статистики обнуляются, калибровка сохраняется
+        assert state_after.s_pos == 0.0
+        assert state_after.s_neg == 0.0
+        assert state_after.n_updates == 0
+        assert state_after.is_calibrated  # μ₀ и σ₀ не теряем
+        _ = state_before  # suppress unused variable warning
+
+    def test_get_state_structure(self):
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        det.calibrate(self._normal_series(50))
+        state = det.get_state()
+        assert state.is_calibrated is True
+        assert isinstance(state.s_pos, float)
+        assert isinstance(state.s_neg, float)
+        assert state.n_updates == 0
+
+    def test_constant_series_calibration(self):
+        """Константный ряд (σ=0) не вызывает деления на ноль."""
+        from anomaly.models.cusum import CUSUMDetector
+
+        det = CUSUMDetector()
+        # Все значения одинаковые — σ=0, должна быть защита
+        constant = np.ones(50)
+        res = det.calibrate(constant)
+        assert res.sigma_ref > 0  # защитный порог min(σ, 1e-6)
+
+
+class TestCUSUMAPIEndpoints:
+    """Тесты API эндпоинтов CUSUM."""
+
+    def _client(self):
+        from anomaly.api.app import _reset_cusum, app
+        from fastapi.testclient import TestClient
+
+        _reset_cusum()
+        return TestClient(app)
+
+    def _normal_data(self, n: int = 100, seed: int = 42) -> list[float]:
+        return np.random.RandomState(seed).randn(n).tolist()
+
+    def test_calibrate_200(self):
+        client = self._client()
+        resp = client.post("/cusum/calibrate", json={"data": self._normal_data(100)})
+        assert resp.status_code == 200
+
+    def test_calibrate_response_structure(self):
+        client = self._client()
+        resp = client.post("/cusum/calibrate", json={"data": self._normal_data(100)})
+        body = resp.json()
+        assert "mu_ref" in body
+        assert "sigma_ref" in body
+        assert "n_calibration" in body
+        assert body["n_calibration"] == 100
+        assert body["sigma_ref"] > 0
+
+    def test_calibrate_custom_k_h(self):
+        client = self._client()
+        resp = client.post(
+            "/cusum/calibrate", json={"data": self._normal_data(50), "k": 1.0, "h": 8.0}
+        )
+        body = resp.json()
+        assert body["k"] == 1.0
+        assert body["h"] == 8.0
+
+    def test_detect_requires_calibration(self):
+        client = self._client()
+        resp = client.post("/cusum/detect", json={"data": [1.0, 2.0, 3.0]})
+        assert resp.status_code == 400
+
+    def test_detect_200_after_calibrate(self):
+        client = self._client()
+        client.post("/cusum/calibrate", json={"data": self._normal_data(100)})
+        resp = client.post("/cusum/detect", json={"data": self._normal_data(50, seed=99)})
+        assert resp.status_code == 200
+
+    def test_detect_response_structure(self):
+        client = self._client()
+        client.post("/cusum/calibrate", json={"data": self._normal_data(100)})
+        resp = client.post("/cusum/detect", json={"data": self._normal_data(50, seed=99)})
+        body = resp.json()
+        assert "s_pos" in body
+        assert "s_neg" in body
+        assert "predictions" in body
+        assert "change_points" in body
+        assert "n_alerts" in body
+        assert len(body["s_pos"]) == 50
+        assert len(body["predictions"]) == 50
+
+    def test_detect_persistent_shift(self):
+        """API: CUSUM обнаруживает явный сдвиг после нормального периода."""
+        client = self._client()
+        rng = np.random.RandomState(0)
+        normal = rng.randn(200).tolist()
+        client.post("/cusum/calibrate", json={"data": normal, "h": 4.0})
+        # Серия с большим сдвигом
+        shifted = (rng.randn(100) + 5.0).tolist()
+        resp = client.post("/cusum/detect", json={"data": shifted})
+        body = resp.json()
+        assert body["n_alerts"] >= 1
+
+    def test_update_requires_calibration(self):
+        client = self._client()
+        resp = client.post("/cusum/update", json={"value": 1.5})
+        assert resp.status_code == 400
+
+    def test_update_200_after_calibrate(self):
+        client = self._client()
+        client.post("/cusum/calibrate", json={"data": self._normal_data(100)})
+        resp = client.post("/cusum/update", json={"value": 0.5})
+        assert resp.status_code == 200
+
+    def test_update_increments_n_updates(self):
+        client = self._client()
+        client.post("/cusum/calibrate", json={"data": self._normal_data(100)})
+        r1 = client.post("/cusum/update", json={"value": 0.5}).json()
+        r2 = client.post("/cusum/update", json={"value": 0.5}).json()
+        assert r1["n_updates"] == 1
+        assert r2["n_updates"] == 2
+
+    def test_update_alert_on_large_value(self):
+        client = self._client()
+        normal = np.random.RandomState(1).randn(200).tolist()
+        client.post("/cusum/calibrate", json={"data": normal, "h": 3.0})
+        # Подаём очень большое значение 20 раз — должна сработать тревога
+        alerts = [client.post("/cusum/update", json={"value": 5.0}).json() for _ in range(20)]
+        assert any(a["is_alert"] for a in alerts)
+
+    def test_status_uncalibrated(self):
+        client = self._client()
+        resp = client.get("/cusum/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_calibrated"] is False
+        assert "message" in body
+
+    def test_status_after_calibrate(self):
+        client = self._client()
+        client.post("/cusum/calibrate", json={"data": self._normal_data(100)})
+        resp = client.get("/cusum/status")
+        body = resp.json()
+        assert body["is_calibrated"] is True
+        assert "mu_ref" in body
+        assert "sigma_ref" in body
+
+    def test_full_cycle(self):
+        """Полный цикл: calibrate → detect → update → status."""
+        client = self._client()
+        rng = np.random.RandomState(42)
+        # 1. Калибровка
+        cal = client.post("/cusum/calibrate", json={"data": rng.randn(200).tolist()}).json()
+        assert cal["n_calibration"] == 200
+        # 2. Батч детекция
+        normal_series = rng.randn(100).tolist()
+        det = client.post("/cusum/detect", json={"data": normal_series}).json()
+        assert "n_alerts" in det
+        # 3. Онлайн обновление
+        upd = client.post("/cusum/update", json={"value": 0.1}).json()
+        assert upd["n_updates"] == 1
+        # 4. Статус
+        status = client.get("/cusum/status").json()
+        assert status["is_calibrated"] is True

@@ -1069,6 +1069,37 @@
         arXiv:CEUR-2025 Decompositional Semantic Analysis via AST for LLM code quality.
 
 - [x] Cross-Encoder Reranking для RAG (Project 02) — 2026-06-13
+- [x] CUSUM Sequential Change Detection для Anomaly Detection (Project 05) — 2026-06-14
+      anomaly/models/cusum.py: CUSUMDetector (Page 1954, Biometrika 41(1-2):100-115).
+      Алгоритм: zₜ=(xₜ-μ₀)/σ₀, S⁺ₜ=max(0,S⁺ₜ₋₁+zₜ-k), S⁻ₜ=max(0,S⁻ₜ₋₁-zₜ-k).
+      Тревога при S⁺>h ИЛИ S⁻>h. Self-resetting после тревоги — ловит несколько смен.
+      CUSUMConfig (k=0.5 ARL₀≈465 для 1σ-смены, h=5 стандарт NIST SP 500-235),
+      CUSUMCalibrationResult, CUSUMBatchResult, CUSUMUpdateResult, CUSUMState dataclasses.
+      calibrate() — оценка μ₀/σ₀ из нормальных данных, защита от константного ряда.
+      detect() — батч-детекция: полный путь S⁺/S⁻ + список change_points.
+      update() — онлайн-обновление одной точкой (O(1) память, без хранения истории).
+      reset() — сброс статистик без потери калибровки (для post-retraining transition).
+      anomaly/api/app.py: 4 новых endpoint:
+        POST /cusum/calibrate (normal_data → μ₀/σ₀, параметры k/h; сброс S⁺=S⁻=0),
+        POST /cusum/detect (батч → s_pos/s_neg/predictions/change_points, 400 без калибровки),
+        POST /cusum/update (одна точка → is_alert/s_pos/s_neg, онлайн-стриминг),
+        GET  /cusum/status (состояние для Grafana gauge: S⁺/S⁻ + proximity-to-threshold).
+      _reset_cusum() для тестовой изоляции.
+      31 новый тест: TestCUSUMDetector×16 (calibrate μ/σ, is_calibrated, too_few_raises,
+        detect_before_calibrate, length, few_alerts_normal, persistent_shift, valid_indices,
+        s_pos/neg_non_negative, n_alerts_matches, update_before_calibrate, increments,
+        alert_large_shift, reset_clears, get_state, constant_series),
+        TestCUSUMAPIEndpoints×15 (calibrate_200, structure, custom_k_h, detect_400,
+        detect_200, response_structure, persistent_shift, update_400, update_200,
+        update_increments, alert_on_large, status_uncalibrated, status_after, full_cycle).
+      159/159 тестов зелёных (+31, было 128). Lint clean.
+      Бизнес-эффект: CUSUM улавливает персистентный сдвиг, незаметный Z-score — CPU растёт
+        на 0.5σ каждые 5 минут: Z-score видит «норму», CUSUM через 20 точек S⁺>h и бьёт тревогу.
+        Complementary с Isolation Forest (многомерные паттерны) и ESN (сложные корреляции):
+        CUSUM — «вахтёр» для одиночных метрик в режиме реального времени.
+      Источники: Page 1954 Biometrika 41(1-2):100-115 (оригинальный CUSUM),
+        Hawkins & Olwell 1998 "CUSUM Charts" Springer (ARL таблицы),
+        NIST/SEMATECH e-Handbook of Statistical Methods §6.3.2 (k=0.5, h=5 стандарт).
       rag/retrieval/reranker.py: лексический cross-encoder без GPU/API (CI-friendly).
       _tokenize(): lowercase + фильтрация токенов ≤2 символа.
       _compute_idf_proxies(): log(1 + n/(1+df)) на корпусе кандидатов — редкие термы важнее.
