@@ -29,6 +29,7 @@ from recsys.models.collaborative import CollaborativeRecommender
 from recsys.models.content_based import get_popular_items
 from recsys.models.diversity import DiversityConfig, DiversityResult, MMRDiversifier
 from recsys.models.session import SessionConfig, SessionRecommender, SessionResult
+from recsys.models.thompson import ThompsonBandit, ThompsonConfig, ThompsonResult
 
 app = FastAPI(
     title="RecSys API",
@@ -158,6 +159,9 @@ _mmr_diversifier: MMRDiversifier | None = None
 # Session-based recommender singleton
 _session_recommender: SessionRecommender | None = None
 
+# Thompson Sampling bandit singleton — persists Beta posteriors across requests
+_thompson_bandit: ThompsonBandit | None = None
+
 
 def _get_wap_gate(psi_threshold: float = 0.2) -> WAPGate:
     """Ленивая инициализация WAP gate / Lazy WAP gate initialization."""
@@ -219,6 +223,26 @@ def _reset_session_recommender() -> None:
     """Сброс session recommender для тестовой изоляции / Reset for test isolation."""
     global _session_recommender
     _session_recommender = None
+
+
+def _get_thompson_bandit(
+    alpha_prior: float = 1.0,
+    beta_prior: float = 1.0,
+    seed: int | None = None,
+) -> ThompsonBandit:
+    """Ленивая инициализация Thompson bandit / Lazy Thompson bandit initialization."""
+    global _thompson_bandit
+    if _thompson_bandit is None:
+        _thompson_bandit = ThompsonBandit(
+            ThompsonConfig(alpha_prior=alpha_prior, beta_prior=beta_prior, seed=seed)
+        )
+    return _thompson_bandit
+
+
+def _reset_thompson_bandit() -> None:
+    """Сброс Thompson bandit для тестовой изоляции / Reset for test isolation."""
+    global _thompson_bandit
+    _thompson_bandit = None
 
 
 def _get_feast_bridge() -> FeastBridge:
@@ -862,4 +886,178 @@ def session_stats() -> SessionStatsResponse:
         avg_session_length=stats["avg_session_length"],
         embedding_dim=stats["embedding_dim"],
         decay_factor=stats["decay_factor"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Thompson Sampling (Beta-Bernoulli) Bandit endpoints
+# ---------------------------------------------------------------------------
+
+
+class ThompsonRecommendItem(BaseModel):
+    """Одна рекомендация Thompson Sampling с компонентами posterior.
+    Single Thompson Sampling recommendation with posterior decomposition."""
+
+    arm_id: int
+    rank: int
+    sampled_theta: float
+    expected_reward: float
+    uncertainty: float
+    n_pulls: int
+
+
+class ThompsonRecommendRequest(BaseModel):
+    """
+    Запрос на ранжирование кандидатов через Thompson Sampling.
+    Request to rank candidate items via Beta-Bernoulli Thompson Sampling.
+
+    Пример / Example:
+        {"candidate_ids": [101, 202, 303], "top_k": 3}
+
+    Не требует контекстного вектора — exploration встроен в Beta-сэмплинг.
+    No context vector needed — exploration is built into Beta sampling.
+    """
+
+    candidate_ids: list[int]
+    top_k: int = 10
+    alpha_prior: float = 1.0
+    beta_prior: float = 1.0
+
+
+class ThompsonRecommendResponse(BaseModel):
+    """Результат Thompson Sampling ранжирования. / Thompson Sampling ranking result."""
+
+    recommendations: list[ThompsonRecommendItem]
+    n_arms_scored: int
+    top_arm_id: int
+    n_total_arms: int
+
+
+class ThompsonFeedbackRequest(BaseModel):
+    """
+    Обратная связь для обновления Beta-posterior.
+    Feedback to update Beta posterior: click → α += 1, skip → β += 1.
+
+    reward: 1.0 = клик/покупка (успех), 0.0 = пропуск (неудача).
+    Допустимы дробные значения — интерпретируются как reward ≥ 0.5 → success.
+    """
+
+    arm_id: int
+    reward: float  # 1.0 (click) или 0.0 (skip)
+
+
+class ThompsonFeedbackResponse(BaseModel):
+    """Статус обновления posterior. / Posterior update status."""
+
+    arm_id: int
+    alpha: float
+    beta: float
+    n_pulls: int
+    posterior_mean: float
+    message: str
+
+
+class ThompsonStatsResponse(BaseModel):
+    """Статистика Thompson bandit для мониторинга. / Thompson bandit stats for monitoring."""
+
+    n_arms: int
+    total_recommendations: int
+    config_alpha_prior: float
+    config_beta_prior: float
+    arm_stats: list[dict]
+
+
+@app.post("/thompson/recommend", response_model=ThompsonRecommendResponse)
+def thompson_recommend(request: ThompsonRecommendRequest) -> ThompsonRecommendResponse:
+    """
+    Ранжировать кандидатов через Beta-Bernoulli Thompson Sampling.
+    Rank candidate items using Thompson Sampling exploration-exploitation.
+
+    Каждый arm (item) представлен Beta-posterior: новые items → Beta(1,1) uniform prior
+    → максимальная начальная неопределённость. После feedback posterior сужается.
+
+    Cold start: uniform Beta(1,1) → arms ранжируются равномерно (exploration).
+    После feedback: posterior_mean сближается с реальным CTR (exploitation).
+
+    В отличие от LinUCB не требует контекстного вектора — используйте для
+    сценариев с чистым click/no-click без user-item features.
+    Unlike LinUCB, no context vector needed — use for pure click/no-click scenarios.
+    """
+    if not request.candidate_ids:
+        raise HTTPException(status_code=422, detail="candidate_ids must not be empty")
+
+    bandit = _get_thompson_bandit(
+        alpha_prior=request.alpha_prior,
+        beta_prior=request.beta_prior,
+    )
+    result: ThompsonResult = bandit.recommend(
+        candidate_ids=request.candidate_ids,
+        top_k=request.top_k,
+    )
+
+    recs = [
+        ThompsonRecommendItem(
+            arm_id=r.arm_id,
+            rank=r.rank,
+            sampled_theta=r.sampled_theta,
+            expected_reward=r.expected_reward,
+            uncertainty=r.uncertainty,
+            n_pulls=r.n_pulls,
+        )
+        for r in result.recommendations
+    ]
+
+    return ThompsonRecommendResponse(
+        recommendations=recs,
+        n_arms_scored=result.n_arms_scored,
+        top_arm_id=result.top_arm_id,
+        n_total_arms=result.n_total_arms,
+    )
+
+
+@app.post("/thompson/feedback", response_model=ThompsonFeedbackResponse)
+def thompson_feedback(request: ThompsonFeedbackRequest) -> ThompsonFeedbackResponse:
+    """
+    Обновить Beta-posterior arm после получения обратной связи.
+    Update Beta posterior after receiving user feedback.
+
+    Conjugate update: Beta + Bernoulli → Beta (аналитически, без gradient descent).
+    Conjugate update: Beta + Bernoulli → Beta (analytical, no gradient descent needed).
+
+    reward=1.0 → α += 1 (успех/клик)
+    reward=0.0 → β += 1 (неудача/пропуск)
+    """
+    if not (0.0 <= request.reward <= 1.0):
+        raise HTTPException(status_code=422, detail="reward must be in [0.0, 1.0]")
+
+    bandit = _get_thompson_bandit()
+    arm = bandit.update(arm_id=request.arm_id, reward=request.reward)
+
+    return ThompsonFeedbackResponse(
+        arm_id=request.arm_id,
+        alpha=round(arm.alpha, 4),
+        beta=round(arm.beta, 4),
+        n_pulls=arm.n_pulls,
+        posterior_mean=round(arm.posterior_mean, 4),
+        message=f"arm {request.arm_id} updated (α={arm.alpha:.1f}, β={arm.beta:.1f})",
+    )
+
+
+@app.get("/thompson/stats", response_model=ThompsonStatsResponse)
+def thompson_stats() -> ThompsonStatsResponse:
+    """
+    Статистика Thompson Sampling bandit для мониторинга.
+    Thompson Sampling bandit statistics for monitoring dashboards.
+
+    posterior_mean по каждому arm — оценка CTR; posterior_std — неопределённость.
+    Arm с высоким std → ещё активно исследуется; с низким std → exploitation.
+    Arms with high std → still being explored; low std → being exploited.
+    """
+    bandit = _get_thompson_bandit()
+    return ThompsonStatsResponse(
+        n_arms=bandit.n_arms,
+        total_recommendations=bandit.total_recommendations,
+        config_alpha_prior=bandit.config.alpha_prior,
+        config_beta_prior=bandit.config.beta_prior,
+        arm_stats=bandit.get_arm_stats(),
     )

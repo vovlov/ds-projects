@@ -1070,6 +1070,29 @@
 
 - [x] Cross-Encoder Reranking для RAG (Project 02) — 2026-06-13
 - [x] CUSUM Sequential Change Detection для Anomaly Detection (Project 05) — 2026-06-14
+- [x] Thompson Sampling (Beta-Bernoulli) Bandit для RecSys (Project 09) — 2026-06-15
+      recsys/models/thompson.py: ThompsonBandit (Beta-Bernoulli posterior, numpy-only).
+      ThompsonConfig (alpha_prior, beta_prior, seed), ArmPosterior (α, β, n_successes, n_failures,
+        posterior_mean = α/(α+β), posterior_std = √(αβ/((α+β)²(α+β+1)))).
+      ThompsonRecommendation (sampled_theta, expected_reward, uncertainty, rank).
+      recommend(): θ̃_a ~ Beta(α_a, β_a) → argmax → exploration implicit в сэмплинге.
+      update(): conjugate update — click → α+=1, skip → β+=1 (аналитически, без gradient descent).
+      recsys/api/app.py: _get_thompson_bandit() lazy singleton + _reset_thompson_bandit() для тестов.
+        POST /thompson/recommend (candidate_ids → ranked items by sampled θ, 422 на пустые ids),
+        POST /thompson/feedback (arm_id + reward [0,1] → posterior update, 422 на reward>1),
+        GET  /thompson/stats (n_arms, total_recommendations, per-arm α/β/posterior_mean/std).
+      27 новых тестов: TestThompsonSampling×14 (top_k, exceeds, theta_range, sorted, ranks,
+        cold_start_prior, click_alpha, skip_beta, n_pulls, mean_high, mean_low, exploitation,
+        independent, stats_sorted), TestThompsonAPIEndpoints×13 (200, structure, item_fields,
+        ranks, top_k, 422_empty, feedback_click, skip, posterior, 422_reward, stats_200,
+        stats_structure, full_cycle).
+      218/218 тестов зелёных (+27, было 191). Lint clean.
+      Thompson Sampling vs LinUCB: TS — Bayesian O(n_arms) без матричных инверсий, идеален для
+        binary click/no-click без контекста. LinUCB — frequentist O(n_arms×d²) с context vector.
+        Complementary: TS для pure-explore cold-start items, LinUCB для CTR × user+item features.
+      Источники: Russo et al. 2018 FnT ML (arxiv:1707.02038, Tutorial on Thompson Sampling),
+        Chapelle & Li 2011 NeurIPS "Empirical Evaluation of Thompson Sampling",
+        Agrawal & Goyal 2012 AISTATS, Dynamic Prior TS for Cold-Start arxiv:2602.00943 (2025).
       anomaly/models/cusum.py: CUSUMDetector (Page 1954, Biometrika 41(1-2):100-115).
       Алгоритм: zₜ=(xₜ-μ₀)/σ₀, S⁺ₜ=max(0,S⁺ₜ₋₁+zₜ-k), S⁻ₜ=max(0,S⁻ₜ₋₁-zₜ-k).
       Тревога при S⁺>h ИЛИ S⁻>h. Self-resetting после тревоги — ловит несколько смен.

@@ -2274,3 +2274,318 @@ class TestSessionAPIEndpoints:
         # Статистика
         stats = client.get("/session/stats").json()
         assert stats["n_sessions"] >= 1
+
+
+# ========== TestThompsonSampling: юнит-тесты ==========
+
+
+class TestThompsonSampling:
+    """Юнит-тесты Beta-Bernoulli Thompson Sampling / Unit tests for Thompson Sampling bandit."""
+
+    def test_recommend_returns_top_k(self) -> None:
+        """recommend() возвращает ровно top_k результатов / Returns exactly top_k."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=42))
+        result = bandit.recommend([1, 2, 3, 4, 5], top_k=3)
+        assert len(result.recommendations) == 3
+
+    def test_recommend_top_k_exceeds_candidates(self) -> None:
+        """top_k > числа кандидатов → возвращает всех / top_k > n → return all."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=42))
+        result = bandit.recommend([10, 20], top_k=10)
+        assert len(result.recommendations) == 2
+
+    def test_sampled_theta_in_unit_interval(self) -> None:
+        """sampled_theta ∈ [0,1] — Beta-распределение / sampled_theta ∈ [0,1]."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=0))
+        result = bandit.recommend(list(range(20)), top_k=20)
+        for rec in result.recommendations:
+            assert 0.0 <= rec.sampled_theta <= 1.0
+
+    def test_recommendations_sorted_by_theta_descending(self) -> None:
+        """Рекомендации отсортированы по sampled_theta убыванию / Sorted by θ desc."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=1))
+        result = bandit.recommend(list(range(10)), top_k=10)
+        thetas = [r.sampled_theta for r in result.recommendations]
+        assert thetas == sorted(thetas, reverse=True)
+
+    def test_ranks_sequential(self) -> None:
+        """rank начинается с 1 и монотонно возрастает / ranks start at 1 and increase."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=2))
+        result = bandit.recommend([1, 2, 3, 4, 5], top_k=5)
+        ranks = [r.rank for r in result.recommendations]
+        assert ranks == list(range(1, 6))
+
+    def test_cold_start_prior_alpha_beta(self) -> None:
+        """Новый arm получает prior alpha=beta=1 / New arm has prior α=β=1."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(alpha_prior=1.0, beta_prior=1.0, seed=0))
+        bandit.recommend([99], top_k=1)
+        arm = bandit._arms[99]
+        assert arm.alpha == 1.0
+        assert arm.beta == 1.0
+        assert arm.n_pulls == 0
+
+    def test_update_click_increments_alpha(self) -> None:
+        """Click (reward=1.0) → alpha += 1 / Click increments alpha."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=0))
+        bandit.recommend([7], top_k=1)  # инициализация arm
+        arm_before_alpha = bandit._arms[7].alpha
+        bandit.update(arm_id=7, reward=1.0)
+        assert bandit._arms[7].alpha == arm_before_alpha + 1.0
+        assert bandit._arms[7].n_successes == 1
+
+    def test_update_skip_increments_beta(self) -> None:
+        """Skip (reward=0.0) → beta += 1 / Skip increments beta."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=0))
+        bandit.recommend([8], top_k=1)
+        arm_before_beta = bandit._arms[8].beta
+        bandit.update(arm_id=8, reward=0.0)
+        assert bandit._arms[8].beta == arm_before_beta + 1.0
+        assert bandit._arms[8].n_failures == 1
+
+    def test_n_pulls_equals_successes_plus_failures(self) -> None:
+        """n_pulls = n_successes + n_failures / n_pulls property is correct."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=0))
+        bandit.recommend([5], top_k=1)
+        bandit.update(5, 1.0)
+        bandit.update(5, 0.0)
+        bandit.update(5, 1.0)
+        arm = bandit._arms[5]
+        assert arm.n_pulls == arm.n_successes + arm.n_failures
+        assert arm.n_pulls == 3
+
+    def test_posterior_mean_high_after_many_clicks(self) -> None:
+        """После 100 кликов posterior_mean → высокий / After 100 clicks, mean → high."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=0))
+        bandit.recommend([1], top_k=1)
+        for _ in range(100):
+            bandit.update(1, 1.0)
+        arm = bandit._arms[1]
+        # α=101, β=1 → posterior_mean = 101/102 ≈ 0.99
+        assert arm.posterior_mean > 0.95
+
+    def test_posterior_mean_low_after_many_skips(self) -> None:
+        """После 100 пропусков posterior_mean → низкий / After 100 skips, mean → low."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=0))
+        bandit.recommend([2], top_k=1)
+        for _ in range(100):
+            bandit.update(2, 0.0)
+        arm = bandit._arms[2]
+        # α=1, β=101 → posterior_mean = 1/102 ≈ 0.0098
+        assert arm.posterior_mean < 0.05
+
+    def test_exploitation_after_training(self) -> None:
+        """Обученный high-CTR arm чаще оказывается первым / High CTR arm wins more often."""
+        import numpy as np
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=99))
+        # Инициализируем arms
+        bandit.recommend([1, 2], top_k=2)
+        # arm 1 получает 80 кликов, arm 2 — 5 кликов
+        for _ in range(80):
+            bandit.update(1, 1.0)
+        for _ in range(5):
+            bandit.update(2, 1.0)
+
+        # После обучения arm 1 (CTR=0.99) должен быть первым в большинстве случаев
+        top_arm_counts = {1: 0, 2: 0}
+        for seed in range(50):
+            bandit._rng = np.random.default_rng(seed)
+            result = bandit.recommend([1, 2], top_k=2)
+            top_arm_counts[result.top_arm_id] += 1
+
+        assert top_arm_counts[1] > top_arm_counts[2], "High CTR arm should win most rounds"
+
+    def test_independent_arms(self) -> None:
+        """Обновление одного arm не затрагивает другие / Updates don't cross-contaminate."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=0))
+        bandit.recommend([10, 20], top_k=2)
+        bandit.update(10, 1.0)
+        assert bandit._arms[20].n_pulls == 0
+        assert bandit._arms[20].alpha == bandit.config.alpha_prior
+
+    def test_get_arm_stats_sorted_by_n_pulls(self) -> None:
+        """get_arm_stats() сортирует по n_pulls убыванию / Stats sorted by n_pulls desc."""
+        from recsys.models.thompson import ThompsonBandit, ThompsonConfig
+
+        bandit = ThompsonBandit(ThompsonConfig(seed=0))
+        bandit.recommend([1, 2, 3], top_k=3)
+        bandit.update(3, 1.0)
+        bandit.update(3, 1.0)
+        bandit.update(1, 0.0)
+        stats = bandit.get_arm_stats()
+        pulls = [s["n_pulls"] for s in stats]
+        assert pulls == sorted(pulls, reverse=True)
+
+
+# ========== TestThompsonAPIEndpoints: интеграционные тесты API ==========
+
+
+class TestThompsonAPIEndpoints:
+    """Интеграционные тесты Thompson Sampling API / Thompson Sampling API integration tests."""
+
+    @pytest.fixture(autouse=True)
+    def reset_thompson(self) -> None:
+        """Сброс Thompson bandit перед каждым тестом / Reset before each test."""
+        from recsys.api.app import _reset_thompson_bandit
+
+        _reset_thompson_bandit()
+
+    @pytest.fixture
+    def client(self) -> TestClient:
+        from recsys.api.app import app
+
+        return TestClient(app)
+
+    def test_recommend_200(self, client: TestClient) -> None:
+        """POST /thompson/recommend → 200 / Returns 200 on valid request."""
+        resp = client.post(
+            "/thompson/recommend",
+            json={"candidate_ids": [1, 2, 3], "top_k": 2},
+        )
+        assert resp.status_code == 200
+
+    def test_recommend_response_structure(self, client: TestClient) -> None:
+        """Ответ содержит все обязательные поля / Response has all required fields."""
+        resp = client.post(
+            "/thompson/recommend",
+            json={"candidate_ids": [10, 20, 30], "top_k": 3},
+        )
+        data = resp.json()
+        assert "recommendations" in data
+        assert "n_arms_scored" in data
+        assert "top_arm_id" in data
+        assert "n_total_arms" in data
+        assert data["n_arms_scored"] == 3
+
+    def test_recommend_item_fields(self, client: TestClient) -> None:
+        """Каждый item содержит arm_id, rank, sampled_theta, expected_reward, uncertainty."""
+        resp = client.post(
+            "/thompson/recommend",
+            json={"candidate_ids": [5, 10], "top_k": 2},
+        )
+        items = resp.json()["recommendations"]
+        assert len(items) == 2
+        for item in items:
+            assert "arm_id" in item
+            assert "rank" in item
+            assert "sampled_theta" in item
+            assert "expected_reward" in item
+            assert "uncertainty" in item
+            assert "n_pulls" in item
+
+    def test_recommend_ranks_sequential(self, client: TestClient) -> None:
+        """rank начинается с 1 и монотонно растёт / Ranks are 1, 2, 3..."""
+        resp = client.post(
+            "/thompson/recommend",
+            json={"candidate_ids": [1, 2, 3, 4], "top_k": 4},
+        )
+        ranks = [it["rank"] for it in resp.json()["recommendations"]]
+        assert ranks == list(range(1, 5))
+
+    def test_recommend_top_k_respected(self, client: TestClient) -> None:
+        """top_k ограничивает список рекомендаций / top_k limits response size."""
+        resp = client.post(
+            "/thompson/recommend",
+            json={"candidate_ids": list(range(20)), "top_k": 5},
+        )
+        assert len(resp.json()["recommendations"]) == 5
+
+    def test_recommend_422_on_empty_candidates(self, client: TestClient) -> None:
+        """Пустой список → 422 / Empty candidate_ids → 422."""
+        resp = client.post(
+            "/thompson/recommend",
+            json={"candidate_ids": [], "top_k": 5},
+        )
+        assert resp.status_code == 422
+
+    def test_feedback_click_200(self, client: TestClient) -> None:
+        """POST /thompson/feedback reward=1.0 → 200 / Click feedback returns 200."""
+        # Инициализируем arm через recommend
+        client.post("/thompson/recommend", json={"candidate_ids": [42], "top_k": 1})
+        resp = client.post("/thompson/feedback", json={"arm_id": 42, "reward": 1.0})
+        assert resp.status_code == 200
+
+    def test_feedback_skip_200(self, client: TestClient) -> None:
+        """POST /thompson/feedback reward=0.0 → 200 / Skip feedback returns 200."""
+        client.post("/thompson/recommend", json={"candidate_ids": [43], "top_k": 1})
+        resp = client.post("/thompson/feedback", json={"arm_id": 43, "reward": 0.0})
+        assert resp.status_code == 200
+
+    def test_feedback_updates_posterior(self, client: TestClient) -> None:
+        """Feedback обновляет alpha/posterior_mean / Feedback updates posterior."""
+        client.post("/thompson/recommend", json={"candidate_ids": [55], "top_k": 1})
+        resp = client.post("/thompson/feedback", json={"arm_id": 55, "reward": 1.0})
+        data = resp.json()
+        assert data["arm_id"] == 55
+        assert data["alpha"] > 1.0  # alpha увеличился
+        assert data["n_pulls"] == 1
+        assert data["posterior_mean"] > 0.5  # α=2, β=1 → mean=2/3
+
+    def test_feedback_422_invalid_reward(self, client: TestClient) -> None:
+        """reward > 1.0 → 422 / reward out of [0,1] → 422."""
+        resp = client.post("/thompson/feedback", json={"arm_id": 1, "reward": 1.5})
+        assert resp.status_code == 422
+
+    def test_stats_200(self, client: TestClient) -> None:
+        """GET /thompson/stats → 200 / Returns 200."""
+        resp = client.get("/thompson/stats")
+        assert resp.status_code == 200
+
+    def test_stats_structure(self, client: TestClient) -> None:
+        """GET /thompson/stats содержит ключевые поля / Stats has required fields."""
+        client.post("/thompson/recommend", json={"candidate_ids": [1, 2], "top_k": 2})
+        data = client.get("/thompson/stats").json()
+        assert "n_arms" in data
+        assert "total_recommendations" in data
+        assert "config_alpha_prior" in data
+        assert "config_beta_prior" in data
+        assert "arm_stats" in data
+        assert data["n_arms"] >= 2
+        assert data["total_recommendations"] >= 1
+
+    def test_full_cycle_recommend_feedback_stats(self, client: TestClient) -> None:
+        """Полный цикл: recommend → feedback → stats / Full cycle."""
+        # recommend
+        resp = client.post(
+            "/thompson/recommend",
+            json={"candidate_ids": [100, 200, 300], "top_k": 3},
+        )
+        assert resp.status_code == 200
+        top_id = resp.json()["top_arm_id"]
+
+        # feedback — click on top item
+        fb = client.post("/thompson/feedback", json={"arm_id": top_id, "reward": 1.0})
+        assert fb.status_code == 200
+        assert fb.json()["n_pulls"] == 1
+
+        # stats
+        stats = client.get("/thompson/stats").json()
+        assert stats["n_arms"] == 3
+        assert stats["total_recommendations"] == 1
+        arm_ids = [s["arm_id"] for s in stats["arm_stats"]]
+        assert top_id in arm_ids
