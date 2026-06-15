@@ -24,6 +24,12 @@ from pydantic import BaseModel, Field
 
 from quality.alerts.alerting import AlertManager, LogAlertChannel, WebhookAlertChannel
 from quality.data.profiler import profile_dataframe
+from quality.deduplication.entity_resolver import (
+    BlockingConfig,
+    DeduplicationResult,
+    EntityResolver,
+    FieldConfig,
+)
 from quality.label_quality.confid_learn import DecoupledConfidentLearning
 from quality.lineage.tracker import RunState, get_tracker
 from quality.monitoring.prediction_monitor import (
@@ -45,12 +51,6 @@ from quality.security.owasp import OWASPMLAudit
 from quality.security.pii_detector import detect_pii
 from quality.sla.monitor import get_monitor, reset_monitor
 from quality.sla.slo import SLIObservation, SLIType, SLODefinition
-from quality.deduplication.entity_resolver import (
-    BlockingConfig,
-    DeduplicationResult,
-    EntityResolver,
-    FieldConfig,
-)
 from quality.synthetic.generator import SyntheticConfig, SyntheticDataGenerator
 
 app = FastAPI(
