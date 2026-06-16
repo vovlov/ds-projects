@@ -1152,6 +1152,45 @@
       Источники: Nogueira & Cho 2019 "Passage Re-ranking with BERT" (arxiv:1901.04085),
         Khattab & Zaharia 2020 ColBERT (arxiv:2004.12832), Gao et al. 2024 AAAI RAG survey,
         Cohere Rerank API 2026, Jina Reranker v2 2026.
+- [x] Kalman Filter для Anomaly Detection (Project 05) — 2026-06-16
+      anomaly/models/kalman.py: KalmanDetector (constant-velocity state model, numpy-only).
+      State: x=[level, trend]^T, F=[[1,1],[0,1]], H=[1,0].
+      Anomaly score — Normalized Innovation Squared (NIS = ν²/S), S = HPH^T + R.
+      Под H₀: NIS ~ χ²(1) → порог без эмпирической калибровки из таблицы χ²_{1-α}(1).
+      calibrate(): OLS-детрендирование + оценка R; диффузный prior P = R·I.
+      update(): predict → innovation → NIS → Kalman gain → Joseph-form covariance update.
+      detect(): батч через sequential update() (стейт продвигается вперёд).
+      get_state(), reset() для мониторинга и тестовой изоляции.
+      KalmanConfig (process_noise_level, process_noise_trend, measurement_noise, anomaly_alpha),
+      KalmanCalibrationResult, KalmanUpdateResult, KalmanBatchResult dataclasses.
+      anomaly/api/app.py: _reset_kalman() + 4 новых endpoint:
+        POST /kalman/calibrate (normal_data → estimated_r, threshold_nis, initial_level/trend),
+        POST /kalman/detect  (батч → levels/trends/nis_scores/predictions/anomaly_indices),
+        POST /kalman/update  (одна точка → online NIS + is_anomaly, streaming mode),
+        GET  /kalman/status  (level/trend/threshold_nis для Grafana overlay).
+      33 новых теста: TestKalmanDetector×18 (calibrate_sets_calibrated, too_few_raises,
+        returns_fields, noise_positive, update_before_calibrate_raises, update_returns_dataclass,
+        update_n_updates_increments, detect_before_calibrate_raises, detect_output_length,
+        detect_normal_data_low_anomaly_rate, detect_injected_spike_detected,
+        detect_nis_scores_non_negative, anomaly_indices_consistent, get_state_before_calibrate,
+        get_state_after_calibrate, reset_clears_calibration, measurement_noise_override,
+        threshold_decreases_with_stricter_alpha),
+      TestKalmanAPIEndpoints×15 (calibrate_200, calibrate_response_structure, calibrate_custom_alpha,
+        detect_400_before_calibrate, detect_200_after_calibrate, detect_response_structure,
+        detect_spike_n_anomalies, update_400_before_calibrate, update_200_after_calibrate,
+        update_response_structure, update_n_updates_increments, update_alert_on_extreme_value,
+        status_uncalibrated, status_after_calibrate, full_cycle).
+      192/192 тестов зелёных (+33, было 159). Lint clean.
+      Бизнес-эффект: CUSUM реагирует на персистентный сдвиг уровня, Kalman NIS — на любой
+        выброс (impulse) и смену дисперсии, адаптивно отслеживая тренд: CPU растёт на 5% в день
+        (нормально) → Kalman адаптируется; внезапный spike 3× от предсказания → NIS > χ²_{0.01}(1).
+        Complementary: Isolation Forest (многомерные паттерны), ESN (сложные корреляции),
+        CUSUM (персистентный сдвиг), Kalman (online с трендом + uncertainty quantification).
+        level/trend overlay на Grafana gauge — операторы видят «куда движется метрика».
+      Источники: Kalman 1960 Trans. ASME (оригинальный фильтр),
+        Bar-Shalom et al. 2001 "Estimation with Applications to Tracking and Navigation" §3.4,
+        Ljung & Söderström 1983 "Theory and Practice of Recursive Identification" (NIS chi2 test),
+        Mehra 1970 IEEE AC (innovation-based anomaly detection).
 
 ---
 

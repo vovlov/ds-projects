@@ -1895,3 +1895,333 @@ class TestCUSUMAPIEndpoints:
         # 4. Статус
         status = client.get("/cusum/status").json()
         assert status["is_calibrated"] is True
+
+
+class TestKalmanDetector:
+    """Unit-тесты KalmanDetector."""
+
+    def _normal(self, n: int = 200, seed: int = 42) -> list[float]:
+        rng = np.random.RandomState(seed)
+        return (rng.randn(n) * 5.0 + 50.0).tolist()
+
+    def test_calibrate_sets_calibrated(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        det.calibrate(self._normal(100))
+        assert det._is_calibrated
+
+    def test_calibrate_too_few_raises(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        with pytest.raises(ValueError):
+            det.calibrate([1.0] * 9)
+
+    def test_calibrate_returns_fields(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        res = det.calibrate(self._normal(100))
+        assert res.estimated_R > 0
+        assert res.n_samples == 100
+        assert res.threshold_nis > 0
+
+    def test_calibrate_noise_positive(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        det.calibrate(self._normal(200))
+        assert det._R > 0
+
+    def test_update_before_calibrate_raises(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        with pytest.raises(RuntimeError):
+            det.update(1.0)
+
+    def test_update_returns_dataclass(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        det.calibrate(self._normal(100))
+        r = det.update(50.0)
+        assert r.level is not None
+        assert r.trend is not None
+        assert r.nis >= 0
+        assert r.threshold > 0
+        assert isinstance(r.is_anomaly, bool)
+
+    def test_update_n_updates_increments(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        det.calibrate(self._normal(100))
+        det.update(50.0)
+        r = det.update(51.0)
+        assert r.n_updates == 2
+
+    def test_detect_before_calibrate_raises(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        with pytest.raises(RuntimeError):
+            det.detect([1.0, 2.0, 3.0])
+
+    def test_detect_output_length(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        det.calibrate(self._normal(200))
+        res = det.detect(self._normal(50, seed=7))
+        assert len(res.levels) == 50
+        assert len(res.predictions) == 50
+        assert len(res.nis_scores) == 50
+
+    def test_detect_normal_data_low_anomaly_rate(self):
+        """На нормальных данных ложных тревог < 10% при alpha=0.01."""
+        from anomaly.models.kalman import KalmanConfig, KalmanDetector
+
+        det = KalmanDetector(KalmanConfig(anomaly_alpha=0.01))
+        det.calibrate(self._normal(500, seed=0))
+        res = det.detect(self._normal(500, seed=1))
+        rate = sum(res.predictions) / 500
+        assert rate < 0.10
+
+    def test_detect_injected_spike_detected(self):
+        """Одиночный большой выброс (10σ) должен быть детектирован."""
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        det.calibrate(self._normal(200, seed=0))
+        # Короткий ряд: одна нормальная точка, затем большой скачок
+        data = [50.0] * 20 + [50.0 + 100.0] + [50.0] * 20  # spike at index 20
+        res = det.detect(data)
+        assert res.n_anomalies >= 1
+
+    def test_detect_nis_scores_non_negative(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        det.calibrate(self._normal(100))
+        res = det.detect(self._normal(50, seed=5))
+        assert all(s >= 0 for s in res.nis_scores)
+
+    def test_anomaly_indices_consistent(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        det.calibrate(self._normal(100))
+        res = det.detect(self._normal(50, seed=3))
+        for idx in res.anomaly_indices:
+            assert res.predictions[idx] is True
+
+    def test_get_state_before_calibrate(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        state = det.get_state()
+        assert state["is_calibrated"] is False
+        assert state["level"] is None
+
+    def test_get_state_after_calibrate(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        det.calibrate(self._normal(100))
+        state = det.get_state()
+        assert state["is_calibrated"] is True
+        assert state["level"] is not None
+        assert state["threshold_nis"] > 0
+
+    def test_reset_clears_calibration(self):
+        from anomaly.models.kalman import KalmanDetector
+
+        det = KalmanDetector()
+        det.calibrate(self._normal(100))
+        det.reset()
+        assert not det._is_calibrated
+
+    def test_measurement_noise_override(self):
+        """measurement_noise=None → авто-оценка; override → используется напрямую."""
+        from anomaly.models.kalman import KalmanConfig, KalmanDetector
+
+        det = KalmanDetector(KalmanConfig(measurement_noise=100.0))
+        det.calibrate(self._normal(100))
+        assert pytest.approx(100.0) == det._R
+
+    def test_threshold_decreases_with_stricter_alpha(self):
+        """Меньший alpha → меньший порог (более жёсткая проверка)."""
+        from anomaly.models.kalman import KalmanConfig, KalmanDetector
+
+        det_strict = KalmanDetector(KalmanConfig(anomaly_alpha=0.001))
+        det_lenient = KalmanDetector(KalmanConfig(anomaly_alpha=0.10))
+        det_strict.calibrate(self._normal(100))
+        det_lenient.calibrate(self._normal(100))
+        # chi2_inv(0.001, 1) > chi2_inv(0.10, 1)
+        assert det_strict._threshold > det_lenient._threshold
+
+
+class TestKalmanAPIEndpoints:
+    """Интеграционные тесты API эндпоинтов Kalman Filter."""
+
+    def _client(self):
+        from anomaly.api.app import _reset_kalman, app
+        from fastapi.testclient import TestClient
+
+        _reset_kalman()
+        return TestClient(app)
+
+    def _normal(self, n: int = 200, seed: int = 0) -> list[float]:
+        return (np.random.RandomState(seed).randn(n) * 5 + 50).tolist()
+
+    def test_calibrate_200(self):
+        client = self._client()
+        resp = client.post("/kalman/calibrate", json={"data": self._normal(100)})
+        assert resp.status_code == 200
+
+    def test_calibrate_response_structure(self):
+        client = self._client()
+        resp = client.post("/kalman/calibrate", json={"data": self._normal(100)})
+        body = resp.json()
+        assert "estimated_r" in body
+        assert "n_samples" in body
+        assert "threshold_nis" in body
+        assert body["n_samples"] == 100
+        assert body["estimated_r"] > 0
+
+    def test_calibrate_custom_alpha(self):
+        client = self._client()
+        resp = client.post(
+            "/kalman/calibrate",
+            json={"data": self._normal(100), "anomaly_alpha": 0.05},
+        )
+        body = resp.json()
+        # chi2_inv(0.05, 1) = 3.841 < chi2_inv(0.01, 1) = 6.635
+        assert body["anomaly_alpha"] == pytest.approx(0.05)
+        assert body["threshold_nis"] == pytest.approx(3.841, abs=0.01)
+
+    def test_detect_400_before_calibrate(self):
+        client = self._client()
+        resp = client.post("/kalman/detect", json={"data": [1.0, 2.0]})
+        assert resp.status_code == 400
+
+    def test_detect_200_after_calibrate(self):
+        client = self._client()
+        client.post("/kalman/calibrate", json={"data": self._normal(100)})
+        resp = client.post("/kalman/detect", json={"data": self._normal(50, seed=1)})
+        assert resp.status_code == 200
+
+    def test_detect_response_structure(self):
+        client = self._client()
+        client.post("/kalman/calibrate", json={"data": self._normal(100)})
+        resp = client.post("/kalman/detect", json={"data": self._normal(50)})
+        body = resp.json()
+        expected = (
+            "levels",
+            "trends",
+            "predicted",
+            "innovations",
+            "nis_scores",
+            "predictions",
+            "threshold",
+            "anomaly_indices",
+            "n_anomalies",
+        )
+        for field in expected:
+            assert field in body
+        assert len(body["levels"]) == 50
+        assert len(body["predictions"]) == 50
+
+    def test_detect_spike_n_anomalies(self):
+        """API: явный выброс 10σ должен дать ≥ 1 аномалию."""
+        client = self._client()
+        client.post("/kalman/calibrate", json={"data": self._normal(200)})
+        data = [50.0] * 20 + [200.0] + [50.0] * 20  # одиночный spike
+        resp = client.post("/kalman/detect", json={"data": data})
+        assert resp.json()["n_anomalies"] >= 1
+
+    def test_update_400_before_calibrate(self):
+        client = self._client()
+        resp = client.post("/kalman/update", json={"value": 50.0})
+        assert resp.status_code == 400
+
+    def test_update_200_after_calibrate(self):
+        client = self._client()
+        client.post("/kalman/calibrate", json={"data": self._normal(100)})
+        resp = client.post("/kalman/update", json={"value": 50.0})
+        assert resp.status_code == 200
+
+    def test_update_response_structure(self):
+        client = self._client()
+        client.post("/kalman/calibrate", json={"data": self._normal(100)})
+        body = client.post("/kalman/update", json={"value": 50.0}).json()
+        for field in (
+            "level",
+            "trend",
+            "predicted",
+            "innovation",
+            "nis",
+            "threshold",
+            "is_anomaly",
+            "n_updates",
+        ):
+            assert field in body
+
+    def test_update_n_updates_increments(self):
+        client = self._client()
+        client.post("/kalman/calibrate", json={"data": self._normal(100)})
+        r1 = client.post("/kalman/update", json={"value": 50.0}).json()
+        r2 = client.post("/kalman/update", json={"value": 51.0}).json()
+        assert r1["n_updates"] == 1
+        assert r2["n_updates"] == 2
+
+    def test_update_alert_on_extreme_value(self):
+        """Очень большое значение (100σ от среднего) должно вызвать is_anomaly=True."""
+        client = self._client()
+        # Калибровать на данных μ=50, σ=5
+        client.post("/kalman/calibrate", json={"data": self._normal(200)})
+        # Подать несколько нормальных точек чтобы фильтр сошёлся
+        for _ in range(20):
+            client.post("/kalman/update", json={"value": 50.0})
+        # Большой выброс
+        resp = client.post("/kalman/update", json={"value": 5000.0})
+        assert resp.json()["is_anomaly"] is True
+
+    def test_status_uncalibrated(self):
+        client = self._client()
+        resp = client.get("/kalman/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_calibrated"] is False
+        assert "message" in body
+
+    def test_status_after_calibrate(self):
+        client = self._client()
+        client.post("/kalman/calibrate", json={"data": self._normal(100)})
+        resp = client.get("/kalman/status")
+        body = resp.json()
+        assert body["is_calibrated"] is True
+        assert "level" in body
+        assert "trend" in body
+        assert "threshold_nis" in body
+
+    def test_full_cycle(self):
+        """Полный цикл: calibrate → detect → update → status."""
+        client = self._client()
+        rng = np.random.RandomState(7)
+        normal = (rng.randn(200) * 5 + 50).tolist()
+        # 1. Калибровка
+        cal = client.post("/kalman/calibrate", json={"data": normal}).json()
+        assert cal["n_samples"] == 200
+        # 2. Батч детекция
+        test_data = (rng.randn(50) * 5 + 50).tolist()
+        det = client.post("/kalman/detect", json={"data": test_data}).json()
+        assert "n_anomalies" in det
+        # 3. Онлайн обновление — detect продвинул state на len(test_data) шагов
+        upd = client.post("/kalman/update", json={"value": 50.0}).json()
+        assert upd["n_updates"] == len(test_data) + 1
+        # 4. Статус
+        status = client.get("/kalman/status").json()
+        assert status["is_calibrated"] is True

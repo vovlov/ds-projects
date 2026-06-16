@@ -12,6 +12,7 @@ from ..models.cusum import CUSUMConfig, CUSUMDetector
 from ..models.detector import MultiMetricDetector
 from ..models.isolation import IsolationConfig, IsolationForestDetector
 from ..models.isolation import is_available as isolation_available
+from ..models.kalman import KalmanConfig, KalmanDetector
 from ..models.lstm_autoencoder import LSTMConfig, create_autoencoder
 
 app = FastAPI(
@@ -58,6 +59,16 @@ def _reset_cusum() -> None:
     """Пересоздать детектор — используется в тестах для изоляции."""
     global _cusum_detector
     _cusum_detector = CUSUMDetector()
+
+
+# Kalman Filter детектор — инициализируется при /kalman/calibrate.
+_kalman_detector = KalmanDetector()
+
+
+def _reset_kalman() -> None:
+    """Пересоздать Kalman детектор — используется в тестах для изоляции."""
+    global _kalman_detector
+    _kalman_detector = KalmanDetector()
 
 
 class MetricPoint(BaseModel):
@@ -773,4 +784,167 @@ def cusum_status() -> dict:
         result["sigma_ref"] = state.sigma_ref
     else:
         result["message"] = "Not calibrated. Call POST /cusum/calibrate first."
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Kalman Filter endpoints
+# ---------------------------------------------------------------------------
+
+
+class KalmanCalibrateRequest(BaseModel):
+    """Запрос на калибровку Kalman Filter из нормальных данных."""
+
+    data: list[float] = Field(..., min_length=10, description="Normal (anomaly-free) time series")
+    process_noise_level: float = Field(default=1e-3, gt=0)
+    process_noise_trend: float = Field(default=1e-5, gt=0)
+    measurement_noise: float | None = Field(default=None, gt=0)
+    anomaly_alpha: float = Field(default=0.01, ge=0.001, le=0.10)
+
+
+class KalmanCalibrateResponse(BaseModel):
+    estimated_r: float
+    n_samples: int
+    initial_level: float
+    initial_trend: float
+    threshold_nis: float
+    anomaly_alpha: float
+
+
+class KalmanDetectRequest(BaseModel):
+    data: list[float] = Field(..., min_length=1, description="Time series to evaluate")
+
+
+class KalmanDetectResponse(BaseModel):
+    levels: list[float]
+    trends: list[float]
+    predicted: list[float]
+    innovations: list[float]
+    nis_scores: list[float]
+    predictions: list[bool]
+    threshold: float
+    anomaly_indices: list[int]
+    n_anomalies: int
+
+
+class KalmanUpdateRequest(BaseModel):
+    value: float
+
+
+class KalmanUpdateResponse(BaseModel):
+    level: float
+    trend: float
+    predicted: float
+    innovation: float
+    nis: float
+    threshold: float
+    is_anomaly: bool
+    n_updates: int
+
+
+@app.post("/kalman/calibrate", response_model=KalmanCalibrateResponse)
+def kalman_calibrate(req: KalmanCalibrateRequest) -> KalmanCalibrateResponse:
+    """Откалибровать Kalman Filter на нормальных данных.
+
+    Оценивает дисперсию шума наблюдения R из детрендированного ряда,
+    инициализирует state [level, trend] и устанавливает NIS-порог
+    из χ²-таблицы (df=1) для заданного уровня значимости alpha.
+
+    После калибровки используйте POST /kalman/detect или /kalman/update.
+    """
+    config = KalmanConfig(
+        process_noise_level=req.process_noise_level,
+        process_noise_trend=req.process_noise_trend,
+        measurement_noise=req.measurement_noise,
+        anomaly_alpha=req.anomaly_alpha,
+    )
+    _kalman_detector.config = config
+    result = _kalman_detector.calibrate(req.data)
+    return KalmanCalibrateResponse(
+        estimated_r=result.estimated_R,
+        n_samples=result.n_samples,
+        initial_level=result.initial_level,
+        initial_trend=result.initial_trend,
+        threshold_nis=result.threshold_nis,
+        anomaly_alpha=req.anomaly_alpha,
+    )
+
+
+@app.post("/kalman/detect", response_model=KalmanDetectResponse)
+def kalman_detect(req: KalmanDetectRequest) -> KalmanDetectResponse:
+    """Батч-детекция аномалий через Kalman Filter.
+
+    Процессирует ряд последовательно, обновляя внутреннее состояние фильтра.
+    NIS > threshold → аномалия (статистически значимое отклонение от предсказания).
+
+    Возвращает сглаженные level/trend для каждой точки — полезно для визуализации
+    на дашборде рядом с raw данными (Grafana overlay).
+
+    400 если фильтр не откалиброван.
+    """
+    if not _kalman_detector._is_calibrated:
+        raise HTTPException(
+            status_code=400,
+            detail="Kalman filter not calibrated. Call POST /kalman/calibrate first.",
+        )
+    result = _kalman_detector.detect(req.data)
+    return KalmanDetectResponse(
+        levels=result.levels,
+        trends=result.trends,
+        predicted=result.predicted,
+        innovations=result.innovations,
+        nis_scores=result.nis_scores,
+        predictions=result.predictions,
+        threshold=result.threshold,
+        anomaly_indices=result.anomaly_indices,
+        n_anomalies=result.n_anomalies,
+    )
+
+
+@app.post("/kalman/update", response_model=KalmanUpdateResponse)
+def kalman_update(req: KalmanUpdateRequest) -> KalmanUpdateResponse:
+    """Онлайн-обновление Kalman Filter одной точкой (streaming mode).
+
+    Идеально для интеграции с Prometheus: вызывать при каждом scrape (каждые 15 с).
+    Возвращает NIS-score и флаг аномалии для немедленного алертинга.
+
+    400 если фильтр не откалиброван.
+    """
+    if not _kalman_detector._is_calibrated:
+        raise HTTPException(
+            status_code=400,
+            detail="Kalman filter not calibrated. Call POST /kalman/calibrate first.",
+        )
+    result = _kalman_detector.update(req.value)
+    return KalmanUpdateResponse(
+        level=result.level,
+        trend=result.trend,
+        predicted=result.predicted,
+        innovation=result.innovation,
+        nis=result.nis,
+        threshold=result.threshold,
+        is_anomaly=result.is_anomaly,
+        n_updates=result.n_updates,
+    )
+
+
+@app.get("/kalman/status")
+def kalman_status() -> dict:
+    """Текущее состояние Kalman Filter для Grafana/health-check.
+
+    level и trend — сглаженные оценки для overlay на метриках.
+    threshold_nis — порог χ²(1) для аномалии.
+    """
+    state = _kalman_detector.get_state()
+    result: dict = {
+        "is_calibrated": state["is_calibrated"],
+        "n_updates": state["n_updates"],
+    }
+    if state["is_calibrated"]:
+        result["level"] = state["level"]
+        result["trend"] = state["trend"]
+        result["measurement_noise_R"] = state["measurement_noise_R"]
+        result["threshold_nis"] = state["threshold_nis"]
+    else:
+        result["message"] = "Not calibrated. Call POST /kalman/calibrate first."
     return result
