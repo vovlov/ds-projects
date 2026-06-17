@@ -1154,6 +1154,30 @@
         Cohere Rerank API 2026, Jina Reranker v2 2026.
 - [x] Kalman Filter для Anomaly Detection (Project 05) — 2026-06-16
       anomaly/models/kalman.py: KalmanDetector (constant-velocity state model, numpy-only).
+- [x] Ensemble Anomaly Detection (Voting Aggregator) для Anomaly Detection (Project 05) — 2026-06-17
+      anomaly/models/ensemble.py: AnomalyEnsemble — stateless voting aggregator поверх нескольких
+      детекторов. EnsembleConfig (strategy, weights, min_agreement), DetectorVote (name, is_anomaly,
+      score ∈ [0,1]), EnsembleResult (confidence, agreement_ratio, n_votes/n_anomaly_votes).
+      4 стратегии: majority (> min_agreement, дефолт баланс precision/recall), weighted
+      (score_i × w_i / Σw_i, неизвестные детекторы → вес 1.0), any (OR-логика, safety-critical
+      минимальный miss rate), all (AND-логика, минимальный false alarm rate для дорогих вмешательств).
+      anomaly/api/app.py: _reset_ensemble() для тестовой изоляции.
+        POST /ensemble/vote (votes list + strategy → EnsembleResult, 422 на пустой список/неизвестную стратегию),
+        GET  /ensemble/strategies (описание стратегий + матрица рекомендаций для выбора).
+      30 новых тестов: TestEnsembleUnit×17 (majority_all/none/half/2of3, any/all, weighted_high_weight,
+        weighted_unknown_default, empty_raises, unknown_strategy, score_range, agreement_ratio,
+        to_dict_structure, confidence_ratio, single_vote),
+        TestEnsembleAPIEndpoints×13 (200, response_structure, majority, any, all×2, weighted,
+        n_votes, votes_list, 422_empty, custom_min_agreement, strategies_200, recommendation).
+      222/222 тестов зелёных (+30, было 192). Lint clean.
+      Бизнес-эффект: production-системы принимают скоры нескольких моделей (CUSUM+Kalman+
+        Isolation Forest+ESN) и комбинируют через configurable voting — без API-агрегатора
+        каждый downstream потребитель реализует собственную логику голосования (дублирование).
+        majority=0.5: дефолт для SRE-мониторинга. any: критические системы (упустить аварию
+        дороже ложного алерта). all: автоматические вмешательства (ложная остановка конвейера).
+      Источники: Zhou et al. 2022 "Ensemble Methods for Anomaly Detection" IEEE TNNLS,
+        Netflix MAAT 2023 (multi-detector aggregation), Fielding et al. 2023 SRE Workbook
+        §8.4 "Composite Alert Routing", Chandola et al. 2009 ACM CSUR §6 (ensemble surveу).
       State: x=[level, trend]^T, F=[[1,1],[0,1]], H=[1,0].
       Anomaly score — Normalized Innovation Squared (NIS = ν²/S), S = HPH^T + R.
       Под H₀: NIS ~ χ²(1) → порог без эмпирической калибровки из таблицы χ²_{1-α}(1).

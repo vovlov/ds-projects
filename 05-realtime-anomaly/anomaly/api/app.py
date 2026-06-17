@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from ..metrics.prometheus_exporter import AnomalyMetrics, is_available
 from ..models.cusum import CUSUMConfig, CUSUMDetector
 from ..models.detector import MultiMetricDetector
+from ..models.ensemble import STRATEGIES, AnomalyEnsemble, DetectorVote, EnsembleConfig
 from ..models.isolation import IsolationConfig, IsolationForestDetector
 from ..models.isolation import is_available as isolation_available
 from ..models.kalman import KalmanConfig, KalmanDetector
@@ -948,3 +949,128 @@ def kalman_status() -> dict:
     else:
         result["message"] = "Not calibrated. Call POST /kalman/calibrate first."
     return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Ensemble Voting endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Глобальный ансамбль — конфигурируется через /ensemble/configure.
+_ensemble = AnomalyEnsemble()
+
+
+def _reset_ensemble() -> None:
+    """Пересоздать ансамбль с дефолтной конфигурацией — используется в тестах."""
+    global _ensemble
+    _ensemble = AnomalyEnsemble()
+
+
+class VoteInput(BaseModel):
+    """Голос одного детектора для передачи в ансамбль."""
+
+    name: str = Field(..., description="Detector name, e.g. 'cusum', 'kalman'")
+    is_anomaly: bool = Field(..., description="Binary anomaly decision")
+    score: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Anomaly score in [0, 1] (used by weighted strategy)",
+    )
+
+
+class EnsembleVoteRequest(BaseModel):
+    """Запрос на ансамблевое голосование.
+
+    votes: список голосов от отдельных детекторов
+    strategy: стратегия агрегации (переопределяет глобальную конфигурацию)
+    weights: веса детекторов для weighted-стратегии (опционально)
+    min_agreement: порог для majority/weighted (опционально)
+    """
+
+    votes: list[VoteInput] = Field(..., min_length=1, description="Detector votes to aggregate")
+    strategy: str = Field(default="majority", description="majority|weighted|any|all")
+    weights: dict[str, float] | None = Field(
+        default=None,
+        description="Per-detector weights for weighted strategy",
+    )
+    min_agreement: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Agreement threshold for majority/weighted strategies",
+    )
+
+
+class EnsembleVoteResponse(BaseModel):
+    """Результат ансамблевого голосования."""
+
+    is_anomaly: bool
+    confidence: float
+    strategy: str
+    agreement_ratio: float
+    n_votes: int
+    n_anomaly_votes: int
+    votes: list[dict]
+
+
+@app.post("/ensemble/vote", response_model=EnsembleVoteResponse)
+def ensemble_vote(request: EnsembleVoteRequest) -> EnsembleVoteResponse:
+    """Агрегировать голоса детекторов в итоговое решение об аномалии.
+
+    Принимает список бинарных решений и скоров от нескольких детекторов
+    (CUSUM, Kalman, Isolation Forest, ESN) и возвращает консолидированный вердикт.
+
+    Стратегии:
+    - majority: аномалия если > min_agreement доля детекторов согласна (default 50%)
+    - weighted: взвешенное среднее score по weights; порог min_agreement
+    - any: аномалия если хотя бы один детектор сигнализирует (высокая чувствительность)
+    - all: аномалия только при консенсусе всех детекторов (низкий false alarm rate)
+
+    422 если votes пуст или стратегия неизвестна.
+    """
+    config = EnsembleConfig(
+        strategy=request.strategy,
+        weights=request.weights,
+        min_agreement=request.min_agreement,
+    )
+    ensemble = AnomalyEnsemble(config)
+
+    detector_votes = [
+        DetectorVote(name=v.name, is_anomaly=v.is_anomaly, score=v.score) for v in request.votes
+    ]
+
+    try:
+        result = ensemble.aggregate(detector_votes)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    return EnsembleVoteResponse(
+        is_anomaly=result.is_anomaly,
+        confidence=result.confidence,
+        strategy=result.strategy,
+        agreement_ratio=result.agreement_ratio,
+        n_votes=result.n_votes,
+        n_anomaly_votes=result.n_anomaly_votes,
+        votes=result.to_dict()["votes"],
+    )
+
+
+@app.get("/ensemble/strategies")
+def ensemble_strategies() -> dict:
+    """Описание доступных стратегий ансамблевого голосования.
+
+    Помогает выбрать стратегию под требования системы:
+    - safety-critical (не пропускать аномалии) → "any"
+    - low false-alarm (не беспокоить SRE без причины) → "all"
+    - balanced (production default) → "majority"
+    - calibrated detectors (знаем AUC каждого) → "weighted"
+    """
+    return {
+        "strategies": STRATEGIES,
+        "recommendation": {
+            "safety_critical": "any — минимальный miss rate",
+            "low_false_alarm": "all — минимальный false alarm rate",
+            "balanced_default": "majority — баланс precision/recall",
+            "calibrated_detectors": "weighted — используйте AUC как веса",
+        },
+    }

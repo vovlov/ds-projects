@@ -2180,12 +2180,10 @@ class TestKalmanAPIEndpoints:
     def test_update_alert_on_extreme_value(self):
         """Очень большое значение (100σ от среднего) должно вызвать is_anomaly=True."""
         client = self._client()
-        # Калибровать на данных μ=50, σ=5
         client.post("/kalman/calibrate", json={"data": self._normal(200)})
         # Подать несколько нормальных точек чтобы фильтр сошёлся
         for _ in range(20):
             client.post("/kalman/update", json={"value": 50.0})
-        # Большой выброс
         resp = client.post("/kalman/update", json={"value": 5000.0})
         assert resp.json()["is_anomaly"] is True
 
@@ -2212,16 +2210,348 @@ class TestKalmanAPIEndpoints:
         client = self._client()
         rng = np.random.RandomState(7)
         normal = (rng.randn(200) * 5 + 50).tolist()
-        # 1. Калибровка
         cal = client.post("/kalman/calibrate", json={"data": normal}).json()
         assert cal["n_samples"] == 200
-        # 2. Батч детекция
         test_data = (rng.randn(50) * 5 + 50).tolist()
         det = client.post("/kalman/detect", json={"data": test_data}).json()
         assert "n_anomalies" in det
-        # 3. Онлайн обновление — detect продвинул state на len(test_data) шагов
         upd = client.post("/kalman/update", json={"value": 50.0}).json()
         assert upd["n_updates"] == len(test_data) + 1
-        # 4. Статус
         status = client.get("/kalman/status").json()
         assert status["is_calibrated"] is True
+
+
+# ==============================================================================
+# Ensemble Anomaly Detection tests
+# ==============================================================================
+
+
+class TestEnsembleUnit:
+    """Unit-тесты AnomalyEnsemble без API."""
+
+    def _votes(self, flags, scores=None):
+        """Создать список DetectorVote для тестирования."""
+        from anomaly.models.ensemble import DetectorVote
+
+        names = ["cusum", "kalman", "isolation_forest", "esn", "mmd"]
+        if scores is None:
+            scores = [0.9 if f else 0.1 for f in flags]
+        return [
+            DetectorVote(name=names[i % len(names)], is_anomaly=f, score=s)
+            for i, (f, s) in enumerate(zip(flags, scores, strict=False))
+        ]
+
+    def test_majority_all_anomaly(self):
+        from anomaly.models.ensemble import AnomalyEnsemble
+
+        e = AnomalyEnsemble()
+        result = e.aggregate(self._votes([True, True, True]))
+        assert result.is_anomaly is True
+        assert result.n_anomaly_votes == 3
+
+    def test_majority_all_normal(self):
+        from anomaly.models.ensemble import AnomalyEnsemble
+
+        e = AnomalyEnsemble()
+        result = e.aggregate(self._votes([False, False, False]))
+        assert result.is_anomaly is False
+        assert result.n_anomaly_votes == 0
+
+    def test_majority_half(self):
+        """Ровно 50% голосов не превышает порог 0.5 → не аномалия (условие строгое >)."""
+        from anomaly.models.ensemble import AnomalyEnsemble
+
+        e = AnomalyEnsemble()
+        result = e.aggregate(self._votes([True, False]))
+        assert result.is_anomaly is False
+        assert result.agreement_ratio == pytest.approx(0.5)
+
+    def test_majority_two_of_three(self):
+        """2/3 = 0.667 > 0.5 → аномалия."""
+        from anomaly.models.ensemble import AnomalyEnsemble
+
+        e = AnomalyEnsemble()
+        result = e.aggregate(self._votes([True, True, False]))
+        assert result.is_anomaly is True
+
+    def test_any_single_vote(self):
+        """Стратегия 'any': достаточно одного голоса."""
+        from anomaly.models.ensemble import AnomalyEnsemble, EnsembleConfig
+
+        e = AnomalyEnsemble(EnsembleConfig(strategy="any"))
+        result = e.aggregate(self._votes([False, False, True]))
+        assert result.is_anomaly is True
+
+    def test_any_all_normal(self):
+        from anomaly.models.ensemble import AnomalyEnsemble, EnsembleConfig
+
+        e = AnomalyEnsemble(EnsembleConfig(strategy="any"))
+        result = e.aggregate(self._votes([False, False, False]))
+        assert result.is_anomaly is False
+
+    def test_all_requires_consensus(self):
+        """Стратегия 'all': нужны все голоса."""
+        from anomaly.models.ensemble import AnomalyEnsemble, EnsembleConfig
+
+        e = AnomalyEnsemble(EnsembleConfig(strategy="all"))
+        result = e.aggregate(self._votes([True, True, False]))
+        assert result.is_anomaly is False
+
+    def test_all_full_consensus(self):
+        from anomaly.models.ensemble import AnomalyEnsemble, EnsembleConfig
+
+        e = AnomalyEnsemble(EnsembleConfig(strategy="all"))
+        result = e.aggregate(self._votes([True, True, True]))
+        assert result.is_anomaly is True
+
+    def test_weighted_high_weight_anomaly(self):
+        """Weighted: детектор с весом 10 перевешивает двух с весом 1."""
+        from anomaly.models.ensemble import AnomalyEnsemble, DetectorVote, EnsembleConfig
+
+        votes = [
+            DetectorVote(name="cusum", is_anomaly=True, score=0.9),
+            DetectorVote(name="kalman", is_anomaly=False, score=0.1),
+            DetectorVote(name="isolation_forest", is_anomaly=False, score=0.1),
+        ]
+        config = EnsembleConfig(
+            strategy="weighted",
+            weights={"cusum": 10.0, "kalman": 1.0, "isolation_forest": 1.0},
+        )
+        e = AnomalyEnsemble(config)
+        result = e.aggregate(votes)
+        # weighted_score = (0.9*10 + 0.1*1 + 0.1*1) / 12 ≈ 0.767 > 0.5 → аномалия
+        assert result.is_anomaly is True
+
+    def test_weighted_unknown_detector_gets_default_weight(self):
+        """Неизвестный детектор получает вес 1.0."""
+        from anomaly.models.ensemble import AnomalyEnsemble, DetectorVote, EnsembleConfig
+
+        votes = [
+            DetectorVote(name="new_detector", is_anomaly=True, score=0.8),
+            DetectorVote(name="kalman", is_anomaly=False, score=0.1),
+        ]
+        config = EnsembleConfig(strategy="weighted", weights={"kalman": 1.0})
+        e = AnomalyEnsemble(config)
+        result = e.aggregate(votes)
+        # Оба получают вес 1.0: (0.8 + 0.1) / 2 = 0.45 < 0.5 → нет аномалии
+        assert result.is_anomaly is False
+
+    def test_empty_votes_raises(self):
+        from anomaly.models.ensemble import AnomalyEnsemble
+
+        e = AnomalyEnsemble()
+        with pytest.raises(ValueError, match="хотя бы один"):
+            e.aggregate([])
+
+    def test_unknown_strategy_raises(self):
+        from anomaly.models.ensemble import AnomalyEnsemble, DetectorVote, EnsembleConfig
+
+        e = AnomalyEnsemble(EnsembleConfig(strategy="unknown"))
+        with pytest.raises(ValueError, match="Неизвестная стратегия"):
+            e.aggregate([DetectorVote(name="x", is_anomaly=True)])
+
+    def test_score_out_of_range_raises(self):
+        from anomaly.models.ensemble import DetectorVote
+
+        with pytest.raises(ValueError, match="score must be in"):
+            DetectorVote(name="x", is_anomaly=True, score=1.5)
+
+    def test_agreement_ratio_computed(self):
+        from anomaly.models.ensemble import AnomalyEnsemble
+
+        e = AnomalyEnsemble()
+        result = e.aggregate(self._votes([True, False, True, False]))
+        assert result.agreement_ratio == pytest.approx(0.5)
+        assert result.n_votes == 4
+        assert result.n_anomaly_votes == 2
+
+    def test_to_dict_structure(self):
+        from anomaly.models.ensemble import AnomalyEnsemble
+
+        e = AnomalyEnsemble()
+        result = e.aggregate(self._votes([True, False]))
+        d = result.to_dict()
+        expected_keys = (
+            "is_anomaly",
+            "confidence",
+            "strategy",
+            "agreement_ratio",
+            "n_votes",
+            "n_anomaly_votes",
+            "votes",
+        )
+        for key in expected_keys:
+            assert key in d
+        assert len(d["votes"]) == 2
+        for vote in d["votes"]:
+            assert "name" in vote and "is_anomaly" in vote and "score" in vote
+
+    def test_confidence_equals_agreement_ratio_for_majority(self):
+        """В majority-стратегии confidence = agreement_ratio."""
+        from anomaly.models.ensemble import AnomalyEnsemble
+
+        e = AnomalyEnsemble()
+        result = e.aggregate(self._votes([True, True, False]))
+        assert result.confidence == pytest.approx(result.agreement_ratio)
+
+    def test_single_vote_works(self):
+        """Один голос — допустимый крайний случай."""
+        from anomaly.models.ensemble import AnomalyEnsemble, DetectorVote
+
+        e = AnomalyEnsemble()
+        result = e.aggregate([DetectorVote(name="cusum", is_anomaly=True, score=0.9)])
+        assert result.n_votes == 1
+        assert result.is_anomaly is True
+
+
+class TestEnsembleAPIEndpoints:
+    """API-тесты POST /ensemble/vote и GET /ensemble/strategies."""
+
+    def _client(self):
+        from anomaly.api.app import _reset_ensemble, app
+        from fastapi.testclient import TestClient
+
+        _reset_ensemble()
+        return TestClient(app)
+
+    def _vote(self, name, is_anomaly, score=None):
+        v = {"name": name, "is_anomaly": is_anomaly}
+        if score is not None:
+            v["score"] = score
+        return v
+
+    def test_vote_200(self):
+        client = self._client()
+        resp = client.post(
+            "/ensemble/vote",
+            json={
+                "votes": [self._vote("cusum", True), self._vote("kalman", False)],
+                "strategy": "majority",
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_vote_response_structure(self):
+        client = self._client()
+        resp = client.post(
+            "/ensemble/vote",
+            json={
+                "votes": [self._vote("cusum", True), self._vote("kalman", True)],
+                "strategy": "majority",
+            },
+        ).json()
+        for field in (
+            "is_anomaly",
+            "confidence",
+            "strategy",
+            "agreement_ratio",
+            "n_votes",
+            "n_anomaly_votes",
+            "votes",
+        ):
+            assert field in resp
+
+    def test_vote_majority_result(self):
+        """2/3 голосов → аномалия в majority-стратегии."""
+        client = self._client()
+        resp = client.post(
+            "/ensemble/vote",
+            json={
+                "votes": [self._vote("a", True), self._vote("b", True), self._vote("c", False)],
+                "strategy": "majority",
+            },
+        ).json()
+        assert resp["is_anomaly"] is True
+        assert resp["n_anomaly_votes"] == 2
+
+    def test_vote_any_strategy(self):
+        client = self._client()
+        resp = client.post(
+            "/ensemble/vote",
+            json={
+                "votes": [self._vote("a", False), self._vote("b", False), self._vote("c", True)],
+                "strategy": "any",
+            },
+        ).json()
+        assert resp["is_anomaly"] is True
+
+    def test_vote_all_strategy_no_consensus(self):
+        client = self._client()
+        resp = client.post(
+            "/ensemble/vote",
+            json={"votes": [self._vote("a", True), self._vote("b", False)], "strategy": "all"},
+        ).json()
+        assert resp["is_anomaly"] is False
+
+    def test_vote_all_strategy_full_consensus(self):
+        client = self._client()
+        resp = client.post(
+            "/ensemble/vote",
+            json={"votes": [self._vote("a", True), self._vote("b", True)], "strategy": "all"},
+        ).json()
+        assert resp["is_anomaly"] is True
+
+    def test_vote_weighted_strategy(self):
+        """Weighted с явными весами."""
+        client = self._client()
+        resp = client.post(
+            "/ensemble/vote",
+            json={
+                "votes": [self._vote("cusum", True, 0.9), self._vote("kalman", False, 0.1)],
+                "strategy": "weighted",
+                "weights": {"cusum": 3.0, "kalman": 1.0},
+            },
+        ).json()
+        assert resp["strategy"] == "weighted"
+        # cusum: 0.9*3 + kalman: 0.1*1 = 2.8 / 4 = 0.7 > 0.5 → аномалия
+        assert resp["is_anomaly"] is True
+
+    def test_vote_n_votes_matches_input(self):
+        client = self._client()
+        votes = [self._vote(f"d{i}", i % 2 == 0) for i in range(4)]
+        resp = client.post("/ensemble/vote", json={"votes": votes}).json()
+        assert resp["n_votes"] == 4
+
+    def test_vote_votes_list_in_response(self):
+        """Ответ содержит список голосов с полями name/is_anomaly/score."""
+        client = self._client()
+        resp = client.post(
+            "/ensemble/vote",
+            json={"votes": [self._vote("cusum", True, 0.8)], "strategy": "majority"},
+        ).json()
+        assert len(resp["votes"]) == 1
+        assert resp["votes"][0]["name"] == "cusum"
+        assert resp["votes"][0]["is_anomaly"] is True
+
+    def test_vote_422_empty_votes(self):
+        client = self._client()
+        resp = client.post("/ensemble/vote", json={"votes": []})
+        assert resp.status_code == 422
+
+    def test_vote_custom_min_agreement(self):
+        """min_agreement=0.3: достаточно 1 из 3 голосов."""
+        client = self._client()
+        resp = client.post(
+            "/ensemble/vote",
+            json={
+                "votes": [self._vote("a", True), self._vote("b", False), self._vote("c", False)],
+                "strategy": "majority",
+                "min_agreement": 0.3,
+            },
+        ).json()
+        # 1/3 ≈ 0.333 > 0.3 → аномалия
+        assert resp["is_anomaly"] is True
+
+    def test_strategies_endpoint(self):
+        client = self._client()
+        resp = client.get("/ensemble/strategies")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "strategies" in body
+        for strategy in ("majority", "weighted", "any", "all"):
+            assert strategy in body["strategies"]
+
+    def test_strategies_recommendation_present(self):
+        client = self._client()
+        body = client.get("/ensemble/strategies").json()
+        assert "recommendation" in body
