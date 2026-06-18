@@ -2068,3 +2068,303 @@ class TestRerankAPIEndpoint:
             retrieval_method="hybrid",
         )
         assert resp.reranked is False
+
+
+# ---------------------------------------------------------------------------
+# TestSemanticCache — 18 unit тестов
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticCache:
+    """Unit-тесты для SemanticCache — TF-IDF cosine similarity + LRU + TTL."""
+
+    def _make_response(self, answer: str = "answer") -> dict:
+        return {
+            "answer": answer,
+            "sources": ["doc1"],
+            "confidence_score": 0.9,
+            "is_faithful": True,
+            "faithfulness_method": "lexical",
+            "retrieval_method": "hybrid",
+            "reranked": False,
+        }
+
+    def test_empty_cache_returns_miss(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig())
+        result = cache.lookup("what is VPN?")
+        assert result.hit is False
+        assert result.response is None
+
+    def test_store_and_exact_lookup_hit(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.80))
+        cache.store("what is VPN?", self._make_response("VPN answer"))
+        result = cache.lookup("what is VPN?")
+        assert result.hit is True
+        assert result.response["answer"] == "VPN answer"
+
+    def test_similar_query_hits_cache(self):
+        """Перефразированный запрос с высоким лексическим перекрытием должен быть hit."""
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.70))
+        cache.store("what is remote work policy", self._make_response("remote work answer"))
+        # Немного иная формулировка, но те же ключевые слова
+        result = cache.lookup("remote work policy rules")
+        assert result.hit is True
+
+    def test_unrelated_query_misses_cache(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.85))
+        cache.store("what is VPN?", self._make_response("VPN answer"))
+        result = cache.lookup("how to request vacation days")
+        assert result.hit is False
+
+    def test_similarity_score_in_result(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.50))
+        cache.store("what is VPN", self._make_response())
+        result = cache.lookup("what is VPN")
+        assert 0.0 <= result.similarity <= 1.0
+
+    def test_cache_key_returned_on_hit(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.80))
+        cache.store("what is VPN?", self._make_response())
+        result = cache.lookup("what is VPN?")
+        assert result.cache_key is not None
+
+    def test_stats_initial_zeros(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig())
+        stats = cache.get_stats()
+        assert stats.total_queries == 0
+        assert stats.hits == 0
+        assert stats.misses == 0
+        assert stats.hit_rate == 0.0
+
+    def test_stats_after_miss(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig())
+        cache.lookup("anything")
+        stats = cache.get_stats()
+        assert stats.total_queries == 1
+        assert stats.misses == 1
+        assert stats.hit_rate == 0.0
+
+    def test_stats_after_hit(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.80))
+        cache.store("what is VPN?", self._make_response())
+        cache.lookup("what is VPN?")
+        stats = cache.get_stats()
+        assert stats.hits == 1
+        assert stats.hit_rate > 0.0
+
+    def test_hit_rate_calculation(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.80))
+        cache.store("what is VPN?", self._make_response())
+        cache.lookup("what is VPN?")  # hit
+        cache.lookup("vacation policy details")  # miss
+        stats = cache.get_stats()
+        assert stats.total_queries == 2
+        assert stats.hit_rate == pytest.approx(0.5, abs=0.01)
+
+    def test_lru_eviction_on_max_entries(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(max_entries=3, similarity_threshold=0.99))
+        cache.store("query A", self._make_response("A"))
+        cache.store("query B", self._make_response("B"))
+        cache.store("query C", self._make_response("C"))
+        cache.store("query D", self._make_response("D"))  # A должен быть вытеснен
+        stats = cache.get_stats()
+        assert stats.n_entries == 3
+        assert stats.evictions >= 1
+
+    def test_clear_removes_all_entries(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig())
+        cache.store("query one", self._make_response("ans1"))
+        cache.store("query two", self._make_response("ans2"))
+        n = cache.clear()
+        assert n == 2
+        assert cache.get_stats().n_entries == 0
+
+    def test_clear_returns_count(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig())
+        for i in range(5):
+            cache.store(f"unique query number {i} xyz", self._make_response(str(i)))
+        n = cache.clear()
+        assert n == 5
+
+    def test_ttl_expiry_causes_miss(self):
+        """TTL = 0.001 сек → запись мгновенно протухает."""
+        import time
+
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.80, ttl_seconds=0.001))
+        cache.store("what is VPN?", self._make_response())
+        time.sleep(0.01)
+        result = cache.lookup("what is VPN?")
+        assert result.hit is False
+
+    def test_ttl_expiry_increments_expirations_counter(self):
+        import time
+
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.80, ttl_seconds=0.001))
+        cache.store("what is VPN?", self._make_response())
+        time.sleep(0.01)
+        cache.lookup("what is VPN?")
+        assert cache.get_stats().expirations >= 1
+
+    def test_multiple_entries_best_match_returned(self):
+        """Кэш возвращает наиболее похожую запись, а не первую."""
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.50))
+        cache.store("how to access corporate VPN remote", self._make_response("VPN"))
+        cache.store("vacation days leave policy annual", self._make_response("VACATION"))
+        # Запрос про VPN должен вернуть VPN-ответ, а не отпуск
+        result = cache.lookup("VPN corporate remote access")
+        assert result.hit is True
+        assert result.response["answer"] == "VPN"
+
+    def test_hit_count_increments(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig(similarity_threshold=0.80))
+        key = cache.store("what is VPN?", self._make_response())
+        cache.lookup("what is VPN?")
+        cache.lookup("what is VPN?")
+        # Entry должна иметь hit_count >= 2
+        entry = cache._entries[key]
+        assert entry.hit_count >= 2
+
+    def test_store_returns_string_key(self):
+        from rag.cache.semantic_cache import CacheConfig, SemanticCache
+
+        cache = SemanticCache(CacheConfig())
+        key = cache.store("any question here", self._make_response())
+        assert isinstance(key, str)
+        assert len(key) > 0
+
+
+# ---------------------------------------------------------------------------
+# TestSemanticCacheAPIEndpoints — 9 API тестов
+# ---------------------------------------------------------------------------
+
+
+import pytest
+
+
+class TestSemanticCacheAPIEndpoints:
+    """Интеграционные тесты endpoint'ов /cache/* и cache-логики в /query."""
+
+    def _get_client(self):
+        from fastapi.testclient import TestClient
+        from rag.api.app import _reset_cache, app
+
+        _reset_cache()
+        return TestClient(app)
+
+    def test_cache_stats_endpoint_200(self):
+        client = self._get_client()
+        resp = client.get("/cache/stats")
+        assert resp.status_code == 200
+
+    def test_cache_stats_structure(self):
+        client = self._get_client()
+        data = client.get("/cache/stats").json()
+        required = {
+            "total_queries",
+            "hits",
+            "misses",
+            "hit_rate",
+            "n_entries",
+            "evictions",
+            "expirations",
+            "config",
+        }
+        assert required.issubset(data.keys())
+
+    def test_cache_stats_initial_zeros(self):
+        client = self._get_client()
+        data = client.get("/cache/stats").json()
+        assert data["total_queries"] == 0
+        assert data["n_entries"] == 0
+        assert data["hit_rate"] == 0.0
+
+    def test_cache_clear_endpoint_200(self):
+        client = self._get_client()
+        resp = client.post("/cache/clear")
+        assert resp.status_code == 200
+
+    def test_cache_clear_response_structure(self):
+        client = self._get_client()
+        data = client.post("/cache/clear").json()
+        assert "cleared" in data
+        assert "status" in data
+        assert data["status"] == "ok"
+
+    def test_cache_configure_endpoint_200(self):
+        client = self._get_client()
+        resp = client.post(
+            "/cache/configure",
+            json={"similarity_threshold": 0.90, "max_entries": 50, "ttl_seconds": 1800.0},
+        )
+        assert resp.status_code == 200
+
+    def test_cache_configure_response_echoes_config(self):
+        client = self._get_client()
+        data = client.post(
+            "/cache/configure",
+            json={"similarity_threshold": 0.90, "max_entries": 50, "ttl_seconds": 1800.0},
+        ).json()
+        assert data["similarity_threshold"] == pytest.approx(0.90)
+        assert data["max_entries"] == 50
+
+    def test_query_response_has_from_cache_field(self):
+        """QueryResponse должен содержать поле from_cache."""
+        from rag.api.app import QueryResponse
+
+        resp = QueryResponse(
+            answer="test",
+            sources=[],
+            confidence_score=1.0,
+            is_faithful=True,
+            faithfulness_method="lexical",
+            retrieval_method="hybrid",
+        )
+        assert resp.from_cache is False
+
+    def test_query_response_has_cache_similarity_field(self):
+        """QueryResponse.cache_similarity должен быть None по умолчанию."""
+        from rag.api.app import QueryResponse
+
+        resp = QueryResponse(
+            answer="test",
+            sources=[],
+            confidence_score=1.0,
+            is_faithful=True,
+            faithfulness_method="lexical",
+            retrieval_method="hybrid",
+        )
+        assert resp.cache_similarity is None

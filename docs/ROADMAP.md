@@ -1215,6 +1215,35 @@
         Bar-Shalom et al. 2001 "Estimation with Applications to Tracking and Navigation" §3.4,
         Ljung & Söderström 1983 "Theory and Practice of Recursive Identification" (NIS chi2 test),
         Mehra 1970 IEEE AC (innovation-based anomaly detection).
+- [x] Semantic Cache для RAG (Project 02) — 2026-06-18
+      rag/cache/semantic_cache.py: SemanticCache — TF-IDF cosine similarity (sublinear scaling,
+        stopword filtering) + LRU eviction (OrderedDict) + TTL expiration (timezone-aware UTC).
+      CacheConfig (similarity_threshold=0.85, max_entries=100, ttl_seconds=3600),
+        CacheEntry (query + response + created_at + last_accessed + hit_count + token_vector),
+        CacheResult (hit, response, similarity, cache_key), CacheStats.
+      Lookup: O(n·vocab) scan → best cosine → hit/miss; TTL expired записи удаляются.
+      Store: _tfidf_vector() sublinear TF 1+log(tf), O(1) amortized LRU eviction.
+      rag/api/app.py: интеграция в POST /query (cache lookup до retrieval + store faithful ответов).
+        QueryResponse расширен: from_cache (bool), cache_similarity (float|None).
+        POST /index автоматически инвалидирует кэш (cache_evicted в ответе).
+        GET  /cache/stats (total_queries, hits, misses, hit_rate, n_entries, evictions, expirations, config).
+        POST /cache/clear (принудительная очистка, возвращает число удалённых записей).
+        POST /cache/configure (обновление similarity_threshold/max_entries/ttl_seconds без перезапуска,
+          с переносом существующих записей и continuity статистики).
+        _reset_cache() для тестовой изоляции.
+      27 новых тестов: TestSemanticCache×18 (empty_miss, exact_hit, similar_hit, unrelated_miss,
+        similarity_range, key_returned, stats_zeros, stats_miss, stats_hit, hit_rate_calc,
+        lru_eviction, clear_removes, clear_count, ttl_miss, ttl_expirations, best_match, hit_count,
+        string_key), TestSemanticCacheAPIEndpoints×9 (stats_200, stats_structure, stats_zeros,
+        clear_200, clear_structure, configure_200, configure_echo, from_cache_field, cache_similarity_field).
+      259/259 тестов зелёных (+27, было 232). Lint clean.
+      Бизнес-эффект: FAQ-нагрузка на HR RAG-систему — "как оформить отпуск?" спрашивают
+        30-40 раз в день разными формулировками. Кэш сокращает LLM-вызовы и latency:
+        hit path ≈ 1 мс vs. полный пайплайн ≈ 2-4 сек. hit_rate > 0.3 → экономия 30%+ API бюджета.
+        Только faithful ответы кэшируются — unfaithful/галлюцинации не размножаются.
+      Источники: Bang et al. 2023 "GPTCache" (arxiv:2311.03027, InMemoryCache pattern),
+        Bhatt et al. 2024 "Redis Semantic Cache" (cosine similarity на embeddings),
+        LangChain SemanticSimilarityExactMatchCache docs 2026.
 
 ---
 

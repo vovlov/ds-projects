@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from ..cache.semantic_cache import CacheConfig, SemanticCache
 from ..generation.chain import generate_answer, generate_answer_with_gate
 from ..generation.stream import stream_answer
 from ..guardrails.input_guard import InputGuard
@@ -32,6 +33,13 @@ _indexed_chunks: list[dict] = []
 _knowledge_graph: KnowledgeGraph = KnowledgeGraph()
 _input_guard: InputGuard = InputGuard()
 _output_guard: OutputGuard = OutputGuard()
+_semantic_cache: SemanticCache = SemanticCache()
+
+
+def _reset_cache() -> None:
+    """Сброс кэша для тестовой изоляции."""
+    global _semantic_cache
+    _semantic_cache = SemanticCache()
 
 
 def _get_collection():
@@ -76,6 +84,8 @@ class QueryResponse(BaseModel):
     query_variants: list[str] | None = None  # заполняется при retrieval_method="multi_query"
     consistency_score: float | None = None  # Jaccard overlap вариантов, 0–1
     reranked: bool = False  # был ли применён cross-encoder reranking
+    from_cache: bool = False  # True если ответ взят из semantic cache
+    cache_similarity: float | None = None  # TF-IDF cosine similarity к найденной записи кэша
 
 
 @app.get("/health")
@@ -92,6 +102,9 @@ def query(request: QueryRequest) -> QueryResponse:
 
     Возвращает confidence_score — оценку поддержки ответа retrieved документами.
     Низкий score сигнализирует о potential hallucination.
+
+    Запросы кэшируются семантически: повторные/перефразированные вопросы
+    отдаются из кэша без retrieval и LLM-вызова (GET /cache/stats для мониторинга).
     """
     collection = _get_collection()
     if collection.count() == 0:
@@ -102,6 +115,24 @@ def query(request: QueryRequest) -> QueryResponse:
             is_faithful=False,
             faithfulness_method="lexical",
             retrieval_method=request.retrieval_method,
+        )
+
+    # Semantic cache lookup — пропускаем full RAG pipeline при hit
+    cache_result = _semantic_cache.lookup(request.question)
+    if cache_result.hit and cache_result.response is not None:
+        cached = cache_result.response
+        return QueryResponse(
+            answer=cached["answer"],
+            sources=cached.get("sources", []),
+            confidence_score=cached.get("confidence_score", 1.0),
+            is_faithful=cached.get("is_faithful", True),
+            faithfulness_method=cached.get("faithfulness_method", "cached"),
+            retrieval_method=cached.get("retrieval_method", request.retrieval_method),
+            query_variants=cached.get("query_variants"),
+            consistency_score=cached.get("consistency_score"),
+            reranked=cached.get("reranked", False),
+            from_cache=True,
+            cache_similarity=round(cache_result.similarity, 4),
         )
 
     mq_result = None  # populated only for multi_query method
@@ -169,17 +200,22 @@ def query(request: QueryRequest) -> QueryResponse:
             "faithfulness_method": "none",
         }
 
-    return QueryResponse(
-        answer=result["answer"],
-        sources=result.get("sources", []),
-        confidence_score=result["confidence_score"],
-        is_faithful=result["is_faithful"],
-        faithfulness_method=result["faithfulness_method"],
-        retrieval_method=used_method,
-        query_variants=mq_result.query_variants if mq_result else None,
-        consistency_score=mq_result.consistency_score if mq_result else None,
-        reranked=did_rerank,
-    )
+    response_dict = {
+        "answer": result["answer"],
+        "sources": result.get("sources", []),
+        "confidence_score": result["confidence_score"],
+        "is_faithful": result["is_faithful"],
+        "faithfulness_method": result["faithfulness_method"],
+        "retrieval_method": used_method,
+        "query_variants": mq_result.query_variants if mq_result else None,
+        "consistency_score": mq_result.consistency_score if mq_result else None,
+        "reranked": did_rerank,
+    }
+    # Кэшируем только faithful ответы — unfaithful могут быть нестабильны
+    if result["is_faithful"]:
+        _semantic_cache.store(request.question, response_dict)
+
+    return QueryResponse(**response_dict)
 
 
 @app.post("/query/stream")
@@ -255,6 +291,8 @@ def index_documents(request: IndexRequest = IndexRequest()):
     - "fixed"     — RecursiveCharacterTextSplitter 512 chars (default)
     - "semantic"  — TF-IDF cosine boundary detection
     - "paragraph" — split on double newlines
+
+    Очищает semantic cache — после переиндексации старые ответы могут быть устаревшими.
     """
     global _collection, _hybrid_index, _indexed_chunks
 
@@ -277,12 +315,16 @@ def index_documents(request: IndexRequest = IndexRequest()):
     _hybrid_index = HybridIndex.build(chunks)
     _knowledge_graph.build_from_chunks(chunks)
 
+    # Инвалидируем кэш: документы изменились → старые ответы устарели
+    evicted = _semantic_cache.clear()
+
     return {
         "indexed_chunks": count,
         "documents": len(docs),
         "chunking_strategy": request.chunking_strategy,
         "hybrid_index": _hybrid_index._bm25 is not None,
         "knowledge_graph_nodes": _knowledge_graph.stats().n_nodes,
+        "cache_evicted": evicted,
     }
 
 
@@ -567,6 +609,98 @@ def guardrails_config() -> dict:
             "harmful_patterns_count": len(_output_guard._harmful_re),
         },
         "compliance": ["OWASP LLM Top 10 2025", "GDPR Article 5", "EU AI Act Article 13"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Semantic Cache endpoints
+# ---------------------------------------------------------------------------
+
+
+class CacheConfigRequest(BaseModel):
+    """Параметры конфигурации semantic cache."""
+
+    similarity_threshold: float = 0.85
+    max_entries: int = 100
+    ttl_seconds: float = 3600.0
+
+
+@app.get("/cache/stats")
+def cache_stats() -> dict:
+    """Статистика semantic cache для мониторинга.
+
+    Возвращает hit_rate, число записей, eviction/expiration счётчики.
+    Hit rate > 0.3 означает хорошее переиспользование при FAQ-нагрузке.
+    """
+    stats = _semantic_cache.get_stats()
+    return {
+        "total_queries": stats.total_queries,
+        "hits": stats.hits,
+        "misses": stats.misses,
+        "hit_rate": round(stats.hit_rate, 4),
+        "n_entries": stats.n_entries,
+        "evictions": stats.evictions,
+        "expirations": stats.expirations,
+        "config": {
+            "similarity_threshold": _semantic_cache.config.similarity_threshold,
+            "max_entries": _semantic_cache.config.max_entries,
+            "ttl_seconds": _semantic_cache.config.ttl_seconds,
+        },
+    }
+
+
+@app.post("/cache/clear")
+def cache_clear() -> dict:
+    """Принудительно очистить semantic cache.
+
+    Используйте после обновления документов или при проблемах с качеством ответов.
+    Автоматически вызывается при POST /index.
+    """
+    evicted = _semantic_cache.clear()
+    return {"cleared": evicted, "status": "ok"}
+
+
+@app.post("/cache/configure")
+def cache_configure(request: CacheConfigRequest) -> dict:
+    """Изменить конфигурацию semantic cache без перезапуска.
+
+    Полезно для A/B-тестирования оптимального similarity_threshold:
+    0.95 = точное совпадение фраз, 0.75 = широкое семантическое matching.
+    Текущие записи сохраняются, новые параметры применяются к следующим lookups.
+    """
+    global _semantic_cache
+    old_entries = dict(_semantic_cache._entries)
+    old_stats = {
+        "total": _semantic_cache._total,
+        "hits": _semantic_cache._hits,
+        "misses": _semantic_cache._misses,
+        "evictions": _semantic_cache._evictions,
+        "expirations": _semantic_cache._expirations,
+    }
+    new_config = CacheConfig(
+        similarity_threshold=request.similarity_threshold,
+        max_entries=request.max_entries,
+        ttl_seconds=request.ttl_seconds,
+    )
+    _semantic_cache = SemanticCache(new_config)
+    # Перенести существующие записи в новый кэш (с обрезкой до нового max_entries)
+    for key, entry in old_entries.items():
+        _semantic_cache._entries[key] = entry
+    while len(_semantic_cache._entries) > new_config.max_entries:
+        oldest, _ = next(iter(_semantic_cache._entries.items()))
+        del _semantic_cache._entries[oldest]
+    # Восстановить счётчики для непрерывной статистики
+    _semantic_cache._total = old_stats["total"]
+    _semantic_cache._hits = old_stats["hits"]
+    _semantic_cache._misses = old_stats["misses"]
+    _semantic_cache._evictions = old_stats["evictions"]
+    _semantic_cache._expirations = old_stats["expirations"]
+    return {
+        "status": "configured",
+        "similarity_threshold": new_config.similarity_threshold,
+        "max_entries": new_config.max_entries,
+        "ttl_seconds": new_config.ttl_seconds,
+        "entries_preserved": len(_semantic_cache._entries),
     }
 
 
