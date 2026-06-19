@@ -33,6 +33,15 @@ from ..forecast.price_forecast import (
     generate_price_history,
 )
 from ..models.comps import ComparableSearch, CompsConfig
+from ..models.mortgage import (
+    DEFAULT_EXPENSE_RATIO,
+    MORTGAGE_PROGRAMS,
+    NEIGHBORHOOD_RENT_RATES,
+    MortgageCalculator,
+    MortgageConfig,
+    MortgageResult,
+    RentalYieldResult,
+)
 from ..models.quantile import QuantileRegressionModel
 from ..models.quantile import is_available as lgbm_available
 
@@ -497,6 +506,283 @@ def estimate_comps(req: CompsRequest) -> CompsResponse:
         price_deviation_pct=result.price_deviation_pct,
         market_position=result.market_position,
         n_comparables=result.n_comparables,
+    )
+
+
+##############################################################################
+# Mortgage & Rental Yield endpoints
+##############################################################################
+
+
+class MortgageRequest(BaseModel):
+    """Запрос ипотечного калькулятора."""
+
+    price: float = Field(..., gt=0, description="Цена квартиры, руб", examples=[12_000_000])
+    annual_rate: float = Field(0.165, gt=0, lt=1.0, description="Годовая ставка (0.165 = 16.5%)")
+    term_years: int = Field(20, ge=1, le=30, description="Срок кредита, лет")
+    down_payment_ratio: float = Field(
+        0.20, ge=0.10, le=0.90, description="Первоначальный взнос (0.20 = 20%)"
+    )
+    program: str = Field("standard", description="Название программы")
+
+
+class MortgageResponse(BaseModel):
+    """Результат ипотечного калькулятора."""
+
+    loan_amount: float
+    down_payment: float
+    monthly_payment: float
+    total_payment: float
+    total_interest: float
+    ltv_ratio: float
+    effective_annual_rate: float
+    n_payments: int
+    program: str
+
+
+class AffordabilityRequest(BaseModel):
+    """Запрос оценки доступности ипотеки."""
+
+    price: float = Field(..., gt=0, description="Цена квартиры, руб")
+    annual_income: float = Field(
+        ..., gt=0, description="Годовой доход заёмщика, руб", examples=[2_400_000]
+    )
+    annual_rate: float = Field(0.165, gt=0, lt=1.0, description="Годовая ставка")
+    term_years: int = Field(20, ge=1, le=30, description="Срок кредита, лет")
+    down_payment_ratio: float = Field(0.20, ge=0.10, le=0.90, description="Первоначальный взнос")
+
+
+class AffordabilityResponse(BaseModel):
+    """Оценка доступности ипотеки (NAR 28% / CFPB 43% правила)."""
+
+    monthly_payment: float
+    annual_income: float
+    dti_mortgage_only: float
+    is_affordable_28: bool
+    is_affordable_43: bool
+    recommended_income_annual: float
+    stress_test_rate: float
+    stress_test_payment: float
+
+
+class RentalYieldRequest(BaseModel):
+    """Запрос оценки доходности аренды."""
+
+    price: float = Field(..., gt=0, description="Цена квартиры, руб")
+    monthly_rent: float = Field(..., gt=0, description="Ежемесячная аренда, руб", examples=[85_000])
+    expense_ratio: float = Field(
+        DEFAULT_EXPENSE_RATIO,
+        ge=0.0,
+        le=0.5,
+        description="Доля расходов от годовой аренды (дефолт 0.20 = НПД+простой+ремонт)",
+    )
+
+
+class RentalYieldResponse(BaseModel):
+    """Доходность сдачи квартиры в аренду."""
+
+    monthly_rent: float
+    annual_rent: float
+    gross_yield_pct: float
+    net_yield_pct: float
+    payback_years: float
+    price_to_rent_ratio: float
+    annual_expenses_estimated: float
+
+
+class InvestmentRequest(BaseModel):
+    """Запрос сводного инвестиционного анализа (аренда + ипотека)."""
+
+    price: float = Field(..., gt=0, description="Цена квартиры, руб")
+    monthly_rent: float = Field(..., gt=0, description="Ожидаемая аренда, руб")
+    annual_rate: float = Field(0.165, gt=0, lt=1.0, description="Ставка ипотеки")
+    term_years: int = Field(20, ge=1, le=30, description="Срок кредита, лет")
+    down_payment_ratio: float = Field(0.20, ge=0.10, le=0.90, description="Первоначальный взнос")
+    expense_ratio: float = Field(
+        DEFAULT_EXPENSE_RATIO, ge=0.0, le=0.5, description="Доля расходов арендодателя"
+    )
+
+
+class InvestmentResponse(BaseModel):
+    """Сводный инвестиционный анализ: вердикт + cashflow."""
+
+    price: float
+    mortgage: MortgageResponse
+    rental: RentalYieldResponse
+    monthly_cashflow: float
+    is_cashflow_positive: bool
+    down_payment_recovery_months: float
+    investment_verdict: str
+
+
+class NeighborhoodRentInfo(BaseModel):
+    """Типичные ставки аренды и доходность для района."""
+
+    neighborhood: str
+    rent_rate_per_sqm: float
+    example_sqft_65: float
+    example_gross_yield_pct: float
+    example_net_yield_pct: float
+
+
+def _mortgage_to_response(r: MortgageResult) -> MortgageResponse:
+    return MortgageResponse(
+        loan_amount=r.loan_amount,
+        down_payment=r.down_payment,
+        monthly_payment=r.monthly_payment,
+        total_payment=r.total_payment,
+        total_interest=r.total_interest,
+        ltv_ratio=r.ltv_ratio,
+        effective_annual_rate=r.effective_annual_rate,
+        n_payments=r.n_payments,
+        program=r.program,
+    )
+
+
+def _rental_to_response(r: RentalYieldResult) -> RentalYieldResponse:
+    return RentalYieldResponse(
+        monthly_rent=r.monthly_rent,
+        annual_rent=r.annual_rent,
+        gross_yield_pct=r.gross_yield_pct,
+        net_yield_pct=r.net_yield_pct,
+        payback_years=r.payback_years,
+        price_to_rent_ratio=r.price_to_rent_ratio,
+        annual_expenses_estimated=r.annual_expenses_estimated,
+    )
+
+
+@app.post("/mortgage/calculate", response_model=MortgageResponse)
+def mortgage_calculate(req: MortgageRequest) -> MortgageResponse:
+    """Рассчитать ежемесячный платёж и параметры ипотечного кредита (аннуитет).
+
+    Формула: M = P·r(1+r)^n / ((1+r)^n − 1),
+    где P — тело кредита, r = annual_rate/12, n = term_years × 12.
+    """
+    config = MortgageConfig(
+        annual_rate=req.annual_rate,
+        term_years=req.term_years,
+        down_payment_ratio=req.down_payment_ratio,
+        program=req.program,
+    )
+    result = MortgageCalculator.compute_mortgage(req.price, config)
+    return _mortgage_to_response(result)
+
+
+@app.post("/mortgage/affordability", response_model=AffordabilityResponse)
+def mortgage_affordability(req: AffordabilityRequest) -> AffordabilityResponse:
+    """Оценить доступность ипотеки по доходу заёмщика.
+
+    Правила:
+      28% rule (NAR) — ипотека ≤ 28% месячного дохода (консервативный банковский стандарт).
+      43% rule (CFPB) — ипотека ≤ 43% дохода (юридический предел Qualified Mortgage).
+    Стресс-тест +2% — буфер по требованию ЦБ РФ / Базель III.
+    """
+    down = req.price * req.down_payment_ratio
+    loan = req.price - down
+    monthly = MortgageCalculator.compute_monthly_payment(loan, req.annual_rate, req.term_years)
+    result = MortgageCalculator.compute_affordability(
+        monthly_payment=monthly,
+        annual_income=req.annual_income,
+        annual_rate=req.annual_rate,
+        term_years=req.term_years,
+        loan_amount=loan,
+    )
+    return AffordabilityResponse(
+        monthly_payment=result.monthly_payment,
+        annual_income=result.annual_income,
+        dti_mortgage_only=result.dti_mortgage_only,
+        is_affordable_28=result.is_affordable_28,
+        is_affordable_43=result.is_affordable_43,
+        recommended_income_annual=result.recommended_income_annual,
+        stress_test_rate=result.stress_test_rate,
+        stress_test_payment=result.stress_test_payment,
+    )
+
+
+@app.get("/mortgage/programs")
+def mortgage_programs() -> list[dict]:
+    """Список доступных ипотечных программ России с актуальными ставками (2026-06)."""
+    return [
+        {
+            "program_id": prog_id,
+            **info,
+        }
+        for prog_id, info in MORTGAGE_PROGRAMS.items()
+    ]
+
+
+@app.post("/rental/yield", response_model=RentalYieldResponse)
+def rental_yield(req: RentalYieldRequest) -> RentalYieldResponse:
+    """Рассчитать валовую и чистую доходность сдачи квартиры в аренду.
+
+    gross_yield = annual_rent / price × 100%
+    net_yield   = (annual_rent − expenses) / price × 100%
+    payback     = price / annual_net_rent (лет до окупаемости)
+    P/R ratio   = price / monthly_rent (Shiller: норма ≤ 200 для инвестиционного рынка)
+    """
+    result = MortgageCalculator.compute_rental_yield(
+        price=req.price,
+        monthly_rent=req.monthly_rent,
+        expense_ratio=req.expense_ratio,
+    )
+    return _rental_to_response(result)
+
+
+@app.get("/rental/market", response_model=list[NeighborhoodRentInfo])
+def rental_market() -> list[NeighborhoodRentInfo]:
+    """Типичные ставки аренды и доходность по районам Москвы (ЦИАН 2026).
+
+    Пример для 65 кв.м — типичная двушка в Москве.
+    """
+    EXAMPLE_PRICE_PER_SQM = 350_000  # медиана Москвы 2026, руб/кв.м
+    EXAMPLE_SQM = 65.0
+
+    infos: list[NeighborhoodRentInfo] = []
+    for neighborhood, rate in sorted(NEIGHBORHOOD_RENT_RATES.items()):
+        example_rent = rate * EXAMPLE_SQM
+        example_price = EXAMPLE_PRICE_PER_SQM * EXAMPLE_SQM
+        yield_result = MortgageCalculator.compute_rental_yield(example_price, example_rent)
+        infos.append(
+            NeighborhoodRentInfo(
+                neighborhood=neighborhood,
+                rent_rate_per_sqm=rate,
+                example_sqft_65=example_rent,
+                example_gross_yield_pct=round(yield_result.gross_yield_pct, 2),
+                example_net_yield_pct=round(yield_result.net_yield_pct, 2),
+            )
+        )
+    return infos
+
+
+@app.post("/investment/analyze", response_model=InvestmentResponse)
+def investment_analyze(req: InvestmentRequest) -> InvestmentResponse:
+    """Сводный инвестиционный анализ: cashflow = аренда − ипотека − расходы.
+
+    Вердикт:
+      strong_buy — положительный cashflow + окупаемость ≤ 20 лет
+      buy        — окупаемость ≤ 25 лет
+      hold       — окупаемость 25–35 лет
+      avoid      — окупаемость > 35 лет
+    """
+    config = MortgageConfig(
+        annual_rate=req.annual_rate,
+        term_years=req.term_years,
+        down_payment_ratio=req.down_payment_ratio,
+    )
+    analysis = MortgageCalculator.analyze_investment(
+        price=req.price,
+        mortgage_config=config,
+        monthly_rent=req.monthly_rent,
+        expense_ratio=req.expense_ratio,
+    )
+    return InvestmentResponse(
+        price=analysis.price,
+        mortgage=_mortgage_to_response(analysis.mortgage),
+        rental=_rental_to_response(analysis.rental),
+        monthly_cashflow=analysis.monthly_cashflow,
+        is_cashflow_positive=analysis.is_cashflow_positive,
+        down_payment_recovery_months=analysis.down_payment_recovery_months,
+        investment_verdict=analysis.investment_verdict,
     )
 
 

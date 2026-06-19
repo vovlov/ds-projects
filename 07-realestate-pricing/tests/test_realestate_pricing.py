@@ -1257,3 +1257,507 @@ class TestCompsAPIEndpoints:
         data = client.post("/estimate/comps", json=self._VALID).json()
         for c in data["comparables"]:
             assert 0.0 <= c["similarity_score"] <= 1.0
+
+
+##############################################################################
+# Tests: Mortgage Calculator (unit)
+##############################################################################
+
+
+class TestMortgageCalculatorUnit:
+    """Юнит-тесты ипотечного калькулятора."""
+
+    def test_monthly_payment_positive(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        m = MortgageCalculator.compute_monthly_payment(10_000_000, 0.165, 20)
+        assert m > 0
+
+    def test_monthly_payment_zero_rate(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        # При нулевой ставке платёж = P / n
+        m = MortgageCalculator.compute_monthly_payment(1_200_000, 0.0, 10)
+        assert abs(m - 10_000) < 1.0  # 1 200 000 / 120 = 10 000
+
+    def test_monthly_payment_zero_loan(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        assert MortgageCalculator.compute_monthly_payment(0, 0.165, 20) == 0.0
+
+    def test_compute_mortgage_ltv(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        cfg = MortgageConfig(down_payment_ratio=0.20)
+        result = MortgageCalculator.compute_mortgage(10_000_000, cfg)
+        assert abs(result.ltv_ratio - 0.80) < 1e-9
+
+    def test_compute_mortgage_down_payment(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        cfg = MortgageConfig(down_payment_ratio=0.30)
+        result = MortgageCalculator.compute_mortgage(10_000_000, cfg)
+        assert result.down_payment == pytest.approx(3_000_000, rel=1e-6)
+
+    def test_compute_mortgage_loan_amount(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        cfg = MortgageConfig(down_payment_ratio=0.20)
+        result = MortgageCalculator.compute_mortgage(10_000_000, cfg)
+        assert result.loan_amount == pytest.approx(8_000_000, rel=1e-6)
+
+    def test_total_payment_greater_than_loan(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        cfg = MortgageConfig(annual_rate=0.10)
+        result = MortgageCalculator.compute_mortgage(10_000_000, cfg)
+        assert result.total_payment > result.loan_amount
+
+    def test_total_interest_positive(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        cfg = MortgageConfig(annual_rate=0.165, term_years=20)
+        result = MortgageCalculator.compute_mortgage(10_000_000, cfg)
+        assert result.total_interest > 0
+
+    def test_n_payments(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        cfg = MortgageConfig(term_years=25)
+        result = MortgageCalculator.compute_mortgage(10_000_000, cfg)
+        assert result.n_payments == 300  # 25 × 12
+
+    def test_lower_rate_lower_payment(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        p_high = MortgageCalculator.compute_monthly_payment(8_000_000, 0.165, 20)
+        p_low = MortgageCalculator.compute_monthly_payment(8_000_000, 0.06, 20)
+        assert p_low < p_high
+
+    def test_longer_term_lower_payment(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        p_short = MortgageCalculator.compute_monthly_payment(8_000_000, 0.165, 15)
+        p_long = MortgageCalculator.compute_monthly_payment(8_000_000, 0.165, 30)
+        assert p_long < p_short
+
+    def test_to_dict_keys(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        result = MortgageCalculator.compute_mortgage(10_000_000, MortgageConfig())
+        d = result.to_dict()
+        for key in (
+            "loan_amount",
+            "monthly_payment",
+            "total_payment",
+            "total_interest",
+            "ltv_ratio",
+        ):
+            assert key in d
+
+
+##############################################################################
+# Tests: Rental Yield Calculator (unit)
+##############################################################################
+
+
+class TestRentalYieldUnit:
+    """Юнит-тесты калькулятора доходности аренды."""
+
+    def test_gross_yield_formula(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        # gross = 120_000 * 12 / 10_000_000 * 100 = 14.4%
+        result = MortgageCalculator.compute_rental_yield(10_000_000, 120_000)
+        assert abs(result.gross_yield_pct - 14.4) < 0.01
+
+    def test_net_yield_less_than_gross(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        result = MortgageCalculator.compute_rental_yield(10_000_000, 80_000)
+        assert result.net_yield_pct < result.gross_yield_pct
+
+    def test_payback_years_finite(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        result = MortgageCalculator.compute_rental_yield(10_000_000, 80_000)
+        assert result.payback_years > 0
+        assert result.payback_years < 200
+
+    def test_zero_price_gives_zero_yield(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        result = MortgageCalculator.compute_rental_yield(0.0, 80_000)
+        assert result.gross_yield_pct == 0.0
+        assert result.net_yield_pct == 0.0
+
+    def test_expenses_calculated(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        result = MortgageCalculator.compute_rental_yield(10_000_000, 100_000, expense_ratio=0.20)
+        # 100_000 × 12 × 0.20 = 240_000
+        assert result.annual_expenses_estimated == pytest.approx(240_000, rel=1e-6)
+
+    def test_price_to_rent_ratio(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        result = MortgageCalculator.compute_rental_yield(10_000_000, 100_000)
+        assert result.price_to_rent_ratio == pytest.approx(100.0, rel=1e-6)
+
+    def test_to_dict_keys(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        result = MortgageCalculator.compute_rental_yield(10_000_000, 80_000)
+        d = result.to_dict()
+        for key in ("gross_yield_pct", "net_yield_pct", "payback_years", "price_to_rent_ratio"):
+            assert key in d
+
+    def test_estimate_market_rent_known_neighborhood(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        rent = MortgageCalculator.estimate_market_rent("Хамовники", 65.0)
+        # 210 руб/кв.м × 65 = 13 650 руб
+        assert rent == pytest.approx(210.0 * 65.0, rel=1e-6)
+
+    def test_estimate_market_rent_unknown_neighborhood(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator
+
+        rent = MortgageCalculator.estimate_market_rent("НесуществующийРайон", 50.0)
+        assert rent > 0  # fallback на медиану
+
+
+##############################################################################
+# Tests: Affordability (unit)
+##############################################################################
+
+
+class TestAffordabilityUnit:
+    """Юнит-тесты оценки доступности ипотеки."""
+
+    def _get_result(self, annual_income: float = 2_400_000):
+        from pricing.models.mortgage import MortgageCalculator
+
+        loan = 8_000_000
+        rate = 0.165
+        term = 20
+        monthly = MortgageCalculator.compute_monthly_payment(loan, rate, term)
+        return MortgageCalculator.compute_affordability(monthly, annual_income, rate, term, loan)
+
+    def test_affordable_28_high_income(self) -> None:
+        # Высокий доход: платёж явно ≤ 28%
+        result = self._get_result(annual_income=36_000_000)
+        assert result.is_affordable_28 is True
+
+    def test_not_affordable_28_low_income(self) -> None:
+        # Низкий доход: платёж явно > 28%
+        result = self._get_result(annual_income=600_000)
+        assert result.is_affordable_28 is False
+
+    def test_affordable_43_medium_income(self) -> None:
+        result = self._get_result(annual_income=6_000_000)
+        # DTI должен быть ≤ 43% при таком доходе
+        assert result.dti_mortgage_only <= 0.43
+
+    def test_stress_test_rate_higher(self) -> None:
+        result = self._get_result()
+        assert result.stress_test_rate == pytest.approx(0.185, rel=1e-6)
+
+    def test_stress_test_payment_higher(self) -> None:
+        result = self._get_result()
+        assert result.stress_test_payment > result.monthly_payment
+
+    def test_recommended_income_formula(self) -> None:
+        result = self._get_result()
+        # monthly_payment / 0.28 × 12 = recommended annual
+        expected = (result.monthly_payment / 0.28) * 12
+        assert result.recommended_income_annual == pytest.approx(expected, rel=1e-3)
+
+    def test_to_dict_keys(self) -> None:
+        result = self._get_result()
+        d = result.to_dict()
+        for key in (
+            "dti_mortgage_only",
+            "is_affordable_28",
+            "is_affordable_43",
+            "stress_test_payment",
+        ):
+            assert key in d
+
+
+##############################################################################
+# Tests: Investment Analysis (unit)
+##############################################################################
+
+
+class TestInvestmentAnalysisUnit:
+    """Юнит-тесты сводного инвестиционного анализа."""
+
+    def test_strong_buy_verdict(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        # IT-ипотека 5% — выгодно: платёж ~32K, аренда ~90K → cashflow +40K
+        cfg = MortgageConfig(annual_rate=0.05, term_years=20, down_payment_ratio=0.20)
+        analysis = MortgageCalculator.analyze_investment(5_000_000, cfg, 90_000)
+        assert analysis.is_cashflow_positive is True
+        assert analysis.investment_verdict in ("strong_buy", "buy")
+
+    def test_avoid_verdict_high_price_low_rent(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        # Дорогая квартира, мало аренды → очень долгая окупаемость
+        cfg = MortgageConfig(annual_rate=0.165, term_years=20)
+        analysis = MortgageCalculator.analyze_investment(100_000_000, cfg, 50_000)
+        assert analysis.investment_verdict == "avoid"
+
+    def test_cashflow_formula(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        cfg = MortgageConfig(annual_rate=0.10, term_years=20)
+        analysis = MortgageCalculator.analyze_investment(
+            10_000_000, cfg, 100_000, expense_ratio=0.20
+        )
+        # Ожидаемый cashflow = rent*(1-expense_ratio) - mortgage_payment
+        expected_cf = 100_000 * 0.80 - analysis.mortgage.monthly_payment
+        assert analysis.monthly_cashflow == pytest.approx(expected_cf, rel=1e-6)
+
+    def test_down_payment_recovery_positive(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        cfg = MortgageConfig(annual_rate=0.10, term_years=20)
+        analysis = MortgageCalculator.analyze_investment(10_000_000, cfg, 100_000)
+        assert analysis.down_payment_recovery_months > 0
+
+    def test_to_dict_structure(self) -> None:
+        from pricing.models.mortgage import MortgageCalculator, MortgageConfig
+
+        cfg = MortgageConfig()
+        analysis = MortgageCalculator.analyze_investment(10_000_000, cfg, 80_000)
+        d = analysis.to_dict()
+        assert "mortgage" in d
+        assert "rental" in d
+        assert "investment_verdict" in d
+        assert "monthly_cashflow" in d
+
+
+##############################################################################
+# Tests: Mortgage API endpoints
+##############################################################################
+
+
+class TestMortgageAPIEndpoints:
+    """Тесты API-эндпоинтов ипотечного калькулятора."""
+
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+        from pricing.api.app import app
+
+        yield TestClient(app)
+
+    _CALC_VALID = {
+        "price": 12_000_000,
+        "annual_rate": 0.165,
+        "term_years": 20,
+        "down_payment_ratio": 0.20,
+        "program": "standard",
+    }
+
+    _AFFORD_VALID = {
+        "price": 12_000_000,
+        "annual_income": 3_600_000,
+        "annual_rate": 0.165,
+        "term_years": 20,
+        "down_payment_ratio": 0.20,
+    }
+
+    def test_calculate_200(self, client) -> None:
+        resp = client.post("/mortgage/calculate", json=self._CALC_VALID)
+        assert resp.status_code == 200
+
+    def test_calculate_response_structure(self, client) -> None:
+        data = client.post("/mortgage/calculate", json=self._CALC_VALID).json()
+        for field in (
+            "monthly_payment",
+            "total_payment",
+            "total_interest",
+            "ltv_ratio",
+            "loan_amount",
+        ):
+            assert field in data
+
+    def test_calculate_ltv_correct(self, client) -> None:
+        data = client.post("/mortgage/calculate", json=self._CALC_VALID).json()
+        assert abs(data["ltv_ratio"] - 0.80) < 1e-4
+
+    def test_calculate_monthly_payment_positive(self, client) -> None:
+        data = client.post("/mortgage/calculate", json=self._CALC_VALID).json()
+        assert data["monthly_payment"] > 0
+
+    def test_calculate_422_missing_price(self, client) -> None:
+        resp = client.post("/mortgage/calculate", json={"annual_rate": 0.165})
+        assert resp.status_code == 422
+
+    def test_calculate_422_invalid_rate(self, client) -> None:
+        resp = client.post("/mortgage/calculate", json={**self._CALC_VALID, "annual_rate": 1.5})
+        assert resp.status_code == 422
+
+    def test_affordability_200(self, client) -> None:
+        resp = client.post("/mortgage/affordability", json=self._AFFORD_VALID)
+        assert resp.status_code == 200
+
+    def test_affordability_response_structure(self, client) -> None:
+        data = client.post("/mortgage/affordability", json=self._AFFORD_VALID).json()
+        for field in (
+            "dti_mortgage_only",
+            "is_affordable_28",
+            "is_affordable_43",
+            "recommended_income_annual",
+            "stress_test_payment",
+        ):
+            assert field in data
+
+    def test_affordability_dti_in_range(self, client) -> None:
+        data = client.post("/mortgage/affordability", json=self._AFFORD_VALID).json()
+        assert 0 < data["dti_mortgage_only"] < 10  # санитарный диапазон
+
+    def test_affordability_stress_rate_plus_2pct(self, client) -> None:
+        data = client.post("/mortgage/affordability", json=self._AFFORD_VALID).json()
+        assert abs(data["stress_test_rate"] - (self._AFFORD_VALID["annual_rate"] + 0.02)) < 1e-6
+
+    def test_programs_200(self, client) -> None:
+        resp = client.get("/mortgage/programs")
+        assert resp.status_code == 200
+
+    def test_programs_list_not_empty(self, client) -> None:
+        data = client.get("/mortgage/programs").json()
+        assert len(data) >= 4
+
+    def test_programs_have_rate_field(self, client) -> None:
+        data = client.get("/mortgage/programs").json()
+        for prog in data:
+            assert "annual_rate" in prog
+            assert "name" in prog
+
+
+##############################################################################
+# Tests: Rental Yield & Investment API endpoints
+##############################################################################
+
+
+class TestRentalInvestmentAPIEndpoints:
+    """Тесты API-эндпоинтов доходности аренды и инвестиционного анализа."""
+
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+        from pricing.api.app import app
+
+        yield TestClient(app)
+
+    _YIELD_VALID = {"price": 12_000_000, "monthly_rent": 90_000, "expense_ratio": 0.20}
+
+    _INVEST_VALID = {
+        "price": 12_000_000,
+        "monthly_rent": 90_000,
+        "annual_rate": 0.165,
+        "term_years": 20,
+        "down_payment_ratio": 0.20,
+        "expense_ratio": 0.20,
+    }
+
+    def test_rental_yield_200(self, client) -> None:
+        resp = client.post("/rental/yield", json=self._YIELD_VALID)
+        assert resp.status_code == 200
+
+    def test_rental_yield_response_structure(self, client) -> None:
+        data = client.post("/rental/yield", json=self._YIELD_VALID).json()
+        for field in (
+            "gross_yield_pct",
+            "net_yield_pct",
+            "payback_years",
+            "price_to_rent_ratio",
+            "annual_rent",
+        ):
+            assert field in data
+
+    def test_rental_yield_gross_positive(self, client) -> None:
+        data = client.post("/rental/yield", json=self._YIELD_VALID).json()
+        assert data["gross_yield_pct"] > 0
+
+    def test_rental_yield_net_less_gross(self, client) -> None:
+        data = client.post("/rental/yield", json=self._YIELD_VALID).json()
+        assert data["net_yield_pct"] < data["gross_yield_pct"]
+
+    def test_rental_yield_price_to_rent(self, client) -> None:
+        data = client.post("/rental/yield", json=self._YIELD_VALID).json()
+        # 12_000_000 / 90_000 = 133.33
+        assert abs(data["price_to_rent_ratio"] - 133.33) < 1.0
+
+    def test_rental_yield_422_zero_price(self, client) -> None:
+        resp = client.post("/rental/yield", json={"price": 0, "monthly_rent": 90_000})
+        assert resp.status_code == 422
+
+    def test_rental_market_200(self, client) -> None:
+        resp = client.get("/rental/market")
+        assert resp.status_code == 200
+
+    def test_rental_market_15_neighborhoods(self, client) -> None:
+        data = client.get("/rental/market").json()
+        assert len(data) == 15
+
+    def test_rental_market_fields(self, client) -> None:
+        data = client.get("/rental/market").json()
+        item = data[0]
+        for field in (
+            "neighborhood",
+            "rent_rate_per_sqm",
+            "example_gross_yield_pct",
+            "example_net_yield_pct",
+        ):
+            assert field in item
+
+    def test_rental_market_yields_positive(self, client) -> None:
+        data = client.get("/rental/market").json()
+        for item in data:
+            assert item["example_gross_yield_pct"] > 0
+            assert item["example_net_yield_pct"] > 0
+
+    def test_investment_analyze_200(self, client) -> None:
+        resp = client.post("/investment/analyze", json=self._INVEST_VALID)
+        assert resp.status_code == 200
+
+    def test_investment_analyze_structure(self, client) -> None:
+        data = client.post("/investment/analyze", json=self._INVEST_VALID).json()
+        for field in (
+            "mortgage",
+            "rental",
+            "monthly_cashflow",
+            "is_cashflow_positive",
+            "investment_verdict",
+            "down_payment_recovery_months",
+        ):
+            assert field in data
+
+    def test_investment_verdict_valid_values(self, client) -> None:
+        data = client.post("/investment/analyze", json=self._INVEST_VALID).json()
+        assert data["investment_verdict"] in ("strong_buy", "buy", "hold", "avoid")
+
+    def test_investment_mortgage_nested(self, client) -> None:
+        data = client.post("/investment/analyze", json=self._INVEST_VALID).json()
+        assert "monthly_payment" in data["mortgage"]
+        assert "loan_amount" in data["mortgage"]
+
+    def test_investment_422_missing_rent(self, client) -> None:
+        resp = client.post("/investment/analyze", json={"price": 12_000_000})
+        assert resp.status_code == 422
+
+    def test_investment_it_mortgage_cashflow(self, client) -> None:
+        """IT-ипотека 5% на дешёвую квартиру с высокой арендой → положительный cashflow."""
+        req = {
+            **self._INVEST_VALID,
+            "price": 5_000_000,
+            "monthly_rent": 90_000,
+            "annual_rate": 0.05,
+        }
+        data = client.post("/investment/analyze", json=req).json()
+        assert data["is_cashflow_positive"] is True

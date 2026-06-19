@@ -1245,6 +1245,36 @@
         Bhatt et al. 2024 "Redis Semantic Cache" (cosine similarity на embeddings),
         LangChain SemanticSimilarityExactMatchCache docs 2026.
 
+- [x] Mortgage & Rental Yield Calculator для Real Estate (Project 07) — 2026-06-19
+      pricing/models/mortgage.py: MortgageCalculator (аннуитет M=P·r(1+r)^n/((1+r)^n−1)),
+        MortgageConfig (annual_rate, term_years, down_payment_ratio), MortgageResult (LTV,
+        total_interest, n_payments), RentalYieldResult (gross/net yield, payback_years, P/R ratio,
+        annual_expenses 20% НПД+простой+ремонт), AffordabilityResult (DTI по NAR 28% / CFPB 43%,
+        стресс-тест +200 б.п. ЦБ РФ/Базель III, recommended_income), InvestmentAnalysis
+        (monthly_cashflow = аренда×(1−расходы) − ипотека, вердикт strong_buy/buy/hold/avoid).
+        MORTGAGE_PROGRAMS: 4 российских программы 2026 (standard 16.5%, family 6%, IT 5%,
+        preferential 8%). NEIGHBORHOOD_RENT_RATES: 15 районов Москвы (ЦИАН 2026), руб/кв.м.
+      pricing/api/app.py: 6 новых endpoint:
+        POST /mortgage/calculate  (аннуитет по цене + ставка/срок/взнос),
+        POST /mortgage/affordability (NAR 28% / CFPB 43% DTI + стресс-тест),
+        GET  /mortgage/programs   (4 госпрограммы с актуальными ставками 2026),
+        POST /rental/yield        (валовая/чистая доходность + P/R ratio + окупаемость),
+        GET  /rental/market       (все 15 районов: ставки + пример доходности 65 кв.м),
+        POST /investment/analyze  (ипотека + аренда → cashflow + investment_verdict).
+      62 новых теста: TestMortgageCalculatorUnit×12, TestRentalYieldUnit×9,
+        TestAffordabilityUnit×7, TestInvestmentAnalysisUnit×5,
+        TestMortgageAPIEndpoints×13, TestRentalInvestmentAPIEndpoints×16.
+      173/173 тестов зелёных (+62, было 111). Lint clean.
+      Бизнес-эффект: маркетплейс недвижимости даёт покупателю полный финансовый профиль:
+        не только "квартира стоит 12М", но и "ежемесячный платёж 112К руб × 240 мес,
+        переплата 14.8М, при доходе 2.4М/год DTI=56% > 43% (CFPB) → нужен co-borrower".
+        Инвестору: "cashflow −35К/мес при 16.5%, но при IT-ипотеке 5% → +12К/мес (strong_buy)".
+      Источники: ЦБ РФ ключевая ставка + банковский спред 2026 (cbr.ru),
+        ЦИАН Аналитика ставки аренды 2024-2026, CFPB Qualified Mortgage Rule 2014,
+        NAR Housing Affordability Index (28% front-end ratio),
+        Basel III stress testing (BIS 2010, +200bp rate shock),
+        Shiller 2006 "Irrational Exuberance" (P/R ratio как индикатор пузыря).
+
 ---
 
 ## Ежедневный цикл улучшений
