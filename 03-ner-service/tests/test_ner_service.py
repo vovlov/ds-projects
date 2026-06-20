@@ -905,3 +905,347 @@ class TestActiveLearningAPI:
         client.post("/active/pool/reset")
         status = client.get("/active/pool/status").json()
         assert status["total_added"] == 0
+
+
+# ── Named Entity Linking Tests ────────────────────────────────────────────────
+
+from ner.linking.entity_linker import (
+    EntityLink,
+    EntityLinker,
+    KBEntry,
+    KnowledgeBase,
+    LinkedEntity,
+    _normalize,
+    _score_candidate,
+    _trigram_jaccard,
+)
+
+
+class TestKnowledgeBase:
+    def test_default_kb_non_empty(self):
+        kb = KnowledgeBase()
+        assert len(kb) > 0
+
+    def test_default_kb_has_orgs(self):
+        kb = KnowledgeBase()
+        orgs = kb.get_candidates("ORG")
+        assert len(orgs) > 0
+
+    def test_default_kb_has_persons(self):
+        kb = KnowledgeBase()
+        pers = kb.get_candidates("PER")
+        assert len(pers) > 0
+
+    def test_default_kb_has_locations(self):
+        kb = KnowledgeBase()
+        locs = kb.get_candidates("LOC")
+        assert len(locs) > 0
+
+    def test_exact_lookup_canonical(self):
+        kb = KnowledgeBase()
+        entry = kb.lookup_exact("Яндекс")
+        assert entry is not None
+        assert entry.entity_id == "ORG-003"
+
+    def test_exact_lookup_alias(self):
+        kb = KnowledgeBase()
+        entry = kb.lookup_exact("Газпром")
+        assert entry is not None
+        assert entry.entity_id == "ORG-001"
+
+    def test_exact_lookup_case_insensitive(self):
+        kb = KnowledgeBase()
+        entry = kb.lookup_exact("газпром")
+        assert entry is not None
+
+    def test_lookup_unknown_returns_none(self):
+        kb = KnowledgeBase()
+        assert kb.lookup_exact("НеизвестнаяКомпания2026") is None
+
+    def test_add_entry_increases_len(self):
+        kb = KnowledgeBase()
+        before = len(kb)
+        kb.add_entry(KBEntry("TEST-001", "Тест ООО", "ORG", ["Тест"]))
+        assert len(kb) == before + 1
+
+    def test_add_entry_lookup_works(self):
+        kb = KnowledgeBase()
+        kb.add_entry(KBEntry("X-001", "ООО «Новая компания»", "ORG", ["Новая компания"]))
+        assert kb.lookup_exact("Новая компания") is not None
+
+    def test_org_candidates_include_courts(self):
+        """ORG-поиск должен включать COURT-записи для юридического NER."""
+        kb = KnowledgeBase()
+        candidates = kb.get_candidates("ORG")
+        types = {e.entity_type for e in candidates}
+        assert "COURT" in types
+
+
+class TestSimilarityFunctions:
+    def test_normalize_lowercase(self):
+        assert _normalize("Газпром") == "газпром"
+
+    def test_normalize_removes_quotes(self):
+        assert _normalize("«Газпром»") == "газпром"
+
+    def test_trigram_identical(self):
+        assert _trigram_jaccard("газпром", "газпром") == 1.0
+
+    def test_trigram_disjoint(self):
+        jac = _trigram_jaccard("abc", "xyz")
+        assert jac == 0.0
+
+    def test_trigram_partial(self):
+        jac = _trigram_jaccard("газпром", "газ")
+        assert 0.0 < jac < 1.0
+
+    def test_trigram_symmetric(self):
+        a, b = "Яндекс", "Яндекс Маркет"
+        assert abs(_trigram_jaccard(a, b) - _trigram_jaccard(b, a)) < 1e-9
+
+    def test_score_exact_match(self):
+        entry = KBEntry("ORG-003", "ООО «Яндекс»", "ORG", ["Яндекс"])
+        score = _score_candidate("Яндекс", entry)
+        assert score == 0.90  # alias match
+
+    def test_score_canonical_exact(self):
+        entry = KBEntry("LOC-001", "город Москва", "LOC", ["Москва"])
+        score = _score_candidate("город Москва", entry)
+        assert score == 1.0
+
+    def test_score_fuzzy_in_range(self):
+        entry = KBEntry("ORG-001", "ПАО «Газпром»", "ORG", [])
+        score = _score_candidate("Газпромнефть", entry)
+        assert 0.0 <= score <= 1.0
+
+
+class TestEntityLinker:
+    def test_link_exact_org(self):
+        linker = EntityLinker()
+        link = linker.link("Газпром", "ORG")
+        assert link is not None
+        assert link.entity_id == "ORG-001"
+        assert link.confidence == 1.0
+
+    def test_link_exact_loc(self):
+        linker = EntityLinker()
+        link = linker.link("Москва", "LOC")
+        assert link is not None
+        assert link.entity_id == "LOC-001"
+
+    def test_link_exact_per(self):
+        linker = EntityLinker()
+        link = linker.link("Владимир Путин", "PER")
+        assert link is not None
+        assert link.entity_id == "PER-001"
+
+    def test_link_alias_sberbank(self):
+        linker = EntityLinker()
+        link = linker.link("Сбер", "ORG")
+        assert link is not None
+        assert link.entity_id == "ORG-002"
+
+    def test_link_nil_unknown(self):
+        """Неизвестная сущность → NIL (link=None)."""
+        linker = EntityLinker()
+        link = linker.link("АБВГДЕЖЗИЙК", "ORG")
+        assert link is None
+
+    def test_link_confidence_range(self):
+        linker = EntityLinker()
+        link = linker.link("Яндекс", "ORG")
+        assert link is not None
+        assert 0.0 <= link.confidence <= 1.0
+
+    def test_link_high_threshold_nil(self):
+        """При высоком пороге нечёткие совпадения → NIL."""
+        linker = EntityLinker(confidence_threshold=0.99)
+        link = linker.link("Газпромнефть", "ORG")
+        assert link is None
+
+    def test_link_entities_batch(self):
+        linker = EntityLinker()
+        entities = [
+            ("Газпром", "ORG", 0, 7),
+            ("Москва", "LOC", 8, 14),
+            ("НеизвестнаяФирма2026", "ORG", 15, 35),
+        ]
+        results = linker.link_entities(entities)
+        assert len(results) == 3
+
+    def test_link_entities_linked_count(self):
+        linker = EntityLinker()
+        entities = [
+            ("Газпром", "ORG", 0, 7),
+            ("Москва", "LOC", 8, 14),
+            ("НеизвестнаяФирма2026", "ORG", 15, 35),
+        ]
+        results = linker.link_entities(entities)
+        linked = [r for r in results if r.link is not None]
+        nil = [r for r in results if r.link is None]
+        assert len(linked) == 2
+        assert len(nil) == 1
+
+    def test_linked_entity_fields(self):
+        linker = EntityLinker()
+        results = linker.link_entities([("Яндекс", "ORG", 0, 6)])
+        assert results[0].text == "Яндекс"
+        assert results[0].label == "ORG"
+        assert results[0].link is not None
+        assert results[0].link.canonical_name
+
+    def test_link_entity_to_dict(self):
+        link = EntityLink("ORG-001", "ПАО «Газпром»", "ORG", 0.95, "Описание")
+        d = link.to_dict()
+        assert "entity_id" in d
+        assert "canonical_name" in d
+        assert "confidence" in d
+
+    def test_linked_entity_to_dict_nil(self):
+        le = LinkedEntity("Unknown", "ORG", 0, 7, link=None)
+        d = le.to_dict()
+        assert d["link"] is None
+
+    def test_link_google(self):
+        linker = EntityLinker()
+        link = linker.link("Google", "ORG")
+        assert link is not None
+        assert link.entity_id == "ORG-007"
+
+    def test_link_russia(self):
+        linker = EntityLinker()
+        link = linker.link("Россия", "LOC")
+        assert link is not None
+        assert link.entity_id == "LOC-003"
+
+    def test_custom_kb(self):
+        entries = [KBEntry("CUSTOM-001", "ООО «Кастом»", "ORG", ["Кастом"])]
+        kb = KnowledgeBase(entries)
+        linker = EntityLinker(kb)
+        link = linker.link("Кастом", "ORG")
+        assert link is not None
+        assert link.entity_id == "CUSTOM-001"
+
+
+class TestNELAPIEndpoints:
+    def test_predict_linked_status_200(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/linked", json={"text": "Газпром работает в Москве."})
+        assert resp.status_code == 200
+
+    def test_predict_linked_structure(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/linked", json={"text": "Яндекс в Москве."})
+        data = resp.json()
+        assert "entities" in data
+        assert "linked_count" in data
+        assert "nil_count" in data
+        assert "text" in data
+
+    def test_predict_linked_counts_sum(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/linked", json={"text": "Газпром работает в Москве."})
+        data = resp.json()
+        total = data["linked_count"] + data["nil_count"]
+        assert total == len(data["entities"])
+
+    def test_predict_linked_entity_fields(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/linked", json={"text": "Газпром работает."})
+        entities = resp.json()["entities"]
+        for e in entities:
+            assert "text" in e
+            assert "label" in e
+            assert "link" in e
+
+    def test_predict_linked_known_entity_has_link(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/linked", json={"text": "Газпром — крупная компания."})
+        entities = resp.json()["entities"]
+        linked = [e for e in entities if e["link"] is not None]
+        assert len(linked) >= 1
+        assert linked[0]["link"]["entity_id"] == "ORG-001"
+
+    def test_predict_linked_link_fields(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/linked", json={"text": "Яндекс в Москве."})
+        entities = resp.json()["entities"]
+        linked = [e for e in entities if e["link"] is not None]
+        if linked:
+            link = linked[0]["link"]
+            assert "entity_id" in link
+            assert "canonical_name" in link
+            assert "confidence" in link
+            assert "entity_type" in link
+
+    def test_predict_linked_confidence_in_range(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.post("/predict/linked", json={"text": "Сбербанк в России."})
+        for e in resp.json()["entities"]:
+            if e["link"] is not None:
+                assert 0.0 <= e["link"]["confidence"] <= 1.0
+
+    def test_predict_linked_text_echoed(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        text = "Яндекс находится в Москве."
+        resp = client.post("/predict/linked", json={"text": text})
+        assert resp.json()["text"] == text
+
+    def test_kb_stats_status_200(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.get("/linking/kb/stats")
+        assert resp.status_code == 200
+
+    def test_kb_stats_structure(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        data = client.get("/linking/kb/stats").json()
+        assert "total_entries" in data
+        assert "by_type" in data
+        assert "confidence_threshold" in data
+
+    def test_kb_stats_total_positive(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        data = client.get("/linking/kb/stats").json()
+        assert data["total_entries"] > 0
+
+    def test_health_still_works(self):
+        from fastapi.testclient import TestClient
+        from ner.api.app import app
+
+        client = TestClient(app)
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "healthy"

@@ -1275,6 +1275,34 @@
         Basel III stress testing (BIS 2010, +200bp rate shock),
         Shiller 2006 "Irrational Exuberance" (P/R ratio как индикатор пузыря).
 
+- [x] Named Entity Linking (NEL) для NER Service (Project 03) — 2026-06-20
+      ner/linking/entity_linker.py: KBEntry/EntityLink/LinkedEntity/KnowledgeBase/EntityLinker.
+      База знаний (20 записей): ORG (Газпром, Сбербанк, Яндекс, Лукойл, Ростелеком,
+        Apple, Google, Microsoft, Amazon, Роснефть), PER (Путин, Медведев, Мишустин),
+        LOC (Москва, Санкт-Петербург, Россия, США, Китай), COURT (ВС РФ, КС РФ, АСГМ).
+      Многоуровневый скоринг без внешних зависимостей:
+        1.0 — exact match по каноническому имени
+        0.90 — alias match (нормализован: убраны кавычки, lowercase)
+        0.75 — prefix match (Яндекс ↔ Яндекс Маркет)
+        trigram Jaccard × 0.8 — fuzzy fallback (символьные 3-граммы)
+      NIL entity: confidence < threshold (дефолт 0.45) → link=None (неизвестная KB сущность).
+      ORG-запросы ищут и COURT-записи — важно для юридического NER.
+      KnowledgeBase: O(1) exact lookup через инвертированный индекс alias→entry,
+        add_entry() для runtime расширения (multi-tenant/domain-specific KB).
+      ner/api/app.py: 2 новых endpoint:
+        POST /predict/linked (NER + NEL pipeline → entities + link + linked_count/nil_count),
+        GET  /linking/kb/stats (total_entries, by_type, algorithm, confidence_threshold).
+      47 новых тестов: TestKnowledgeBase×11, TestSimilarityFunctions×9,
+        TestEntityLinker×16, TestNELAPIEndpoints×12. 144/144 зелёных (было 97, +47). Lint clean.
+      Бизнес-эффект: юридический NER различает «Газпром» (ORG-001) и «Газпром нефть» (ORG-001
+        NIL) — разные юридические лица. Система возвращает entity_id для дедупликации
+        при анализе договоров: "ПАО Газпром" и "Газпром" → один контрагент ORG-001.
+        Дополняет Active Learning (кто аннотировал NIL-сущности → кандидаты в KB).
+      Источники: Milne & Witten 2008 CIKM (Wikipedia anchor disambiguation),
+        Bunescu & Pasca 2006 EACL (named entity disambiguation as WSD),
+        Ferragina & Scaiella 2010 CIKM (TAGME — entity linking), EU AI Act Article 13
+        (трассируемость решений: entity_id в аудит-логе).
+
 ---
 
 ## Ежедневный цикл улучшений

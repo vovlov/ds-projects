@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from ..active.pool import LabelingPool
 from ..active.strategy import ActiveLearningConfig, SamplingStrategy, score_text
 from ..data.collection5 import get_collection5_sample
+from ..linking.entity_linker import EntityLinker, KnowledgeBase
 from ..model.conformal import ConformalNERPredictor
 from ..model.ner import extract_entities_from_bio, predict
 
@@ -33,6 +34,9 @@ if _cal_entities:
 # Active learning pool — singleton per process
 _pool = LabelingPool()
 _al_config = ActiveLearningConfig()
+
+# Entity Linker singleton — lazy-init with default KB
+_linker = EntityLinker(KnowledgeBase())
 
 
 # ── Request/Response models ───────────────────────────────────────────────────
@@ -70,6 +74,30 @@ class ConformalNERResponse(BaseModel):
     text: str
     q_hat: float
     calibrated: bool
+
+
+# Named Entity Linking models
+class EntityLinkResponse(BaseModel):
+    entity_id: str
+    canonical_name: str
+    entity_type: str
+    confidence: float
+    description: str
+
+
+class LinkedEntityResponse(BaseModel):
+    text: str
+    label: str
+    start: int
+    end: int
+    link: EntityLinkResponse | None = None
+
+
+class LinkedNERResponse(BaseModel):
+    entities: list[LinkedEntityResponse]
+    text: str
+    linked_count: int
+    nil_count: int
 
 
 # Active learning models
@@ -197,6 +225,69 @@ def predict_conformal(request: NERRequest):
         q_hat=_conformal.q_hat,
         calibrated=_conformal._calibrated,
     )
+
+
+# ── Named Entity Linking endpoints ───────────────────────────────────────────
+
+
+@app.post("/predict/linked", response_model=LinkedNERResponse)
+def predict_linked(request: NERRequest):
+    """
+    NER + Named Entity Linking в одном запросе.
+
+    Для каждой извлечённой сущности выполняется поиск в базе знаний:
+    - link != null: сущность связана с KB-записью (entity_id, canonical_name, confidence)
+    - link == null: NIL-сущность — не найдена в KB (новое имя, неизвестная организация)
+
+    confidence >= 0.9 — точное совпадение с псевдонимом
+    confidence in [0.45, 0.9) — нечёткое совпадение (trigram/prefix)
+    """
+    entities = predict(request.text)
+    entity_tuples = [(e.text, e.label, e.start, e.end) for e in entities]
+    linked = _linker.link_entities(entity_tuples)
+
+    linked_count = sum(1 for le in linked if le.link is not None)
+    nil_count = len(linked) - linked_count
+
+    return LinkedNERResponse(
+        entities=[
+            LinkedEntityResponse(
+                text=le.text,
+                label=le.label,
+                start=le.start,
+                end=le.end,
+                link=EntityLinkResponse(
+                    entity_id=le.link.entity_id,
+                    canonical_name=le.link.canonical_name,
+                    entity_type=le.link.entity_type,
+                    confidence=le.link.confidence,
+                    description=le.link.description,
+                )
+                if le.link is not None
+                else None,
+            )
+            for le in linked
+        ],
+        text=request.text,
+        linked_count=linked_count,
+        nil_count=nil_count,
+    )
+
+
+@app.get("/linking/kb/stats")
+def linking_kb_stats():
+    """Статистика базы знаний: число записей по типам."""
+    from ..linking.entity_linker import _DEFAULT_KB
+
+    stats: dict[str, int] = {}
+    for entry in _DEFAULT_KB:
+        stats[entry.entity_type] = stats.get(entry.entity_type, 0) + 1
+    return {
+        "total_entries": len(_DEFAULT_KB),
+        "by_type": stats,
+        "algorithm": "exact_match → alias_match → prefix_match → trigram_jaccard",
+        "confidence_threshold": _linker._threshold,
+    }
 
 
 # ── Active learning endpoints ─────────────────────────────────────────────────
