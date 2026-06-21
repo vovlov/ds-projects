@@ -1275,6 +1275,38 @@
         Basel III stress testing (BIS 2010, +200bp rate shock),
         Shiller 2006 "Irrational Exuberance" (P/R ratio как индикатор пузыря).
 
+- [x] Named Entity Linking (NEL) для NER Service (Project 03) — 2026-06-21
+      ner/linking/knowledge_base.py: KnowledgeBase с 25 встроенными сущностями
+        (15 крупнейших компаний MOEX: Газпром/Лукойл/Сбербанк/Яндекс и др. + 10 LOC).
+        EntityRecord (entity_id Wikidata-style, canonical_name, aliases, type, description),
+        KBStats, _normalize_text() (lowercase + пунктуация + пробелы).
+        Инвертированный alias-index: нормализованный псевдоним → entity_id, O(1) exact lookup.
+        add_entity() поддерживает расширение KB во время работы.
+      ner/linking/linker.py: EntityLinker — двухэтапный алгоритм NEL.
+        _char_ngrams() символьные n-граммы, _jaccard() Jaccard-сходство.
+        Fast path: exact_lookup(mention) → score=1.0 без сканирования.
+        Slow path: scored scan всех сущностей KB → max alias Jaccard + type_match_bonus (+0.15).
+        LinkingConfig (confidence_threshold=0.5, n_candidates=5, type_match_bonus, ngram_size),
+        EntityLinkResult (entity_id|None, canonical_name|None, confidence, is_linked, candidates[]).
+        link_entities(): batch processing список (mention, type) → [EntityLinkResult].
+      ner/api/app.py: 3 новых endpoint:
+        POST /link/entities (text → NER → NEL → LinkedEntityResponse с entity_id + confidence),
+        GET  /kb/stats (n_entities, by_type, n_aliases),
+        POST /kb/search (mention + entity_type → candidates + top_match для debugging/audit).
+      36 новых тестов: TestKnowledgeBase×11 (stats, exact/alias lookup, normalize, custom entity,
+        filter_by_type), TestEntityLinker×14 (exact/alias/fuzzy hit, unknown, type bonus, sorted
+        candidates, batch, edge cases Jaccard, mention_field),
+        TestEntityLinkingAPI×12 (link 200, structure, fields, n_total, kb_stats 200/fields,
+        kb_search 200/structure/top_match/unknown, health).
+      133/133 тестов зелёных (+36, было 97). Lint clean.
+      Бизнес-эффект: юридический отдел — "Газпром" в договоре → Q102048 (ПАО Газпром),
+        а не "Газпром нефть" Q185684. Дедупликация: "Сбер"/"Sberbank"/"Сберегательный банк" →
+        одна запись для аналитики по контрагентам. Дополняет NER+Conformal+ActiveLearning:
+        извлекли → подтвердили уверенность → разметили → теперь нормализовали к KB.
+      Источники: Mihalcea & Csomai 2007 ACL (anchor text NEL), Milne & Witten 2008 CIKM
+        (disambiguation via Wikipedia), Shen et al. 2015 ACM CSUR §3 (entity linking survey),
+        Wikidata entity IDs как стандарт идентификаторов.
+
 ---
 
 ## Ежедневный цикл улучшений
