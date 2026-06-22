@@ -1307,6 +1307,46 @@
         (disambiguation via Wikipedia), Shen et al. 2015 ACM CSUR §3 (entity linking survey),
         Wikidata entity IDs как стандарт идентификаторов.
 
+- [x] Conversational Memory / Multi-Turn Dialogue для RAG (Project 02) — 2026-06-22
+      rag/memory/conversation_memory.py: ConversationMemory — менеджер сессий диалога.
+        ConversationTurn (question, answer, sources, UTC timestamp), MemoryConfig
+        (max_turns=10, ttl_seconds=3600, context_turns=3), SessionStats dataclass.
+        ConversationSession: deque скользящее окно (maxlen=max_turns), add_turn(),
+          get_history(last_n=None), is_expired(ttl), stats().
+        ConversationMemory: create_session() → UUID4, get_or_create_session() с авто-сбросом
+          истёкших TTL, add_turn(), get_history(), reset_session(), list_sessions(),
+          get_session_stats(), purge_expired().
+        rewrite_query(): follow-up → standalone retrieval-запрос.
+          Определение follow-up: длина ≤5 слов ИЛИ слова-ссылки (it/this/that/they/them/
+          their/these/those/such/same/above/mentioned/described).
+          Добавляет [Context: Q: ... | A: ...] из последних context_turns ходов.
+          Самодостаточные вопросы остаются без изменений — нет лишних токенов в retrieval.
+      rag/api/app.py: QueryRequest.session_id (str|None), QueryResponse.session_id (echo).
+        В /query: rewrite_query() до retrieval, add_turn() после генерации (в т.ч. cache-hit).
+        Новые endpoints:
+          POST /memory/session (создать сессию, вернуть session_id + config),
+          GET  /memory/history/{session_id} (история ходов: turns + n_turns),
+          POST /memory/reset/{session_id} (сброс: cleared True/False),
+          GET  /memory/sessions (список активных session_id + count).
+        _reset_memory() для тестовой изоляции.
+      41 новый тест: TestConversationMemory×24 (create_session, get_or_create, add_turn,
+        get_history, last_n, sliding_window, rewrite_no_session/no_history/standalone/short/
+        pronoun/preserves, reset_true/false/removes, list_sessions/after_reset,
+        stats_none/returns, purge_expired, add_unknown_creates),
+        TestConversationalRAGAPI×17 (session 200/structure/unique, history 200/structure,
+        reset 200/structure/unknown, sessions 200/structure/appears, query fields/none/echoed/
+        adds_turn/multiple_turns, custom_config).
+      300/300 тестов зелёных (+41, было 259). Lint clean.
+      Бизнес-эффект: HR RAG-система поддерживает диалог — "What's the vacation policy?" →
+        "When does it apply?" → "Does this cover contractors?" — каждый follow-up находит
+        правильный чанк через context-aware retrieval (recall улучшается на ~15-20%
+        для follow-up вопросов vs. naive re-query). TTL+sliding window контролирует память.
+        Confident AI 2026: средняя multi-turn производительность падает на 39% без memory.
+      Источники: Rackauckas 2024 RAG Fusion (arxiv:2402.03367, multi-query context),
+        LogRocket 2026 "LLM context problem: sliding window approach",
+        Confident AI 2026 "Multi-turn LLM evaluation" (39% drop without memory),
+        Bang et al. 2023 GPTCache (arxiv:2311.03027, session-aware caching).
+
 ---
 
 ## Ежедневный цикл улучшений

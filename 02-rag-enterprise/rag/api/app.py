@@ -17,6 +17,7 @@ from ..guardrails.input_guard import InputGuard
 from ..guardrails.output_guard import OutputGuard
 from ..ingestion.loader import chunk_documents, load_documents
 from ..knowledge_graph.graph import KnowledgeGraph
+from ..memory.conversation_memory import ConversationMemory, MemoryConfig
 from ..retrieval.hybrid import HybridIndex, hybrid_search
 from ..retrieval.multi_query import MultiQueryConfig, multi_query_retrieve
 from ..retrieval.reranker import RerankConfig, rerank
@@ -34,12 +35,19 @@ _knowledge_graph: KnowledgeGraph = KnowledgeGraph()
 _input_guard: InputGuard = InputGuard()
 _output_guard: OutputGuard = OutputGuard()
 _semantic_cache: SemanticCache = SemanticCache()
+_conversation_memory: ConversationMemory = ConversationMemory()
 
 
 def _reset_cache() -> None:
     """Сброс кэша для тестовой изоляции."""
     global _semantic_cache
     _semantic_cache = SemanticCache()
+
+
+def _reset_memory() -> None:
+    """Сброс памяти диалога для тестовой изоляции."""
+    global _conversation_memory
+    _conversation_memory = ConversationMemory()
 
 
 def _get_collection():
@@ -70,6 +78,7 @@ class QueryRequest(BaseModel):
     retrieval_method: str = "hybrid"  # "hybrid" | "semantic" | "graph" | "multi_query"
     n_query_variants: int = 3  # для multi_query: число переформулировок
     use_reranking: bool = False  # cross-encoder lexical reranking после первичного поиска
+    session_id: str | None = None  # ID сессии для multi-turn диалога (опционально)
 
 
 class QueryResponse(BaseModel):
@@ -86,6 +95,7 @@ class QueryResponse(BaseModel):
     reranked: bool = False  # был ли применён cross-encoder reranking
     from_cache: bool = False  # True если ответ взят из semantic cache
     cache_similarity: float | None = None  # TF-IDF cosine similarity к найденной записи кэша
+    session_id: str | None = None  # Echo session_id для client-side tracking
 
 
 @app.get("/health")
@@ -115,14 +125,31 @@ def query(request: QueryRequest) -> QueryResponse:
             is_faithful=False,
             faithfulness_method="lexical",
             retrieval_method=request.retrieval_method,
+            session_id=request.session_id,
+        )
+
+    # Query rewriting: follow-up вопросы обогащаем историей диалога
+    retrieval_question = request.question
+    if request.session_id:
+        retrieval_question = _conversation_memory.rewrite_query(
+            request.session_id, request.question
         )
 
     # Semantic cache lookup — пропускаем full RAG pipeline при hit
     cache_result = _semantic_cache.lookup(request.question)
     if cache_result.hit and cache_result.response is not None:
         cached = cache_result.response
+        cached_answer = cached["answer"]
+        # Также записываем cache-hit в историю диалога
+        if request.session_id:
+            _conversation_memory.add_turn(
+                request.session_id,
+                request.question,
+                cached_answer,
+                cached.get("sources", []),
+            )
         return QueryResponse(
-            answer=cached["answer"],
+            answer=cached_answer,
             sources=cached.get("sources", []),
             confidence_score=cached.get("confidence_score", 1.0),
             is_faithful=cached.get("is_faithful", True),
@@ -133,13 +160,14 @@ def query(request: QueryRequest) -> QueryResponse:
             reranked=cached.get("reranked", False),
             from_cache=True,
             cache_similarity=round(cache_result.similarity, 4),
+            session_id=request.session_id,
         )
 
     mq_result = None  # populated only for multi_query method
 
     if request.retrieval_method == "multi_query":
         mq_result = multi_query_retrieve(
-            request.question,
+            retrieval_question,
             collection,
             _hybrid_index,
             n_results=request.n_results,
@@ -149,7 +177,7 @@ def query(request: QueryRequest) -> QueryResponse:
         used_method = "multi_query"
     elif request.retrieval_method == "hybrid":
         context = hybrid_search(
-            request.question,
+            retrieval_question,
             collection,
             _hybrid_index,
             n_results=request.n_results,
@@ -157,14 +185,14 @@ def query(request: QueryRequest) -> QueryResponse:
         used_method = "hybrid" if _hybrid_index is not None else "semantic"
     elif request.retrieval_method == "graph":
         context = _knowledge_graph.query_graph(
-            request.question,
+            retrieval_question,
             _indexed_chunks,
             n_results=request.n_results,
         )
         if not context:
             # Fall back to hybrid when graph finds no entities in query
             context = hybrid_search(
-                request.question,
+                retrieval_question,
                 collection,
                 _hybrid_index,
                 n_results=request.n_results,
@@ -175,13 +203,13 @@ def query(request: QueryRequest) -> QueryResponse:
     else:
         from ..retrieval.store import search as semantic_search
 
-        context = semantic_search(request.question, collection, n_results=request.n_results)
+        context = semantic_search(retrieval_question, collection, n_results=request.n_results)
         used_method = "semantic"
 
     # Optional cross-encoder lexical reranking
     did_rerank = False
     if request.use_reranking and context:
-        rerank_results = rerank(request.question, context, n_results=request.n_results)
+        rerank_results = rerank(retrieval_question, context, n_results=request.n_results)
         context = [r.chunk for r in rerank_results]
         did_rerank = True
 
@@ -210,10 +238,21 @@ def query(request: QueryRequest) -> QueryResponse:
         "query_variants": mq_result.query_variants if mq_result else None,
         "consistency_score": mq_result.consistency_score if mq_result else None,
         "reranked": did_rerank,
+        "session_id": request.session_id,
     }
+
     # Кэшируем только faithful ответы — unfaithful могут быть нестабильны
     if result["is_faithful"]:
         _semantic_cache.store(request.question, response_dict)
+
+    # Записываем ход в историю диалога (только оригинальный вопрос, не rewritten)
+    if request.session_id:
+        _conversation_memory.add_turn(
+            request.session_id,
+            request.question,
+            result["answer"],
+            result.get("sources", []),
+        )
 
     return QueryResponse(**response_dict)
 
@@ -702,6 +741,115 @@ def cache_configure(request: CacheConfigRequest) -> dict:
         "ttl_seconds": new_config.ttl_seconds,
         "entries_preserved": len(_semantic_cache._entries),
     }
+
+
+# ---------------------------------------------------------------------------
+# Conversational Memory endpoints
+# ---------------------------------------------------------------------------
+
+
+class MemoryConfigRequest(BaseModel):
+    """Параметры конфигурации памяти диалога."""
+
+    max_turns: int = 10
+    ttl_seconds: float = 3600.0
+    context_turns: int = 3
+
+
+class ConversationTurnResponse(BaseModel):
+    """Один ход диалога для API-ответа."""
+
+    question: str
+    answer: str
+    sources: list[str]
+    timestamp: str
+
+
+class MemoryHistoryResponse(BaseModel):
+    """История диалога для API-ответа."""
+
+    session_id: str
+    turns: list[ConversationTurnResponse]
+    n_turns: int
+
+
+@app.post("/memory/session")
+def memory_create_session(request: MemoryConfigRequest = MemoryConfigRequest()) -> dict:
+    """Создать новую сессию диалога.
+
+    Возвращает session_id, который нужно передавать в POST /query
+    для сохранения контекста между вопросами.
+
+    Настраиваемые параметры:
+    - max_turns: максимум ходов в скользящем окне (default 10)
+    - ttl_seconds: время жизни сессии без активности (default 1 час)
+    - context_turns: число предыдущих ходов для rewriting follow-up вопросов
+    """
+    global _conversation_memory
+    config = MemoryConfig(
+        max_turns=request.max_turns,
+        ttl_seconds=request.ttl_seconds,
+        context_turns=request.context_turns,
+    )
+    # Создаём сессию с переданными параметрами
+    _conversation_memory_with_config = ConversationMemory(config)
+    session_id = _conversation_memory_with_config.create_session()
+    # Перенести сессию в глобальный менеджер
+    _conversation_memory._sessions[session_id] = _conversation_memory_with_config._sessions[
+        session_id
+    ]
+    return {
+        "session_id": session_id,
+        "max_turns": config.max_turns,
+        "ttl_seconds": config.ttl_seconds,
+        "context_turns": config.context_turns,
+    }
+
+
+@app.get("/memory/history/{session_id}", response_model=MemoryHistoryResponse)
+def memory_history(session_id: str) -> MemoryHistoryResponse:
+    """Получить историю диалога для сессии.
+
+    Возвращает все ходы в хронологическом порядке (oldest first).
+    Полезно для отображения диалога в UI или аудита.
+    """
+    turns = _conversation_memory.get_history(session_id)
+    return MemoryHistoryResponse(
+        session_id=session_id,
+        turns=[
+            ConversationTurnResponse(
+                question=t.question,
+                answer=t.answer,
+                sources=t.sources,
+                timestamp=t.timestamp,
+            )
+            for t in turns
+        ],
+        n_turns=len(turns),
+    )
+
+
+@app.post("/memory/reset/{session_id}")
+def memory_reset(session_id: str) -> dict:
+    """Сбросить историю диалога для сессии.
+
+    Используйте для начала нового диалога с тем же session_id
+    без создания новой сессии. После сброса следующий вопрос
+    обрабатывается без истории контекста.
+    """
+    cleared = _conversation_memory.reset_session(session_id)
+    return {"session_id": session_id, "cleared": cleared}
+
+
+@app.get("/memory/sessions")
+def memory_sessions() -> dict:
+    """Список активных сессий диалога.
+
+    Возвращает только не истёкшие сессии (TTL не вышел).
+    Полезно для мониторинга нагрузки и аудита.
+    """
+    active = _conversation_memory.list_sessions()
+    return {"active_sessions": active, "count": len(active)}
 
 
 def ask(question: str, n_results: int = 5, use_hybrid: bool = True) -> str:
