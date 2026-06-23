@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from scanner.data.dataset import generate_synthetic_documents, get_feature_matrix
 from scanner.models.classifier import predict, train_classifier
 from scanner.preprocessing.layout import LayoutResult, segment_layout
+from scanner.preprocessing.morph import MorphConfig, MorphResult, clean_document
 from scanner.preprocessing.quality import QualityMetrics, assess_quality
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Document Scanner API",
     description="Classify scanned insurance documents by type.",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 # module-level state -- populated on first classify request
@@ -221,3 +222,64 @@ def classify_with_quality_gate(request: ClassifyWithGateRequest) -> dict[str, An
 
     result["classification"] = predictions[0]
     return result
+
+
+# ---------------------------------------------------------------------------
+# Morphological cleaning endpoints
+# ---------------------------------------------------------------------------
+
+
+class CleaningStatsResponse(BaseModel):
+    otsu_threshold: int
+    original_ink_pixels: int
+    cleaned_ink_pixels: int
+    lines_removed: int
+    noise_pixels_removed: int
+    noise_reduction_pct: float
+
+
+class CleanDocumentResponse(BaseModel):
+    cleaned_pixels: list[list[int]]
+    height: int
+    width: int
+    stats: CleaningStatsResponse
+
+
+class CleanDocumentRequest(BaseModel):
+    """Grayscale pixel matrix plus optional morphological pipeline config."""
+
+    pixels: list[list[int]] = Field(..., description="2-D grayscale pixel matrix [0-255]")
+    kernel_size: int = Field(3, ge=3, le=9, description="Structuring element side (odd)")
+    remove_h_lines: bool = Field(True, description="Remove horizontal ruling lines")
+    remove_v_lines: bool = Field(False, description="Remove vertical ruling lines")
+    despeckle: bool = Field(True, description="Remove isolated noise pixels")
+
+
+@app.post("/preprocess/clean", response_model=CleanDocumentResponse)
+def clean_document_endpoint(request: CleanDocumentRequest) -> CleanDocumentResponse:
+    """Morphological document cleaning pipeline.
+
+    Stages: Otsu binarisation → ruling line removal → despeckle (opening).
+
+    Returns a cleaned binary image (white=255 background, ink=0) and
+    pixel-level cleaning statistics.  Designed as a pre-processing step
+    before OCR or layout analysis — removing scanner noise and form
+    separator lines improves downstream precision.
+    """
+    arr = _pixels_to_array(request.pixels)
+    kernel = request.kernel_size if request.kernel_size % 2 == 1 else request.kernel_size + 1
+    cfg = MorphConfig(
+        kernel_size=kernel,
+        remove_h_lines=request.remove_h_lines,
+        remove_v_lines=request.remove_v_lines,
+        despeckle=request.despeckle,
+        despeckle_kernel=kernel,
+    )
+    result: MorphResult = clean_document(arr, cfg)
+    d = result.to_dict()
+    return CleanDocumentResponse(
+        cleaned_pixels=d["cleaned_pixels"],
+        height=d["height"],
+        width=d["width"],
+        stats=CleaningStatsResponse(**d["stats"]),
+    )

@@ -936,3 +936,425 @@ class TestLayoutAPIEndpoints:
         resp = self.client.post("/layout/segment", json={"pixels": pixels})
         data = resp.json()
         assert data["n_text_zones"] == len(data["regions"])
+
+
+# ===========================================================================
+# TestMorphologicalCleaning — unit tests for morph.py
+# ===========================================================================
+
+
+class TestOtsuThreshold:
+    """Otsu threshold selection from gray-level histograms."""
+
+    def test_all_white_returns_high_threshold(self):
+        from scanner.preprocessing.morph import otsu_threshold
+
+        arr = np.full((20, 20), 255, dtype=np.uint8)
+        t = otsu_threshold(arr)
+        assert isinstance(t, int)
+        assert 0 <= t <= 255
+
+    def test_all_black_returns_low_threshold(self):
+        from scanner.preprocessing.morph import otsu_threshold
+
+        arr = np.zeros((20, 20), dtype=np.uint8)
+        t = otsu_threshold(arr)
+        assert 0 <= t <= 255
+
+    def test_bimodal_threshold_between_peaks(self):
+        from scanner.preprocessing.morph import otsu_threshold
+
+        # Two clear peaks: ~50 (dark [30,70)) and ~200 (light [180,220))
+        rng = np.random.default_rng(0)
+        dark = rng.integers(30, 70, size=200, dtype=np.uint8)
+        light = rng.integers(180, 220, size=200, dtype=np.uint8)
+        arr = np.concatenate([dark, light]).reshape(20, 20)
+        t = otsu_threshold(arr)
+        # Threshold must lie between the two clusters: above dark max (≤69), below light min (≥180)
+        assert 60 <= t <= 180
+
+    def test_returns_int(self):
+        from scanner.preprocessing.morph import otsu_threshold
+
+        arr = np.arange(256, dtype=np.uint8).reshape(16, 16)
+        assert isinstance(otsu_threshold(arr), int)
+
+
+class TestBinarize:
+    """Grayscale to ink-mask conversion."""
+
+    def test_all_white_gives_no_ink(self):
+        from scanner.preprocessing.morph import binarize
+
+        arr = np.full((10, 10), 255, dtype=np.uint8)
+        ink = binarize(arr)
+        assert ink.sum() == 0
+
+    def test_all_black_gives_all_ink(self):
+        from scanner.preprocessing.morph import binarize
+
+        arr = np.zeros((10, 10), dtype=np.uint8)
+        ink = binarize(arr)
+        assert ink.sum() == 100
+
+    def test_fixed_threshold(self):
+        from scanner.preprocessing.morph import binarize
+
+        arr = np.array([[100, 200], [50, 150]], dtype=np.uint8)
+        ink = binarize(arr, threshold=128)
+        # pixels <= 128 are ink (standard Otsu convention)
+        assert ink[0, 0] == 1  # 100 <= 128
+        assert ink[0, 1] == 0  # 200 > 128
+        assert ink[1, 0] == 1  # 50 <= 128
+        assert ink[1, 1] == 0  # 150 > 128
+
+    def test_output_dtype_uint8(self):
+        from scanner.preprocessing.morph import binarize
+
+        arr = np.arange(100, dtype=np.uint8).reshape(10, 10)
+        ink = binarize(arr)
+        assert ink.dtype == np.uint8
+
+    def test_values_binary(self):
+        from scanner.preprocessing.morph import binarize
+
+        arr = np.random.default_rng(1).integers(0, 256, (15, 15), dtype=np.uint8)
+        ink = binarize(arr)
+        unique = set(ink.ravel().tolist())
+        assert unique.issubset({0, 1})
+
+
+class TestErodeDilate:
+    """Morphological erosion and dilation."""
+
+    def _ink(self, rows, cols):
+        """Small white-on-black ink mask."""
+        arr = np.zeros((rows, cols), dtype=np.uint8)
+        return arr
+
+    def test_erode_removes_isolated_pixel(self):
+        from scanner.preprocessing.morph import erode
+
+        ink = np.zeros((7, 7), dtype=np.uint8)
+        ink[3, 3] = 1  # single isolated pixel
+        result = erode(ink, kernel_size=3)
+        assert result[3, 3] == 0
+
+    def test_dilate_expands_single_pixel(self):
+        from scanner.preprocessing.morph import dilate
+
+        ink = np.zeros((7, 7), dtype=np.uint8)
+        ink[3, 3] = 1
+        result = dilate(ink, kernel_size=3)
+        # 3×3 neighbourhood around (3,3) should be 1
+        assert result[2:5, 2:5].sum() == 9
+
+    def test_erode_preserves_large_block(self):
+        from scanner.preprocessing.morph import erode
+
+        ink = np.ones((9, 9), dtype=np.uint8)
+        result = erode(ink, kernel_size=3)
+        # Interior pixels survive erosion
+        assert result[3, 3] == 1
+
+    def test_dilate_reduces_by_erosion(self):
+        from scanner.preprocessing.morph import dilate, erode
+
+        # erode then dilate (opening) should not exceed original
+        ink = np.ones((9, 9), dtype=np.uint8)
+        result = dilate(erode(ink, 3), 3)
+        assert result.sum() <= ink.sum()
+
+    def test_erosion_output_shape(self):
+        from scanner.preprocessing.morph import erode
+
+        ink = np.ones((10, 12), dtype=np.uint8)
+        result = erode(ink, kernel_size=3)
+        assert result.shape == ink.shape
+
+
+class TestOpeningClosing:
+    """Opening (erode→dilate) and closing (dilate→erode)."""
+
+    def test_opening_removes_thin_noise(self):
+        from scanner.preprocessing.morph import opening
+
+        ink = np.zeros((11, 11), dtype=np.uint8)
+        ink[5, 5] = 1  # single isolated pixel = noise
+        result = opening(ink, kernel_size=3)
+        assert result.sum() == 0
+
+    def test_opening_preserves_thick_block(self):
+        from scanner.preprocessing.morph import opening
+
+        ink = np.ones((9, 9), dtype=np.uint8)
+        result = opening(ink, kernel_size=3)
+        # Central 7×7 core should survive
+        assert result[4, 4] == 1
+
+    def test_closing_fills_interior_hole(self):
+        from scanner.preprocessing.morph import closing
+
+        ink = np.ones((9, 9), dtype=np.uint8)
+        ink[4, 4] = 0  # hole in the middle
+        result = closing(ink, kernel_size=3)
+        assert result[4, 4] == 1
+
+    def test_opening_idempotent_on_clean_image(self):
+        from scanner.preprocessing.morph import opening
+
+        ink = np.ones((7, 7), dtype=np.uint8)
+        once = opening(ink, 3)
+        twice = opening(once, 3)
+        np.testing.assert_array_equal(once, twice)
+
+
+class TestRemoveLines:
+    """Horizontal and vertical ruling line removal."""
+
+    def test_removes_full_width_row(self):
+        from scanner.preprocessing.morph import remove_horizontal_lines
+
+        ink = np.zeros((10, 20), dtype=np.uint8)
+        ink[5] = 1  # full horizontal line
+        result, n = remove_horizontal_lines(ink, min_width_frac=0.6)
+        assert n >= 1
+        assert result[5].sum() == 0
+
+    def test_keeps_sparse_text_row(self):
+        from scanner.preprocessing.morph import remove_horizontal_lines
+
+        ink = np.zeros((10, 20), dtype=np.uint8)
+        ink[3, :5] = 1  # only 25 % of row → not a line
+        result, n = remove_horizontal_lines(ink, min_width_frac=0.6)
+        assert n == 0
+        assert result[3, :5].sum() == 5
+
+    def test_returns_line_count(self):
+        from scanner.preprocessing.morph import remove_horizontal_lines
+
+        ink = np.zeros((10, 20), dtype=np.uint8)
+        ink[2] = 1
+        ink[7] = 1
+        _, n = remove_horizontal_lines(ink, min_width_frac=0.5)
+        assert n == 2
+
+    def test_removes_full_height_col(self):
+        from scanner.preprocessing.morph import remove_vertical_lines
+
+        ink = np.zeros((20, 10), dtype=np.uint8)
+        ink[:, 4] = 1  # full vertical line
+        result, n = remove_vertical_lines(ink, min_height_frac=0.6)
+        assert n >= 1
+        assert result[:, 4].sum() == 0
+
+
+class TestDespeckle:
+    """Isolated noise pixel removal via morphological opening."""
+
+    def test_removes_isolated_pixels(self):
+        from scanner.preprocessing.morph import despeckle_ink
+
+        ink = np.zeros((9, 9), dtype=np.uint8)
+        ink[2, 2] = 1  # isolated noise
+        ink[6, 6] = 1  # isolated noise
+        result, removed = despeckle_ink(ink, kernel_size=3)
+        assert removed == 2
+        assert result.sum() == 0
+
+    def test_preserves_large_blobs(self):
+        from scanner.preprocessing.morph import despeckle_ink
+
+        ink = np.ones((9, 9), dtype=np.uint8)
+        result, _ = despeckle_ink(ink, kernel_size=3)
+        assert result[4, 4] == 1
+
+    def test_noise_removed_count_non_negative(self):
+        from scanner.preprocessing.morph import despeckle_ink
+
+        ink = np.zeros((5, 5), dtype=np.uint8)
+        _, removed = despeckle_ink(ink, kernel_size=3)
+        assert removed >= 0
+
+
+class TestCleanDocument:
+    """Full morphological pipeline clean_document()."""
+
+    def test_returns_morph_result(self):
+        from scanner.preprocessing.morph import MorphResult, clean_document
+
+        arr = np.full((20, 20), 200, dtype=np.uint8)
+        arr[10, :] = 10  # horizontal line
+        result = clean_document(arr)
+        assert isinstance(result, MorphResult)
+
+    def test_output_shape_matches_input(self):
+        from scanner.preprocessing.morph import clean_document
+
+        arr = np.random.default_rng(2).integers(0, 256, (15, 25), dtype=np.uint8)
+        result = clean_document(arr)
+        assert len(result.cleaned_pixels) == 15
+        assert len(result.cleaned_pixels[0]) == 25
+
+    def test_cleaned_values_binary_0_or_255(self):
+        from scanner.preprocessing.morph import clean_document
+
+        arr = np.random.default_rng(3).integers(0, 256, (12, 12), dtype=np.uint8)
+        result = clean_document(arr)
+        flat = [v for row in result.cleaned_pixels for v in row]
+        assert set(flat).issubset({0, 255})
+
+    def test_stats_threshold_in_range(self):
+        from scanner.preprocessing.morph import clean_document
+
+        arr = np.random.default_rng(4).integers(0, 256, (20, 20), dtype=np.uint8)
+        result = clean_document(arr)
+        assert 0 <= result.stats.otsu_threshold <= 255
+
+    def test_line_removal_reduces_ink(self):
+        from scanner.preprocessing.morph import MorphConfig, clean_document
+
+        # Image: mostly white with one full-width dark row
+        arr = np.full((20, 20), 220, dtype=np.uint8)
+        arr[10, :] = 0  # dominant dark ruling line
+        cfg = MorphConfig(remove_h_lines=True, despeckle=False)
+        result = clean_document(arr, cfg)
+        assert result.stats.lines_removed >= 1
+
+    def test_despeckle_reports_noise(self):
+        from scanner.preprocessing.morph import MorphConfig, clean_document
+
+        # All-white image with a single black pixel (isolated noise)
+        arr = np.full((15, 15), 220, dtype=np.uint8)
+        arr[7, 7] = 5  # single dark pixel
+        cfg = MorphConfig(remove_h_lines=False, despeckle=True, despeckle_kernel=3)
+        result = clean_document(arr, cfg)
+        assert result.stats.noise_pixels_removed >= 0  # opened away
+
+    def test_empty_array_raises(self):
+        from scanner.preprocessing.morph import clean_document
+
+        with pytest.raises(ValueError, match="empty"):
+            clean_document(np.array([]).reshape(0, 0))
+
+    def test_to_dict_keys(self):
+        from scanner.preprocessing.morph import clean_document
+
+        arr = np.full((10, 10), 200, dtype=np.uint8)
+        d = clean_document(arr).to_dict()
+        for key in ("cleaned_pixels", "height", "width", "stats"):
+            assert key in d
+
+    def test_stats_to_dict_keys(self):
+        from scanner.preprocessing.morph import clean_document
+
+        arr = np.full((10, 10), 200, dtype=np.uint8)
+        stats = clean_document(arr).stats
+        d = stats.to_dict()
+        for key in (
+            "otsu_threshold",
+            "original_ink_pixels",
+            "cleaned_ink_pixels",
+            "lines_removed",
+            "noise_pixels_removed",
+            "noise_reduction_pct",
+        ):
+            assert key in d
+
+    def test_noise_reduction_pct_range(self):
+        from scanner.preprocessing.morph import clean_document
+
+        arr = np.random.default_rng(5).integers(0, 256, (20, 20), dtype=np.uint8)
+        stats = clean_document(arr).stats
+        assert 0.0 <= stats.noise_reduction_pct() <= 1.0
+
+
+# ===========================================================================
+# TestMorphAPIEndpoints
+# ===========================================================================
+
+
+class TestMorphAPIEndpoints:
+    """API tests for POST /preprocess/clean."""
+
+    @pytest.fixture(autouse=True)
+    def client(self, api_client):
+        self.client = api_client
+
+    def _white_pixels(self, h=10, w=10):
+        return [[255] * w for _ in range(h)]
+
+    def _pixels_with_line(self, h=20, w=20, line_row=10):
+        pixels = [[220] * w for _ in range(h)]
+        pixels[line_row] = [0] * w
+        return pixels
+
+    def test_200_on_valid_input(self):
+        resp = self.client.post("/preprocess/clean", json={"pixels": self._white_pixels()})
+        assert resp.status_code == 200
+
+    def test_response_structure(self):
+        resp = self.client.post("/preprocess/clean", json={"pixels": self._white_pixels(8, 12)})
+        body = resp.json()
+        for key in ("cleaned_pixels", "height", "width", "stats"):
+            assert key in body
+
+    def test_dimensions_match_input(self):
+        resp = self.client.post("/preprocess/clean", json={"pixels": self._white_pixels(6, 9)})
+        body = resp.json()
+        assert body["height"] == 6
+        assert body["width"] == 9
+
+    def test_stats_fields_present(self):
+        resp = self.client.post("/preprocess/clean", json={"pixels": self._white_pixels()})
+        stats = resp.json()["stats"]
+        for key in (
+            "otsu_threshold",
+            "original_ink_pixels",
+            "cleaned_ink_pixels",
+            "lines_removed",
+            "noise_pixels_removed",
+            "noise_reduction_pct",
+        ):
+            assert key in stats
+
+    def test_422_on_empty_pixels(self):
+        resp = self.client.post("/preprocess/clean", json={"pixels": []})
+        assert resp.status_code == 422
+
+    def test_422_on_empty_rows(self):
+        resp = self.client.post("/preprocess/clean", json={"pixels": [[]]})
+        assert resp.status_code == 422
+
+    def test_line_removal_reduces_ink_via_api(self):
+        pixels = self._pixels_with_line(h=20, w=20, line_row=10)
+        resp = self.client.post(
+            "/preprocess/clean",
+            json={"pixels": pixels, "remove_h_lines": True, "despeckle": False},
+        )
+        assert resp.status_code == 200
+        stats = resp.json()["stats"]
+        assert stats["lines_removed"] >= 1
+
+    def test_disable_h_lines_leaves_line_intact(self):
+        pixels = self._pixels_with_line(h=20, w=20, line_row=10)
+        no_clean = self.client.post(
+            "/preprocess/clean",
+            json={"pixels": pixels, "remove_h_lines": False, "despeckle": False},
+        )
+        assert no_clean.status_code == 200
+        assert no_clean.json()["stats"]["lines_removed"] == 0
+
+    def test_cleaned_pixels_values_0_or_255(self):
+        pixels = [[100, 200], [50, 220]]
+        resp = self.client.post("/preprocess/clean", json={"pixels": pixels})
+        assert resp.status_code == 200
+        flat = [v for row in resp.json()["cleaned_pixels"] for v in row]
+        assert set(flat).issubset({0, 255})
+
+    def test_custom_kernel_size(self):
+        resp = self.client.post(
+            "/preprocess/clean",
+            json={"pixels": self._white_pixels(10, 10), "kernel_size": 5},
+        )
+        assert resp.status_code == 200

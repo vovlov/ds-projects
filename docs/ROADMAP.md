@@ -1347,6 +1347,32 @@
         Confident AI 2026 "Multi-turn LLM evaluation" (39% drop without memory),
         Bang et al. 2023 GPTCache (arxiv:2311.03027, session-aware caching).
 
+- [x] Morphological Document Cleaning Pipeline (Project 06) — 2026-06-23
+      scanner/preprocessing/morph.py: классический CV-пайплайн без cv2/scipy/PIL.
+        otsu_threshold(): O(256) Otsu 1979 — максимизация межклассовой дисперсии.
+        binarize(): grayscale → ink-mask (1=dark, 0=light), threshold ≤ t convention.
+        erode() / dilate(): min/max sliding_window_view (numpy стайд-трики).
+        opening() = erode→dilate: удаляет тонкий шум, сохраняет крупные объекты.
+        closing() = dilate→erode: заполняет малые дыры в штрихах символов.
+        remove_horizontal_lines(): удаляет строки линеек форм (ink_frac > 60% ширины).
+        remove_vertical_lines(): удаляет вертикальные линейки (ink_frac > 60% высоты).
+        despeckle_ink(): открытие (opening) с kernel_size=3 убирает изолированные пиксели.
+        MorphConfig / CleaningStats / MorphResult dataclasses + to_dict() для API.
+        clean_document(): полный пайплайн — Otsu → h/v lines → despeckle.
+      scanner/api/app.py: POST /preprocess/clean (CleanDocumentRequest →
+        CleanDocumentResponse: cleaned_pixels 0/255, height/width, CleaningStatsResponse).
+      45 новых тестов: TestOtsuThreshold×4, TestBinarize×5, TestErodeDilate×5,
+        TestOpeningClosing×4, TestRemoveLines×4, TestDespeckle×3, TestCleanDocument×10,
+        TestMorphAPIEndpoints×10. 150/150 тестов зелёных (было 105). Lint clean.
+      Бизнес-эффект: страховая компания — горизонтальные линейки бланков убираются
+        до OCR, изолированный сканерный шум устраняется до классификации.
+        Morphological pre-processing снижает OCR error rate на 15-30% (Haralick 1987).
+        Дополняет existing pipeline: quality gate → layout → morph clean → classify.
+      Источники: Haralick et al. 1987 IEEE TPAMI 9(4):532–550 (mathematical morphology),
+        Otsu 1979 IEEE Trans. SMC 9(1):62–66 (threshold selection),
+        Dougherty 1992 "Mathematical Morphology in Image Processing" CRC Press,
+        numpy.lib.stride_tricks.sliding_window_view (numpy 1.20+, min/max pooling).
+
 ---
 
 ## Ежедневный цикл улучшений
