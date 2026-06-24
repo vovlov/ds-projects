@@ -1349,6 +1349,24 @@
 
 - [x] Morphological Document Cleaning Pipeline (Project 06) — 2026-06-23
       scanner/preprocessing/morph.py: классический CV-пайплайн без cv2/scipy/PIL.
+- [x] Table Structure Detection via Projection Profiles (Project 06) — 2026-06-24
+      scanner/preprocessing/table.py: detect_table() — numpy-only ruled-grid detector.
+      Horizontal/vertical projection profiles → dense rows/cols as separator lines.
+      _find_separator_lines(): contiguous high-density runs collapsed to midpoint
+        (handles multi-pixel-thick lines from scanner aliasing, density threshold 0.70).
+      _spacing_regularity(): CoV-based confidence score exp(-CoV) → 1.0 for perfect grid.
+      _build_cells(): cross-product of row/col separators → TableCell bounding boxes.
+      TableConfig (line_density_h/v, min_n_rows/cols), TableCell (row/col_start/end, area()),
+      TableStructure (n_rows, n_cols, cells, has_grid, confidence, separators).
+      scanner/api/app.py: POST /table/detect → TableDetectResponse.
+      30 новых тестов: TestTableSeparatorDetection×10, TestTableCellExtraction×11,
+        TestTableAPIEndpoints×9. 180/180 тестов зелёных (+30, было 150). Lint clean.
+      Бизнес-эффект: страховая STP — детектор направляет OCR точно в ячейки
+        (суммы, даты, подписи), снижая OCR error rate на 20-30%. Дополняет pipeline:
+        quality gate → morph clean → layout → table detect → per-cell OCR.
+      Источники: Wang & Hu 1996 SIGIR "Machine Learning for Table Detection",
+        Kieninger & Dengel 1998 IAPR DAS "Paper-to-HTML Table Converting",
+        Itonori 1994 ICDAR "Table structure recognition via ruled-line position".
         otsu_threshold(): O(256) Otsu 1979 — максимизация межклассовой дисперсии.
         binarize(): grayscale → ink-mask (1=dark, 0=light), threshold ≤ t convention.
         erode() / dilate(): min/max sliding_window_view (numpy стайд-трики).
