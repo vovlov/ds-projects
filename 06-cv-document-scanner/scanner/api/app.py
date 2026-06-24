@@ -20,6 +20,7 @@ from scanner.models.classifier import predict, train_classifier
 from scanner.preprocessing.layout import LayoutResult, segment_layout
 from scanner.preprocessing.morph import MorphConfig, MorphResult, clean_document
 from scanner.preprocessing.quality import QualityMetrics, assess_quality
+from scanner.preprocessing.table import TableStructure, detect_table
 
 logger = logging.getLogger(__name__)
 
@@ -282,4 +283,58 @@ def clean_document_endpoint(request: CleanDocumentRequest) -> CleanDocumentRespo
         height=d["height"],
         width=d["width"],
         stats=CleaningStatsResponse(**d["stats"]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Table structure detection endpoint
+# ---------------------------------------------------------------------------
+
+
+class TableCellResponse(BaseModel):
+    row_idx: int
+    col_idx: int
+    row_start: int
+    row_end: int
+    col_start: int
+    col_end: int
+    area: int
+
+
+class TableDetectResponse(BaseModel):
+    n_rows: int
+    n_cols: int
+    n_cells: int
+    has_grid: bool
+    confidence: float
+    row_separators: list[int]
+    col_separators: list[int]
+    cells: list[TableCellResponse]
+
+
+@app.post("/table/detect", response_model=TableDetectResponse)
+def detect_table_endpoint(request: PixelMatrix) -> TableDetectResponse:
+    """Detect a ruled-grid table in a document image.
+
+    Locates horizontal and vertical separator lines via projection profiles
+    and maps their intersections to individual cell bounding boxes.
+    Suitable for insurance forms, claim sheets, and tabular contracts —
+    any document with printed ruling lines.
+
+    Returns has_grid=False when fewer than 2 rows × 2 columns of cells are
+    found (not enough structure to be a table).  confidence ∈ [0, 1]
+    reflects how evenly spaced the grid lines are — higher is better.
+    """
+    arr = _pixels_to_array(request.pixels)
+    result: TableStructure = detect_table(arr)
+    d = result.to_dict()
+    return TableDetectResponse(
+        n_rows=d["n_rows"],
+        n_cols=d["n_cols"],
+        n_cells=d["n_cells"],
+        has_grid=d["has_grid"],
+        confidence=d["confidence"],
+        row_separators=d["row_separators"],
+        col_separators=d["col_separators"],
+        cells=[TableCellResponse(**c) for c in d["cells"]],
     )

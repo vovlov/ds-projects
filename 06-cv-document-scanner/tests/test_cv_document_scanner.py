@@ -1358,3 +1358,257 @@ class TestMorphAPIEndpoints:
             json={"pixels": self._white_pixels(10, 10), "kernel_size": 5},
         )
         assert resp.status_code == 200
+
+
+# ===========================================================================
+# TestTableSeparatorDetection — unit tests for table.py
+# ===========================================================================
+
+
+class TestTableSeparatorDetection:
+    """Unit tests for separator line detection and spacing regularity."""
+
+    from scanner.preprocessing.table import detect_table
+
+    def _white(self, h: int = 50, w: int = 50) -> np.ndarray:
+        return np.full((h, w), 255, dtype=np.uint8)
+
+    def test_blank_image_no_row_separators(self):
+        from scanner.preprocessing.table import detect_table
+
+        result = detect_table(self._white())
+        assert result.row_separators == []
+
+    def test_blank_image_no_col_separators(self):
+        from scanner.preprocessing.table import detect_table
+
+        result = detect_table(self._white())
+        assert result.col_separators == []
+
+    def test_full_width_h_line_detected(self):
+        from scanner.preprocessing.table import detect_table
+
+        img = self._white()
+        img[25, :] = 0  # full-width horizontal ink line
+        result = detect_table(img)
+        assert len(result.row_separators) == 1
+
+    def test_full_height_v_line_detected(self):
+        from scanner.preprocessing.table import detect_table
+
+        img = self._white()
+        img[:, 25] = 0  # full-height vertical ink line
+        result = detect_table(img)
+        assert len(result.col_separators) == 1
+
+    def test_partial_h_line_below_threshold_ignored(self):
+        from scanner.preprocessing.table import detect_table
+
+        img = self._white(50, 50)
+        # 30% of row is ink — below default 0.70 threshold
+        img[25, :15] = 0
+        result = detect_table(img)
+        assert len(result.row_separators) == 0
+
+    def test_three_h_lines_produce_three_separators(self):
+        from scanner.preprocessing.table import detect_table
+
+        img = self._white(100, 100)
+        for row in [10, 50, 90]:
+            img[row, :] = 0
+        result = detect_table(img)
+        assert len(result.row_separators) == 3
+
+    def test_thick_h_line_collapsed_to_single_separator(self):
+        from scanner.preprocessing.table import detect_table
+
+        img = self._white(100, 100)
+        img[24:27, :] = 0  # 3-pixel-thick line at rows 24–26
+        result = detect_table(img)
+        assert len(result.row_separators) == 1
+
+    def test_spacing_regularity_perfect_grid(self):
+        from scanner.preprocessing.table import _spacing_regularity
+
+        seps = [0, 25, 50, 75, 100]  # equal gaps of 25
+        assert _spacing_regularity(seps) == pytest.approx(1.0, abs=1e-6)
+
+    def test_spacing_regularity_uneven_lower_than_even(self):
+        from scanner.preprocessing.table import _spacing_regularity
+
+        even = [0, 25, 50, 75]
+        uneven = [0, 5, 50, 75]  # first gap is much smaller
+        assert _spacing_regularity(uneven) < _spacing_regularity(even)
+
+    def test_spacing_regularity_too_few_returns_zero(self):
+        from scanner.preprocessing.table import _spacing_regularity
+
+        # Fewer than 3 separators → only 0 or 1 gaps, cannot measure regularity
+        assert _spacing_regularity([10, 50]) == 0.0
+        assert _spacing_regularity([10]) == 0.0
+
+
+# ===========================================================================
+# TestTableCellExtraction — unit tests for cell grid building
+# ===========================================================================
+
+
+class TestTableCellExtraction:
+    """Tests for cell bounding box extraction from detected separators."""
+
+    @staticmethod
+    def _grid_image(h: int, w: int, h_lines: list[int], v_lines: list[int]) -> np.ndarray:
+        """White image with full-span horizontal and vertical ink lines."""
+        img = np.full((h, w), 255, dtype=np.uint8)
+        for row in h_lines:
+            img[row, :] = 0
+        for col in v_lines:
+            img[:, col] = 0
+        return img
+
+    @pytest.fixture(scope="class")
+    def grid_3x3(self):
+        """4 h-lines × 4 v-lines → 3 row gaps × 3 col gaps = 9 cells."""
+        from scanner.preprocessing.table import detect_table
+
+        img = TestTableCellExtraction._grid_image(
+            100, 100, h_lines=[0, 33, 66, 99], v_lines=[0, 33, 66, 99]
+        )
+        return detect_table(img)
+
+    def test_3x3_has_grid(self, grid_3x3):
+        assert grid_3x3.has_grid is True
+
+    def test_3x3_n_rows(self, grid_3x3):
+        assert grid_3x3.n_rows == 3
+
+    def test_3x3_n_cols(self, grid_3x3):
+        assert grid_3x3.n_cols == 3
+
+    def test_3x3_n_cells(self, grid_3x3):
+        assert len(grid_3x3.cells) == 9
+
+    def test_cell_areas_are_positive(self, grid_3x3):
+        assert all(c.area() > 0 for c in grid_3x3.cells)
+
+    def test_cells_in_row_major_order(self, grid_3x3):
+        cells = grid_3x3.cells
+        for i in range(len(cells) - 1):
+            assert (cells[i].row_idx, cells[i].col_idx) <= (
+                cells[i + 1].row_idx,
+                cells[i + 1].col_idx,
+            )
+
+    def test_to_dict_has_required_keys(self, grid_3x3):
+        d = grid_3x3.to_dict()
+        for key in ("n_rows", "n_cols", "n_cells", "has_grid", "confidence", "cells"):
+            assert key in d
+
+    def test_has_grid_false_for_blank_image(self):
+        from scanner.preprocessing.table import detect_table
+
+        img = np.full((50, 50), 255, dtype=np.uint8)
+        result = detect_table(img)
+        assert result.has_grid is False
+        assert result.cells == []
+
+    def test_confidence_in_unit_interval(self, grid_3x3):
+        assert 0.0 <= grid_3x3.confidence <= 1.0
+
+    def test_2x2_grid_produces_four_cells(self):
+        from scanner.preprocessing.table import detect_table
+
+        img = TestTableCellExtraction._grid_image(90, 90, h_lines=[0, 44, 89], v_lines=[0, 44, 89])
+        result = detect_table(img)
+        assert result.n_rows == 2
+        assert result.n_cols == 2
+        assert len(result.cells) == 4
+
+    def test_tiny_image_returns_empty(self):
+        from scanner.preprocessing.table import detect_table
+
+        img = np.array([[0, 255], [255, 0]], dtype=np.uint8)
+        result = detect_table(img)
+        assert result.has_grid is False
+        assert result.cells == []
+
+
+# ===========================================================================
+# TestTableAPIEndpoints — integration tests for POST /table/detect
+# ===========================================================================
+
+
+class TestTableAPIEndpoints:
+    """Integration tests for the /table/detect endpoint."""
+
+    @pytest.fixture(autouse=True)
+    def _client(self, api_client):
+        self.client = api_client
+
+    @staticmethod
+    def _grid_pixels(h: int, w: int, h_lines: list[int], v_lines: list[int]) -> list[list[int]]:
+        img = np.full((h, w), 255, dtype=np.uint8)
+        for row in h_lines:
+            img[row, :] = 0
+        for col in v_lines:
+            img[:, col] = 0
+        return img.tolist()
+
+    def test_blank_image_returns_200(self):
+        pixels = np.full((30, 30), 255, dtype=np.uint8).tolist()
+        resp = self.client.post("/table/detect", json={"pixels": pixels})
+        assert resp.status_code == 200
+
+    def test_blank_image_has_grid_false(self):
+        pixels = np.full((30, 30), 255, dtype=np.uint8).tolist()
+        resp = self.client.post("/table/detect", json={"pixels": pixels})
+        assert resp.json()["has_grid"] is False
+
+    def test_grid_image_has_grid_true(self):
+        pixels = self._grid_pixels(100, 100, [0, 33, 66, 99], [0, 33, 66, 99])
+        resp = self.client.post("/table/detect", json={"pixels": pixels})
+        assert resp.status_code == 200
+        assert resp.json()["has_grid"] is True
+
+    def test_response_has_required_fields(self):
+        pixels = np.full((30, 30), 255, dtype=np.uint8).tolist()
+        data = self.client.post("/table/detect", json={"pixels": pixels}).json()
+        for key in ("n_rows", "n_cols", "n_cells", "has_grid", "confidence", "cells"):
+            assert key in data
+
+    def test_empty_pixels_returns_422(self):
+        resp = self.client.post("/table/detect", json={"pixels": []})
+        assert resp.status_code == 422
+
+    def test_n_cells_equals_n_rows_times_n_cols(self):
+        pixels = self._grid_pixels(100, 100, [0, 33, 66, 99], [0, 33, 66, 99])
+        data = self.client.post("/table/detect", json={"pixels": pixels}).json()
+        assert data["n_cells"] == data["n_rows"] * data["n_cols"]
+
+    def test_confidence_in_unit_interval(self):
+        pixels = self._grid_pixels(100, 100, [0, 33, 66, 99], [0, 33, 66, 99])
+        conf = self.client.post("/table/detect", json={"pixels": pixels}).json()["confidence"]
+        assert 0.0 <= conf <= 1.0
+
+    def test_row_separators_field_present(self):
+        pixels = self._grid_pixels(100, 100, [0, 50, 99], [0, 50, 99])
+        data = self.client.post("/table/detect", json={"pixels": pixels}).json()
+        assert "row_separators" in data
+        assert len(data["row_separators"]) >= 2
+
+    def test_cell_fields_present(self):
+        pixels = self._grid_pixels(100, 100, [0, 33, 66, 99], [0, 33, 66, 99])
+        data = self.client.post("/table/detect", json={"pixels": pixels}).json()
+        if data["cells"]:
+            cell = data["cells"][0]
+            required = (
+                "row_idx",
+                "col_idx",
+                "row_start",
+                "row_end",
+                "col_start",
+                "col_end",
+                "area",
+            )
+            for key in required:
+                assert key in cell
