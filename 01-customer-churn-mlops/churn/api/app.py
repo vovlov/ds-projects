@@ -11,6 +11,7 @@ import polars as pl
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+import numpy as np
 from ..ab_testing.experiment import ABExperiment, VariantConfig
 from ..counterfactual.dice import CounterfactualConfig, DIcEChurn
 from ..data.load import CATEGORICAL_FEATURES, add_features
@@ -21,6 +22,7 @@ from ..evaluation.model_comparison import (
     generate_markdown_report,
 )
 from ..fairness.bias_detector import BiasDetector, FairnessReport
+from ..federated.aggregator import FedAvgAggregator, FederatedConfig, make_clients
 from ..optimization.cost_tracker import CostTracker, estimate_monthly_cost
 from ..optimization.quantizer import (
     estimate_inference_speedup,
@@ -33,6 +35,26 @@ logger = logging.getLogger(__name__)
 # Скользящее окно 1000 запросов — достаточно для оценки производительности
 # без накопления памяти (deque с maxlen).
 _cost_tracker = CostTracker(window_size=1000)
+
+# Сервер федеративного обучения (lazy singleton).
+# В production — отдельный сервис с безопасным каналом передачи весов.
+_fed_aggregator: FedAvgAggregator | None = None
+_fed_result: dict | None = None
+
+
+def _get_fed_aggregator() -> FedAvgAggregator:
+    global _fed_aggregator
+    if _fed_aggregator is None:
+        _fed_aggregator = FedAvgAggregator(FederatedConfig())
+    return _fed_aggregator
+
+
+def _reset_fed_aggregator() -> None:
+    """Сброс для тестовой изоляции."""
+    global _fed_aggregator, _fed_result
+    _fed_aggregator = None
+    _fed_result = None
+
 
 # Глобальный эксперимент: control (v1) vs treatment (v2).
 # В production заменяется на Redis-backed store для горизонтального масштабирования.
@@ -1333,3 +1355,152 @@ def explain_counterfactual(request: CounterfactualRequest) -> dict[str, Any]:
             for i, cf in enumerate(result.counterfactuals)
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Federated Learning endpoints
+# ---------------------------------------------------------------------------
+
+
+class FederatedTrainRequest(BaseModel):
+    """Запрос на запуск федеративного обучения.
+
+    Request to run a federated training simulation.
+    """
+
+    n_clients: int = Field(default=3, ge=2, le=20, description="Число операторов-участников")
+    n_rounds: int = Field(default=5, ge=1, le=50, description="Число раундов FedAvg")
+    n_local_epochs: int = Field(default=5, ge=1, le=20, description="Эпох на клиенте за раунд")
+    n_samples_per_client: int = Field(
+        default=200, ge=20, le=5000, description="Синтетических клиентов на оператора"
+    )
+    fraction_clients: float = Field(
+        default=1.0, ge=0.1, le=1.0, description="Доля клиентов C в каждом раунде"
+    )
+    dp_noise_scale: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="Шум DP (0 = без дифференциальной приватности)"
+    )
+    seed: int = Field(default=42, description="Seed воспроизводимости")
+
+
+class FederatedPredictRequest(BaseModel):
+    """Предсказание глобальной федеральной моделью."""
+
+    features: list[list[float]] = Field(..., description="Матрица признаков [n_samples × d]")
+
+
+@app.post("/federated/train")
+def federated_train(request: FederatedTrainRequest) -> dict:
+    """Запустить симуляцию федеративного обучения FedAvg.
+
+    Simulate FedAvg: N telecom operators train on their local churn data
+    and share only model weights — raw customer data never leaves the client.
+
+    Каждый оператор получает синтетические данные с разным уровнем оттока
+    (имитирует реальный разброс по регионам/операторам).
+    """
+    global _fed_result
+
+    rng = np.random.default_rng(request.seed)
+    d = 10  # размерность признакового пространства (synthetic)
+
+    # Генерируем синтетические датасеты для каждого оператора.
+    # Каждый оператор имеет немного разный паттерн оттока — разные регионы.
+    datasets: list[tuple[np.ndarray, np.ndarray]] = []
+    for i in range(request.n_clients):
+        X = rng.standard_normal((request.n_samples_per_client, d))
+        # Истинные веса немного отличаются между операторами
+        true_w = rng.standard_normal(d) * 0.5 + np.arange(d) * 0.1
+        logits = X @ true_w + rng.normal(0, 0.3, request.n_samples_per_client)
+        y = (logits > 0).astype(float)
+        datasets.append((X, y))
+
+    clients = make_clients(
+        n_clients=request.n_clients,
+        n_local_epochs=request.n_local_epochs,
+    )
+
+    fed_config = FederatedConfig(
+        n_rounds=request.n_rounds,
+        fraction_clients=request.fraction_clients,
+        min_clients=2,
+        dp_noise_scale=request.dp_noise_scale,
+        seed=request.seed,
+    )
+
+    aggregator = FedAvgAggregator(fed_config)
+    result = aggregator.train(clients, datasets)
+
+    _fed_result = result.to_dict()
+    _fed_result["feature_dim"] = d
+
+    # Сохраняем агрегатор для /federated/predict
+    global _fed_aggregator
+    _fed_aggregator = aggregator
+
+    return _fed_result
+
+
+@app.post("/federated/predict")
+def federated_predict(request: FederatedPredictRequest) -> dict:
+    """Предсказать вероятность оттока глобальной федеративной моделью.
+
+    Predict churn probability using the aggregated global model.
+    Requires /federated/train to be called first.
+    """
+    agg = _get_fed_aggregator()
+    if not agg.global_weights:
+        raise HTTPException(
+            status_code=400,
+            detail="Модель не обучена — сначала вызовите POST /federated/train",
+        )
+
+    X = np.array(request.features)
+    if X.ndim != 2:
+        raise HTTPException(status_code=422, detail="features должен быть 2D массивом")
+
+    probas = agg.predict_proba(X)
+    return {
+        "n_samples": len(probas),
+        "predictions": [
+            {
+                "churn_probability": round(float(p), 4),
+                "churn_prediction": bool(p >= 0.5),
+            }
+            for p in probas
+        ],
+    }
+
+
+@app.get("/federated/status")
+def federated_status() -> dict:
+    """Статус федеративного обучения: завершён ли раунд, веса инициализированы.
+
+    Return federation server status for monitoring / health-check.
+    """
+    agg = _get_fed_aggregator()
+    history = agg.round_history
+    return {
+        "is_trained": bool(agg.global_weights),
+        "n_rounds_completed": len(history),
+        "last_avg_loss": round(history[-1].avg_loss, 6) if history else None,
+        "global_weights_norm": round(
+            float(np.linalg.norm(agg.global_weights.get("w", np.array([0.0])))), 4
+        )
+        if agg.global_weights
+        else None,
+        "dp_noise_applied": _fed_result.get("dp_noise_applied", False)
+        if _fed_result
+        else False,
+    }
+
+
+@app.post("/federated/reset")
+def federated_reset() -> dict:
+    """Сбросить состояние федеративного сервера (для новой федерации).
+
+    Reset the federation server state — useful when starting a new training run
+    or in testing scenarios.
+    """
+    _reset_fed_aggregator()
+    return {"reset": True, "message": "Сервер федерации сброшен / Federation server reset"}

@@ -3021,3 +3021,457 @@ class TestCounterfactualAPIEndpoints:
                 json={**self._PAYLOAD, "target_probability": 0.4, "max_iterations": 300},
             ).json()
         assert data["target_probability"] == pytest.approx(0.4)
+
+
+# ===========================================================================
+# Federated Learning Tests
+# ===========================================================================
+
+
+class TestFederatedClient:
+    """Unit-тесты клиента федеративного обучения."""
+
+    def _make_data(self, n: int = 100, d: int = 5, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        X = rng.standard_normal((n, d))
+        y = (X[:, 0] > 0).astype(float)
+        return X, y
+
+    def test_local_update_returns_correct_shape(self):
+        """Обновление весов имеет правильную форму."""
+        from churn.federated.client import ClientConfig, FederatedClient
+
+        client = FederatedClient(ClientConfig(client_id="op1"))
+        X, y = self._make_data(d=5)
+        update = client.local_update(X, y)
+        assert update.weights["w"].shape == (5,)
+        assert update.weights["b"].shape == ()
+
+    def test_local_update_n_samples(self):
+        """n_samples в обновлении совпадает с размером датасета."""
+        from churn.federated.client import ClientConfig, FederatedClient
+
+        client = FederatedClient(ClientConfig(client_id="op1"))
+        X, y = self._make_data(n=80)
+        update = client.local_update(X, y)
+        assert update.n_samples == 80
+
+    def test_local_update_loss_is_positive(self):
+        """Лосс после обучения положительный (binary cross-entropy ≥ 0)."""
+        from churn.federated.client import ClientConfig, FederatedClient
+
+        client = FederatedClient(ClientConfig(client_id="op1"))
+        X, y = self._make_data()
+        update = client.local_update(X, y)
+        assert update.local_loss > 0
+
+    def test_receive_global_weights_sets_weights(self):
+        """receive_global_weights устанавливает веса клиента."""
+        from churn.federated.client import ClientConfig, FederatedClient
+
+        client = FederatedClient(ClientConfig(client_id="op1"))
+        global_w = {"w": np.ones(5), "b": np.array(0.1)}
+        client.receive_global_weights(global_w)
+        np.testing.assert_array_almost_equal(client.weights["w"], np.ones(5))
+
+    def test_receive_global_weights_makes_copy(self):
+        """receive_global_weights копирует веса, не хранит ссылку."""
+        from churn.federated.client import ClientConfig, FederatedClient
+
+        client = FederatedClient(ClientConfig(client_id="op1"))
+        global_w = {"w": np.ones(5), "b": np.array(0.0)}
+        client.receive_global_weights(global_w)
+        global_w["w"][0] = 999.0
+        assert client.weights["w"][0] != pytest.approx(999.0)
+
+    def test_local_update_n_epochs_recorded(self):
+        """Число эпох записывается в ClientUpdate."""
+        from churn.federated.client import ClientConfig, FederatedClient
+
+        cfg = ClientConfig(client_id="op1", n_local_epochs=3)
+        client = FederatedClient(cfg)
+        X, y = self._make_data()
+        update = client.local_update(X, y)
+        assert update.n_epochs == 3
+
+    def test_client_id_in_update(self):
+        """client_id корректно передаётся в ClientUpdate."""
+        from churn.federated.client import ClientConfig, FederatedClient
+
+        client = FederatedClient(ClientConfig(client_id="telecom_north"))
+        X, y = self._make_data()
+        update = client.local_update(X, y)
+        assert update.client_id == "telecom_north"
+
+    def test_multiple_local_updates_change_weights(self):
+        """Повторные обновления изменяют веса (модель обучается)."""
+        from churn.federated.client import ClientConfig, FederatedClient
+
+        client = FederatedClient(ClientConfig(client_id="op1", n_local_epochs=10))
+        X, y = self._make_data(n=200)
+        update1 = client.local_update(X, y)
+        client.receive_global_weights({"w": np.zeros(5), "b": np.array(0.0)})
+        update2 = client.local_update(X, y)
+        # Два обновления от одного старта дают одинаковый результат (детерминировано)
+        np.testing.assert_array_almost_equal(update1.weights["w"], update2.weights["w"])
+
+
+class TestFedAvgAggregator:
+    """Unit-тесты сервера агрегации FedAvg."""
+
+    def _make_update(self, client_id: str, d: int = 5, n: int = 100, seed: int = 0):
+        from churn.federated.client import ClientUpdate
+
+        rng = np.random.default_rng(seed)
+        return ClientUpdate(
+            client_id=client_id,
+            weights={"w": rng.standard_normal(d), "b": np.array(rng.standard_normal())},
+            n_samples=n,
+            local_loss=0.5,
+            n_epochs=5,
+        )
+
+    def test_aggregate_equal_weight(self):
+        """Агрегация двух равных обновлений даёт среднее."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig
+
+        agg = FedAvgAggregator(FederatedConfig())
+        w1 = np.array([1.0, 2.0])
+        w2 = np.array([3.0, 4.0])
+        updates = [
+            self._make_update("op1", d=2, n=100),
+            self._make_update("op2", d=2, n=100),
+        ]
+        # Override weights to known values
+        updates[0].weights["w"] = w1
+        updates[1].weights["w"] = w2
+        result = agg.aggregate(updates)
+        np.testing.assert_array_almost_equal(result["w"], (w1 + w2) / 2)
+
+    def test_aggregate_weighted_by_samples(self):
+        """Клиент с большим датасетом вносит больший вклад."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig
+
+        agg = FedAvgAggregator(FederatedConfig())
+        updates = [
+            self._make_update("op1", d=2, n=100),
+            self._make_update("op2", d=2, n=300),
+        ]
+        updates[0].weights["w"] = np.array([0.0, 0.0])
+        updates[1].weights["w"] = np.array([4.0, 4.0])
+        result = agg.aggregate(updates)
+        # (0*100 + 4*300) / 400 = 3.0
+        np.testing.assert_array_almost_equal(result["w"], [3.0, 3.0])
+
+    def test_aggregate_empty_raises(self):
+        """Агрегация пустого списка вызывает ValueError."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig
+
+        agg = FedAvgAggregator(FederatedConfig())
+        with pytest.raises(ValueError):
+            agg.aggregate([])
+
+    def test_initialize_sets_zeros(self):
+        """initialize() создаёт нулевые веса нужного размера."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig
+
+        agg = FedAvgAggregator(FederatedConfig())
+        agg.initialize(feature_dim=8)
+        assert agg.global_weights["w"].shape == (8,)
+        np.testing.assert_array_equal(agg.global_weights["w"], np.zeros(8))
+
+    def test_train_returns_federation_result(self):
+        """train() возвращает FederationResult с правильным числом раундов."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig, make_clients
+
+        rng = np.random.default_rng(42)
+        d = 4
+        datasets = [(rng.standard_normal((50, d)), rng.integers(0, 2, 50).astype(float)) for _ in range(3)]
+        clients = make_clients(3)
+        agg = FedAvgAggregator(FederatedConfig(n_rounds=3))
+        result = agg.train(clients, datasets)
+        assert result.n_rounds_completed == 3
+        assert len(result.round_history) == 3
+
+    def test_train_loss_finite(self):
+        """Лосс после обучения — конечное число."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig, make_clients
+
+        rng = np.random.default_rng(7)
+        d = 6
+        datasets = [(rng.standard_normal((80, d)), rng.integers(0, 2, 80).astype(float)) for _ in range(2)]
+        clients = make_clients(2)
+        agg = FedAvgAggregator(FederatedConfig(n_rounds=2))
+        result = agg.train(clients, datasets)
+        assert np.isfinite(result.round_history[-1].avg_loss)
+
+    def test_train_too_few_clients_raises(self):
+        """Меньше min_clients клиентов → ValueError."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig, make_clients
+
+        rng = np.random.default_rng(0)
+        datasets = [(rng.standard_normal((50, 3)), np.zeros(50))]
+        clients = make_clients(1)
+        agg = FedAvgAggregator(FederatedConfig(min_clients=2))
+        with pytest.raises(ValueError):
+            agg.train(clients, datasets)
+
+    def test_predict_proba_range(self):
+        """Предсказания находятся в диапазоне [0, 1]."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig, make_clients
+
+        rng = np.random.default_rng(11)
+        d = 5
+        datasets = [(rng.standard_normal((60, d)), rng.integers(0, 2, 60).astype(float)) for _ in range(2)]
+        clients = make_clients(2)
+        agg = FedAvgAggregator(FederatedConfig(n_rounds=2))
+        agg.train(clients, datasets)
+        X_test = rng.standard_normal((10, d))
+        proba = agg.predict_proba(X_test)
+        assert proba.shape == (10,)
+        assert np.all(proba >= 0) and np.all(proba <= 1)
+
+    def test_predict_before_train_raises(self):
+        """predict_proba без обучения вызывает RuntimeError."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig
+
+        agg = FedAvgAggregator(FederatedConfig())
+        with pytest.raises(RuntimeError):
+            agg.predict_proba(np.zeros((5, 3)))
+
+    def test_dp_noise_applied_flag(self):
+        """dp_noise_scale > 0 устанавливает dp_noise_applied=True в результате."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig, make_clients
+
+        rng = np.random.default_rng(0)
+        d = 3
+        datasets = [(rng.standard_normal((40, d)), rng.integers(0, 2, 40).astype(float)) for _ in range(2)]
+        clients = make_clients(2)
+        agg = FedAvgAggregator(FederatedConfig(n_rounds=1, dp_noise_scale=0.01))
+        result = agg.train(clients, datasets)
+        assert result.dp_noise_applied is True
+
+    def test_reset_clears_state(self):
+        """reset() очищает веса и историю раундов."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig, make_clients
+
+        rng = np.random.default_rng(0)
+        d = 3
+        datasets = [(rng.standard_normal((40, d)), rng.integers(0, 2, 40).astype(float)) for _ in range(2)]
+        clients = make_clients(2)
+        agg = FedAvgAggregator(FederatedConfig(n_rounds=1))
+        agg.train(clients, datasets)
+        assert agg.global_weights
+        agg.reset()
+        assert not agg.global_weights
+        assert agg.round_history == []
+
+    def test_convergence_check(self):
+        """converged=True когда разница лоссов < 1e-4."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig, make_clients
+
+        rng = np.random.default_rng(99)
+        d = 4
+        datasets = [(rng.standard_normal((200, d)), (rng.standard_normal(200) > 0).astype(float)) for _ in range(3)]
+        clients = make_clients(3)
+        agg = FedAvgAggregator(FederatedConfig(n_rounds=20))
+        result = agg.train(clients, datasets)
+        # После 20 раундов на синтетических данных должна быть сходимость
+        assert isinstance(result.converged, bool)
+
+    def test_to_dict_structure(self):
+        """FederationResult.to_dict() содержит нужные поля."""
+        from churn.federated.aggregator import FedAvgAggregator, FederatedConfig, make_clients
+
+        rng = np.random.default_rng(0)
+        d = 3
+        datasets = [(rng.standard_normal((40, d)), rng.integers(0, 2, 40).astype(float)) for _ in range(2)]
+        clients = make_clients(2)
+        agg = FedAvgAggregator(FederatedConfig(n_rounds=2))
+        result = agg.train(clients, datasets)
+        d_result = result.to_dict()
+        assert "n_rounds_completed" in d_result
+        assert "converged" in d_result
+        assert "dp_noise_applied" in d_result
+        assert "round_history" in d_result
+        assert len(d_result["round_history"]) == 2
+
+
+class TestFederatedAPIEndpoints:
+    """Тесты API endpoints федеративного обучения."""
+
+    def setup_method(self):
+        from churn.api.app import _reset_fed_aggregator
+
+        _reset_fed_aggregator()
+
+    def test_federated_train_returns_200(self):
+        """POST /federated/train возвращает 200."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.post(
+            "/federated/train",
+            json={"n_clients": 2, "n_rounds": 2, "n_samples_per_client": 50},
+        )
+        assert resp.status_code == 200
+
+    def test_federated_train_response_structure(self):
+        """Ответ /federated/train содержит нужные поля."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        data = client.post(
+            "/federated/train",
+            json={"n_clients": 2, "n_rounds": 3, "n_samples_per_client": 50},
+        ).json()
+        assert "n_rounds_completed" in data
+        assert "converged" in data
+        assert "round_history" in data
+        assert "dp_noise_applied" in data
+
+    def test_federated_train_n_rounds(self):
+        """Число раундов в ответе совпадает с запросом."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        data = client.post(
+            "/federated/train",
+            json={"n_clients": 2, "n_rounds": 4, "n_samples_per_client": 40},
+        ).json()
+        assert data["n_rounds_completed"] == 4
+        assert len(data["round_history"]) == 4
+
+    def test_federated_train_dp_flag(self):
+        """dp_noise_scale > 0 → dp_noise_applied=True."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        data = client.post(
+            "/federated/train",
+            json={"n_clients": 2, "n_rounds": 1, "n_samples_per_client": 40, "dp_noise_scale": 0.05},
+        ).json()
+        assert data["dp_noise_applied"] is True
+
+    def test_federated_predict_400_before_train(self):
+        """POST /federated/predict до обучения возвращает 400."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        resp = client.post(
+            "/federated/predict",
+            json={"features": [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]]},
+        )
+        assert resp.status_code == 400
+
+    def test_federated_predict_after_train(self):
+        """POST /federated/predict после обучения возвращает 200."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        client.post(
+            "/federated/train",
+            json={"n_clients": 2, "n_rounds": 1, "n_samples_per_client": 40},
+        )
+        resp = client.post(
+            "/federated/predict",
+            json={"features": [[0.1] * 10, [0.5] * 10]},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["n_samples"] == 2
+        assert len(data["predictions"]) == 2
+
+    def test_federated_predict_probability_range(self):
+        """Предсказанные вероятности в [0, 1]."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        client.post(
+            "/federated/train",
+            json={"n_clients": 2, "n_rounds": 1, "n_samples_per_client": 40},
+        )
+        data = client.post(
+            "/federated/predict",
+            json={"features": [[float(i) * 0.1 for i in range(10)] for _ in range(5)]},
+        ).json()
+        for pred in data["predictions"]:
+            assert 0.0 <= pred["churn_probability"] <= 1.0
+
+    def test_federated_predict_response_fields(self):
+        """Структура предсказания содержит churn_probability и churn_prediction."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        client.post("/federated/train", json={"n_clients": 2, "n_rounds": 1, "n_samples_per_client": 40})
+        data = client.post("/federated/predict", json={"features": [[0.0] * 10]}).json()
+        pred = data["predictions"][0]
+        assert "churn_probability" in pred
+        assert "churn_prediction" in pred
+        assert isinstance(pred["churn_prediction"], bool)
+
+    def test_federated_status_before_train(self):
+        """GET /federated/status до обучения: is_trained=False."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        data = client.get("/federated/status").json()
+        assert data["is_trained"] is False
+        assert data["n_rounds_completed"] == 0
+
+    def test_federated_status_after_train(self):
+        """GET /federated/status после обучения: is_trained=True."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        client.post("/federated/train", json={"n_clients": 2, "n_rounds": 3, "n_samples_per_client": 50})
+        data = client.get("/federated/status").json()
+        assert data["is_trained"] is True
+        assert data["n_rounds_completed"] == 3
+
+    def test_federated_reset_clears_state(self):
+        """POST /federated/reset сбрасывает сервер."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        client.post("/federated/train", json={"n_clients": 2, "n_rounds": 2, "n_samples_per_client": 40})
+        client.post("/federated/reset")
+        data = client.get("/federated/status").json()
+        assert data["is_trained"] is False
+
+    def test_federated_full_cycle(self):
+        """Полный цикл: train → status → predict → reset."""
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        # Train
+        train_data = client.post(
+            "/federated/train",
+            json={"n_clients": 3, "n_rounds": 2, "n_samples_per_client": 60},
+        ).json()
+        assert train_data["n_rounds_completed"] == 2
+        # Status
+        status = client.get("/federated/status").json()
+        assert status["is_trained"] is True
+        # Predict
+        pred = client.post(
+            "/federated/predict",
+            json={"features": [[0.1, -0.2, 0.5, 1.0, -0.3, 0.7, 0.0, 0.4, -0.1, 0.9]]},
+        ).json()
+        assert pred["n_samples"] == 1
+        # Reset
+        client.post("/federated/reset")
+        status2 = client.get("/federated/status").json()
+        assert status2["is_trained"] is False

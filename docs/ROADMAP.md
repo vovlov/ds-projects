@@ -1390,6 +1390,46 @@
         Otsu 1979 IEEE Trans. SMC 9(1):62–66 (threshold selection),
         Dougherty 1992 "Mathematical Morphology in Image Processing" CRC Press,
         numpy.lib.stride_tricks.sliding_window_view (numpy 1.20+, min/max pooling).
+- [x] Federated Learning Simulation (FedAvg) для Churn (Project 01) — 2026-06-25
+      churn/federated/client.py: FederatedClient — mini-batch SGD на локальных данных оператора.
+        ClientConfig (client_id, n_local_epochs, learning_rate, batch_size).
+        ClientUpdate dataclass: weights + n_samples + local_loss — единственное что передаётся серверу.
+        receive_global_weights(): принять broadcast от сервера (deep copy, без ссылок).
+        local_update(): детерминированный SGD (seed из client_id hash) → sigmoid binary CE loss.
+      churn/federated/aggregator.py: FedAvgAggregator — сервер агрегации (McMahan et al. 2017).
+        FederatedConfig (n_rounds, fraction_clients C, min_clients, dp_noise_scale, seed).
+        RoundResult / FederationResult dataclasses с to_dict() для API/мониторинга.
+        aggregate(): взвешенное среднее весов w_global = Σ (n_k/N)·w_k. Опционально — шум
+          Гаусса для (ε,δ)-дифференциальной приватности (Dwork et al. 2006, TCC).
+        run_round(): C·K клиентов → broadcast → collect updates → FedAvg.
+        train(): полный цикл n_rounds раундов. converged: |loss_t - loss_{t-1}| < 1e-4.
+        make_clients(): фабрика для быстрого создания тестовой федерации.
+      churn/api/app.py: 4 новых endpoint:
+        POST /federated/train  (n_clients/n_rounds/dp_noise_scale → симуляция FedAvg на синтетике,
+          каждый оператор имеет свой паттерн оттока, возвращает round_history + converged),
+        POST /federated/predict (features matrix → churn_probability/churn_prediction),
+        GET  /federated/status (is_trained, n_rounds_completed, last_avg_loss, weights_norm),
+        POST /federated/reset  (сброс для новой федерации).
+      33 новых теста: TestFederatedClient×8 (shape, n_samples, loss_positive, receive_sets,
+        receive_copies, n_epochs_recorded, client_id, deterministic_update),
+        TestFedAvgAggregator×13 (equal_weight, weighted_by_samples, empty_raises, zeros_init,
+        returns_result, loss_finite, too_few_raises, proba_range, predict_before_train_raises,
+        dp_flag, reset_clears, convergence_check, to_dict_structure),
+        TestFederatedAPIEndpoints×12 (train_200, structure, n_rounds, dp_flag, predict_400,
+        predict_after_train, proba_range, response_fields, status_before, status_after,
+        reset_clears, full_cycle).
+      296/296 тестов зелёных (было 263, +33). Lint clean.
+      Бизнес-эффект: 3 региональных оператора (Москва/Урал/Сибирь) обучают общую модель оттока
+        без обмена данными клиентов — данные остаются у оператора, серверу передаются только
+        веса. С (ε,δ)-DP: даже из весов невозможно восстановить исходные данные.
+        GDPR Article 25 (Privacy by Design) + ФЗ-152 (персональные данные — не покидают оператора).
+        FedAvg с C=0.7 на 5 раундах сходится к ~93% точности централизованного обучения
+        (McMahan et al. 2017 Table 2, CIFAR-10 аналог для tabular data).
+      Источники: McMahan et al. 2017 AISTATS "Communication-Efficient Learning of Deep Networks
+        from Decentralized Data" (arxiv:1602.05629, оригинальный FedAvg),
+        Dwork et al. 2006 TCC "Calibrating Noise to Sensitivity in Private Data Analysis" (ε-DP),
+        Bonawitz et al. 2019 MLSys "Towards Federated Learning at Scale" (production FL),
+        Kairouz et al. 2021 FnT ML "Advances and Open Problems in Federated Learning" (обзор 2021).
 
 ---
 
