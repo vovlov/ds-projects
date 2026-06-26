@@ -1054,3 +1054,406 @@ class TestCommunityAPIEndpoints:
         client.post("/community/detect", json=self._simple_payload())
         data = client.get("/community/stats").json()
         assert 0.0 <= data["suspicious_coverage_ratio"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Graph Centrality Features
+# ---------------------------------------------------------------------------
+
+
+from fraud.models.centrality import (
+    CENTRALITY_FEATURE_NAMES,
+    CentralityConfig,
+    CentralityFeatureExtractor,
+    NodeCentralityFeatures,
+    explain_centrality_features,
+)
+
+
+class TestCentralityUnit:
+    """Unit tests for CentralityFeatureExtractor — no API dependencies."""
+
+    def _make_extractor(self) -> CentralityFeatureExtractor:
+        return CentralityFeatureExtractor(CentralityConfig(betweenness_k_sources=5, seed=0))
+
+    # ── PageRank ────────────────────────────────────────────────────────────
+
+    def test_pagerank_sums_to_one(self):
+        """PageRank distribution sums to 1 (stochastic matrix property)."""
+        ext = self._make_extractor()
+        nodes = ["a", "b", "c", "d"]
+        edges = [("a", "b"), ("b", "c"), ("c", "d"), ("d", "a")]
+        result = ext.extract(nodes, edges)
+        total = sum(f.pagerank for f in result.features.values())
+        assert abs(total - 1.0) < 1e-4
+
+    def test_pagerank_star_center_highest(self):
+        """In a star graph, center has highest PageRank (receives from all leaves)."""
+        ext = self._make_extractor()
+        nodes = ["center", "leaf1", "leaf2", "leaf3", "leaf4"]
+        edges = [("leaf1", "center"), ("leaf2", "center"), ("leaf3", "center"), ("leaf4", "center")]
+        result = ext.extract(nodes, edges)
+        center_pr = result.features["center"].pagerank
+        for leaf in ["leaf1", "leaf2", "leaf3", "leaf4"]:
+            assert center_pr > result.features[leaf].pagerank
+
+    def test_pagerank_uniform_cycle(self):
+        """Uniform cycle → all nodes should have equal PageRank."""
+        ext = self._make_extractor()
+        nodes = ["a", "b", "c", "d"]
+        edges = [("a", "b"), ("b", "c"), ("c", "d"), ("d", "a")]
+        result = ext.extract(nodes, edges)
+        pr_values = [result.features[n].pagerank for n in nodes]
+        assert max(pr_values) - min(pr_values) < 0.01
+
+    def test_pagerank_single_node(self):
+        """Single node with no edges → PR = 1.0."""
+        ext = self._make_extractor()
+        result = ext.extract(["solo"], [])
+        assert abs(result.features["solo"].pagerank - 1.0) < 1e-6
+
+    # ── Degree Centrality ───────────────────────────────────────────────────
+
+    def test_degree_centrality_range(self):
+        """All degree centrality values must be in [0, 1]."""
+        ext = self._make_extractor()
+        nodes = [str(i) for i in range(10)]
+        edges = [(str(i), str((i + 1) % 10)) for i in range(10)]
+        result = ext.extract(nodes, edges)
+        for f in result.features.values():
+            assert 0.0 <= f.in_degree_centrality <= 1.0
+            assert 0.0 <= f.out_degree_centrality <= 1.0
+
+    def test_out_degree_source_node(self):
+        """Source node (only outgoing edges) has out_degree > 0, in_degree = 0."""
+        ext = self._make_extractor()
+        nodes = ["src", "dst1", "dst2"]
+        edges = [("src", "dst1"), ("src", "dst2")]
+        result = ext.extract(nodes, edges)
+        assert result.features["src"].out_degree_centrality > 0.0
+        assert result.features["src"].in_degree_centrality == 0.0
+
+    def test_in_degree_sink_node(self):
+        """Sink node (only incoming edges) has in_degree > 0, out_degree = 0."""
+        ext = self._make_extractor()
+        nodes = ["src1", "src2", "sink"]
+        edges = [("src1", "sink"), ("src2", "sink")]
+        result = ext.extract(nodes, edges)
+        assert result.features["sink"].in_degree_centrality > 0.0
+        assert result.features["sink"].out_degree_centrality == 0.0
+
+    # ── Betweenness ─────────────────────────────────────────────────────────
+
+    def test_betweenness_range(self):
+        """Betweenness approximation must be in [0, 1]."""
+        ext = self._make_extractor()
+        nodes = [str(i) for i in range(8)]
+        edges = [(str(i), str(i + 1)) for i in range(7)]  # path graph
+        result = ext.extract(nodes, edges)
+        for f in result.features.values():
+            assert 0.0 <= f.betweenness_approx <= 1.0
+
+    def test_betweenness_middle_higher_in_path(self):
+        """Middle node of a path has higher betweenness than endpoint."""
+        ext = CentralityFeatureExtractor(CentralityConfig(betweenness_k_sources=8, seed=1))
+        # Path: 0-1-2-3-4 — node 2 is the bridge
+        nodes = ["0", "1", "2", "3", "4"]
+        edges = [
+            ("0", "1"),
+            ("1", "2"),
+            ("2", "3"),
+            ("3", "4"),
+            ("1", "0"),
+            ("2", "1"),
+            ("3", "2"),
+            ("4", "3"),
+        ]
+        result = ext.extract(nodes, edges)
+        assert result.features["2"].betweenness_approx >= result.features["0"].betweenness_approx
+
+    # ── Clustering Coefficient ──────────────────────────────────────────────
+
+    def test_clustering_triangle_is_one(self):
+        """Complete triangle: all nodes have CC = 1.0."""
+        ext = self._make_extractor()
+        nodes = ["a", "b", "c"]
+        edges = [("a", "b"), ("b", "c"), ("a", "c"), ("b", "a"), ("c", "b"), ("c", "a")]
+        result = ext.extract(nodes, edges)
+        for n in nodes:
+            assert abs(result.features[n].clustering_coefficient - 1.0) < 1e-6
+
+    def test_clustering_isolated_node_is_zero(self):
+        """Isolated node (no neighbors) has CC = 0."""
+        ext = self._make_extractor()
+        nodes = ["iso", "a", "b"]
+        edges = [("a", "b")]
+        result = ext.extract(nodes, edges)
+        assert result.features["iso"].clustering_coefficient == 0.0
+
+    def test_clustering_range(self):
+        """Clustering coefficient must be in [0, 1]."""
+        ext = self._make_extractor()
+        nodes = [str(i) for i in range(6)]
+        edges = [(str(i), str(j)) for i in range(6) for j in range(6) if i != j]
+        result = ext.extract(nodes, edges)
+        for f in result.features.values():
+            assert 0.0 <= f.clustering_coefficient <= 1.0
+
+    # ── k-core ──────────────────────────────────────────────────────────────
+
+    def test_k_core_complete_graph_all_one(self):
+        """Complete graph (K4): all nodes in same k-core → normalized = 1.0."""
+        ext = self._make_extractor()
+        nodes = ["a", "b", "c", "d"]
+        edges = [(u, v) for u in nodes for v in nodes if u != v]
+        result = ext.extract(nodes, edges)
+        for n in nodes:
+            assert abs(result.features[n].k_core_number - 1.0) < 1e-6
+
+    def test_k_core_range(self):
+        """k-core numbers must be in [0, 1] after normalization."""
+        ext = self._make_extractor()
+        nodes = [str(i) for i in range(8)]
+        edges = [
+            ("0", "1"),
+            ("1", "2"),
+            ("2", "3"),
+            ("3", "0"),
+            ("4", "5"),
+            ("5", "6"),
+            ("6", "7"),
+            ("7", "4"),
+            ("0", "4"),
+        ]
+        result = ext.extract(nodes, edges)
+        for f in result.features.values():
+            assert 0.0 <= f.k_core_number <= 1.0
+
+    def test_k_core_leaf_lower_than_core(self):
+        """Leaf nodes (degree=1) have lower k-core than core nodes."""
+        ext = self._make_extractor()
+        # Triangle with two leaves attached
+        nodes = ["a", "b", "c", "leaf1", "leaf2"]
+        edges = [
+            ("a", "b"),
+            ("b", "c"),
+            ("c", "a"),
+            ("b", "a"),
+            ("c", "b"),
+            ("a", "c"),
+            ("a", "leaf1"),
+            ("leaf1", "a"),
+            ("b", "leaf2"),
+            ("leaf2", "b"),
+        ]
+        result = ext.extract(nodes, edges)
+        assert result.features["a"].k_core_number >= result.features["leaf1"].k_core_number
+
+    # ── Feature Names & Array ───────────────────────────────────────────────
+
+    def test_feature_names_count(self):
+        assert len(CENTRALITY_FEATURE_NAMES) == 6
+
+    def test_to_array_shape(self):
+        f = NodeCentralityFeatures(
+            pagerank=0.1,
+            in_degree_centrality=0.2,
+            out_degree_centrality=0.3,
+            betweenness_approx=0.05,
+            clustering_coefficient=0.8,
+            k_core_number=0.5,
+        )
+        arr = f.to_array()
+        assert arr.shape == (6,)
+        assert arr.dtype == np.float32
+
+    def test_augment_features_shape(self):
+        """augment_features должен добавить 6 столбцов к X."""
+        ext = self._make_extractor()
+        nodes = ["a", "b", "c"]
+        edges = [("a", "b"), ("b", "c")]
+        X = np.ones((3, 4), dtype=np.float32)
+        X_aug = ext.augment_features(X, nodes, edges)
+        assert X_aug.shape == (3, 10)  # 4 base + 6 centrality
+
+    # ── explain_centrality_features ─────────────────────────────────────────
+
+    def test_explain_no_flags_low_values(self):
+        """Все низкие значения → статус no_flags."""
+        f = NodeCentralityFeatures()  # все нули
+        flags = explain_centrality_features(f, pr_threshold=0.01)
+        assert "status" in flags
+        assert "no_centrality_risk_flags" in flags["status"]
+
+    def test_explain_high_in_degree_flagged(self):
+        """Высокий in_degree_centrality должен попасть в флаги."""
+        f = NodeCentralityFeatures(in_degree_centrality=0.9)
+        flags = explain_centrality_features(f)
+        assert "in_degree" in flags
+
+    def test_explain_high_betweenness_flagged(self):
+        f = NodeCentralityFeatures(betweenness_approx=0.3)
+        flags = explain_centrality_features(f, between_threshold=0.05)
+        assert "betweenness" in flags
+
+    def test_explain_high_cluster_flagged(self):
+        f = NodeCentralityFeatures(clustering_coefficient=0.9)
+        flags = explain_centrality_features(f, cluster_threshold=0.5)
+        assert "clustering" in flags
+
+    def test_explain_high_kcore_flagged(self):
+        f = NodeCentralityFeatures(k_core_number=0.95)
+        flags = explain_centrality_features(f, kcore_threshold=0.7)
+        assert "k_core" in flags
+
+    # ── CentralityExtractResult fields ──────────────────────────────────────
+
+    def test_extract_result_n_nodes(self):
+        ext = self._make_extractor()
+        nodes = ["x", "y", "z"]
+        result = ext.extract(nodes, [("x", "y"), ("y", "z")])
+        assert result.n_nodes == 3
+
+    def test_extract_result_n_edges(self):
+        ext = self._make_extractor()
+        nodes = ["x", "y", "z"]
+        result = ext.extract(nodes, [("x", "y"), ("y", "z")])
+        assert result.n_edges == 2
+
+    def test_extract_ignores_unknown_nodes_in_edges(self):
+        """Рёбра на несуществующие узлы молча игнорируются."""
+        ext = self._make_extractor()
+        nodes = ["a", "b"]
+        edges = [("a", "b"), ("a", "UNKNOWN"), ("MISSING", "b")]
+        result = ext.extract(nodes, edges)
+        assert result.n_nodes == 2
+        assert result.n_edges == 1
+
+    def test_extract_empty_graph(self):
+        """Граф без рёбер — все метрики = 0."""
+        ext = self._make_extractor()
+        nodes = ["a", "b", "c"]
+        result = ext.extract(nodes, [])
+        for f in result.features.values():
+            assert f.betweenness_approx == 0.0
+            assert f.clustering_coefficient == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Centrality API Endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestCentralityAPIEndpoints:
+    """Integration tests for /centrality/* endpoints."""
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import _reset_centrality, app
+
+        _reset_centrality()
+        return TestClient(app)
+
+    def _simple_payload(self, top_k: int = 3) -> dict:
+        return {
+            "nodes": [
+                {"node_id": "n1", "is_fraud": True},
+                {"node_id": "n2", "is_fraud": False},
+                {"node_id": "n3", "is_fraud": None},
+                {"node_id": "n4", "is_fraud": False},
+                {"node_id": "n5", "is_fraud": False},
+            ],
+            "edges": [
+                {"from_id": "n2", "to_id": "n1"},
+                {"from_id": "n3", "to_id": "n1"},
+                {"from_id": "n4", "to_id": "n1"},
+                {"from_id": "n5", "to_id": "n1"},
+                {"from_id": "n2", "to_id": "n3"},
+            ],
+            "top_k": top_k,
+        }
+
+    def test_compute_centrality_returns_200(self):
+        resp = self._client().post("/centrality/compute", json=self._simple_payload())
+        assert resp.status_code == 200
+
+    def test_compute_centrality_response_structure(self):
+        data = self._client().post("/centrality/compute", json=self._simple_payload()).json()
+        for key in ("n_nodes", "n_edges", "max_pagerank", "max_k_core_raw", "nodes"):
+            assert key in data, f"Missing key: {key}"
+
+    def test_compute_centrality_n_nodes(self):
+        data = self._client().post("/centrality/compute", json=self._simple_payload()).json()
+        assert data["n_nodes"] == 5
+
+    def test_compute_centrality_top_k_respected(self):
+        data = self._client().post("/centrality/compute", json=self._simple_payload(top_k=2)).json()
+        assert len(data["nodes"]) == 2
+
+    def test_compute_centrality_nodes_have_required_fields(self):
+        data = self._client().post("/centrality/compute", json=self._simple_payload()).json()
+        node = data["nodes"][0]
+        for key in (
+            "node_id",
+            "pagerank",
+            "in_degree_centrality",
+            "out_degree_centrality",
+            "betweenness_approx",
+            "clustering_coefficient",
+            "k_core_number",
+            "risk_flags",
+        ):
+            assert key in node, f"Missing field: {key}"
+
+    def test_compute_centrality_max_pagerank_is_positive(self):
+        data = self._client().post("/centrality/compute", json=self._simple_payload()).json()
+        assert data["max_pagerank"] > 0.0
+
+    def test_compute_centrality_star_center_has_highest_pr(self):
+        """n1 получает от n2,n3,n4,n5 → должен иметь наивысший PageRank."""
+        data = self._client().post("/centrality/compute", json=self._simple_payload(top_k=1)).json()
+        assert data["nodes"][0]["node_id"] == "n1"
+
+    def test_compute_centrality_probabilities_in_range(self):
+        data = self._client().post("/centrality/compute", json=self._simple_payload()).json()
+        for node in data["nodes"]:
+            assert 0.0 <= node["pagerank"] <= 1.0
+            assert 0.0 <= node["in_degree_centrality"] <= 1.0
+            assert 0.0 <= node["clustering_coefficient"] <= 1.0
+
+    def test_compute_centrality_is_fraud_echoed(self):
+        data = self._client().post("/centrality/compute", json=self._simple_payload(top_k=5)).json()
+        fraud_node = next(n for n in data["nodes"] if n["node_id"] == "n1")
+        assert fraud_node["is_fraud"] is True
+
+    def test_compute_centrality_422_on_empty_nodes(self):
+        resp = self._client().post("/centrality/compute", json={"nodes": [], "edges": []})
+        assert resp.status_code == 422
+
+    def test_centrality_info_returns_200(self):
+        resp = self._client().get("/centrality/info")
+        assert resp.status_code == 200
+
+    def test_centrality_info_has_feature_names(self):
+        data = self._client().get("/centrality/info").json()
+        assert "feature_names" in data
+        assert len(data["feature_names"]) == 6
+
+    def test_centrality_info_has_fraud_patterns(self):
+        data = self._client().get("/centrality/info").json()
+        assert "fraud_patterns" in data
+
+    def test_centrality_info_has_compliance(self):
+        data = self._client().get("/centrality/info").json()
+        assert "compliance" in data
+
+    def test_health_includes_centrality_field(self):
+        client = self._client()
+        data = client.get("/health").json()
+        assert "centrality_last_run" in data
+
+    def test_centrality_last_run_updates_after_compute(self):
+        client = self._client()
+        assert client.get("/health").json()["centrality_last_run"] is False
+        client.post("/centrality/compute", json=self._simple_payload())
+        assert client.get("/health").json()["centrality_last_run"] is True

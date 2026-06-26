@@ -1391,6 +1391,36 @@
         Dougherty 1992 "Mathematical Morphology in Image Processing" CRC Press,
         numpy.lib.stride_tricks.sliding_window_view (numpy 1.20+, min/max pooling).
 - [x] Federated Learning Simulation (FedAvg) для Churn (Project 01) — 2026-06-25
+- [x] Graph Centrality Features (PageRank + Betweenness + Clustering + k-core) для Fraud Detection (Project 04) — 2026-06-26
+      fraud/models/centrality.py: CentralityFeatureExtractor — 4 алгоритма без NetworkX:
+        PageRank (power iteration, d=0.85, Brin & Page 1998), O(iter·E).
+        Degree centrality — нормированный in/out degree [0,1], O(E).
+        Betweenness approx — k-BFS сэмплирование (Brandes 2001), O(k·(V+E)).
+        Clustering coefficient — local triangles 2t/(k(k-1)), O(V·d²).
+        k-core decomposition — итеративное срезание, O(V+E) амортизированно.
+        NodeCentralityFeatures / CentralityExtractResult dataclasses,
+        augment_features() — hstack с существующим feature matrix (base + temporal + centrality).
+        explain_centrality_features() — EU AI Act Article 13, relative pr_threshold = top-10%.
+      fraud/api/app.py: 2 новых endpoint:
+        POST /centrality/compute (граф → top_k узлов по PageRank + risk_flags),
+        GET  /centrality/info (алгоритмы + fraud_patterns + compliance).
+        GET /health расширен полем centrality_last_run.
+      43 новых теста: TestCentralityUnit×27 (pagerank: sum=1, star, cycle, single;
+        degree: range, source, sink; betweenness: range, middle_higher;
+        clustering: triangle=1, isolated=0, range; k-core: complete=1, range, leaf_lower;
+        feature_names, to_array, augment_shape; explain: no_flags, 4 flag types;
+        extract: n_nodes, n_edges, unknown_ignored, empty_graph),
+        TestCentralityAPIEndpoints×16 (compute 200/structure/n_nodes/top_k/fields/
+        max_pr/star_center/proba_range/is_fraud_echoed/422; info 200/feature_names/
+        fraud_patterns/compliance; health_field/last_run_updates).
+      139/139 тестов зелёных (96 pre-existing + 43 новых, 3 skipped PyTorch). Lint clean.
+      Бизнес-эффект: centrality-признаки дополняют temporal (когда/как быстро) структурным
+        профилем (кто/где в сети): money mule-агрегатор → высокий PageRank + высокий in_degree;
+        координатор кольца → высокий betweenness; плотное кольцо → высокий CC + k-core.
+        Три слоя признаков (tabular + temporal + centrality) → coverage всех fraud-паттернов.
+      Источники: Brin & Page 1998 Computer Networks 30(1-7) (PageRank), Brandes 2001 JMS
+        (betweenness BFS approx), Malliaros et al. 2020 IEEE TKDE (k-core для fraud),
+        Langville & Meyer 2006 "Google's PageRank and Beyond" Princeton UP.
       churn/federated/client.py: FederatedClient — mini-batch SGD на локальных данных оператора.
         ClientConfig (client_id, n_local_epochs, learning_rate, batch_size).
         ClientUpdate dataclass: weights + n_samples + local_loss — единственное что передаётся серверу.

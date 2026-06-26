@@ -12,6 +12,13 @@ from pydantic import BaseModel, Field
 from ..data.dataset import generate_synthetic_transactions, get_feature_matrix
 from ..models.baseline.tabular import train_baseline
 from ..models.calibration import CalibrationResult, FraudCalibrator
+from ..models.centrality import (
+    CENTRALITY_FEATURE_NAMES,
+    CentralityConfig,
+    CentralityExtractResult,
+    CentralityFeatureExtractor,
+    explain_centrality_features,
+)
 from ..models.community import CommunityConfig, DetectionResult, FraudRingDetector
 from ..models.temporal import (
     TEMPORAL_FEATURE_NAMES,
@@ -45,6 +52,10 @@ _calibration_result: CalibrationResult | None = None
 _ring_detector = FraudRingDetector()
 _last_detection: DetectionResult | None = None
 
+# Centrality extractor (stateless, создаётся один раз)
+_centrality_extractor = CentralityFeatureExtractor(CentralityConfig())
+_last_centrality: CentralityExtractResult | None = None
+
 
 def _reset_calibrator() -> None:
     """Сбросить глобальный калибратор (для тестовой изоляции)."""
@@ -57,6 +68,12 @@ def _reset_ring_detector() -> None:
     """Сбросить последний результат детекции (для тестовой изоляции)."""
     global _last_detection
     _last_detection = None
+
+
+def _reset_centrality() -> None:
+    """Сбросить последний centrality-результат (для тестовой изоляции)."""
+    global _last_centrality
+    _last_centrality = None
 
 
 def _ensure_model():
@@ -169,6 +186,7 @@ def health():
         "model_loaded": _trained,
         "temporal_model_loaded": _temporal_trained,
         "calibration_fitted": _calibrator is not None and _calibrator.fitted,
+        "centrality_last_run": _last_centrality is not None,
     }
 
 
@@ -393,4 +411,143 @@ def community_stats() -> dict:
         ),
         "converged": d.converged,
         "n_iterations": d.n_iterations,
+    }
+
+
+# ─── Centrality endpoints ───────────────────────────────────────────────────
+
+
+class CentralityNodeInput(BaseModel):
+    node_id: str
+    is_fraud: bool | None = Field(None, description="Известная метка (для контекста)")
+
+
+class CentralityEdgeInput(BaseModel):
+    from_id: str
+    to_id: str
+
+
+class CentralityRequest(BaseModel):
+    """Граф транзакций для вычисления centrality-признаков.
+
+    Типичное применение: вычислить признаки один раз (offline feature store),
+    затем подавать предвычисленные значения в POST /score/graph.
+    """
+
+    nodes: list[CentralityNodeInput] = Field(..., min_length=1)
+    edges: list[CentralityEdgeInput] = Field(default_factory=list)
+    top_k: int = Field(5, ge=1, le=100, description="Сколько top-risk узлов вернуть")
+
+
+class NodeCentralityResponse(BaseModel):
+    node_id: str
+    pagerank: float
+    in_degree_centrality: float
+    out_degree_centrality: float
+    betweenness_approx: float
+    clustering_coefficient: float
+    k_core_number: float
+    risk_flags: dict[str, str]
+    is_fraud: bool | None = None
+
+
+class CentralityResponse(BaseModel):
+    n_nodes: int
+    n_edges: int
+    max_pagerank: float
+    max_k_core_raw: int
+    nodes: list[NodeCentralityResponse]
+
+
+@app.post("/centrality/compute", response_model=CentralityResponse)
+def compute_centrality(req: CentralityRequest) -> CentralityResponse:
+    """Вычислить graph centrality признаки для всех узлов.
+
+    Признаки (6 штук):
+    - pagerank: influence-score (Brin & Page 1998) — деньги «текут» к крупным хабам.
+    - in/out_degree_centrality: нормированный вход/выход [0,1].
+    - betweenness_approx: роль посредника/координатора (k-BFS аппроксимация).
+    - clustering_coefficient: плотность треугольников в окрестности.
+    - k_core_number: глубина встроенности в core сети (Malliaros et al. 2020).
+
+    Возвращает top_k узлов по PageRank + risk_flags для каждого.
+    В production признаки записываются в feature store и подаются в POST /score/graph.
+    """
+    global _last_centrality
+
+    node_ids = [n.node_id for n in req.nodes]
+    fraud_map = {n.node_id: n.is_fraud for n in req.nodes}
+    edges = [(e.from_id, e.to_id) for e in req.edges]
+
+    result = _centrality_extractor.extract(node_ids, edges)
+    _last_centrality = result
+
+    logger.info(
+        f"Centrality computed: {result.n_nodes} nodes, {result.n_edges} edges, "
+        f"max_PR={result.max_pagerank:.4f}, max_k_core={result.max_k_core_raw}"
+    )
+
+    # Порог PageRank — top 10% считаем «высоким» (не абсолютный, а относительный)
+    all_pr = [result.features[nid].pagerank for nid in node_ids]
+    pr_threshold = float(np.percentile(all_pr, 90)) if all_pr else 0.01
+    pr_threshold = max(pr_threshold, 1.0 / max(result.n_nodes, 1))  # минимум 1/N
+
+    # Сортировать по PageRank убыванию, взять top_k
+    sorted_nodes = sorted(node_ids, key=lambda nid: result.features[nid].pagerank, reverse=True)
+    top_nodes = sorted_nodes[: req.top_k]
+
+    node_responses = [
+        NodeCentralityResponse(
+            node_id=nid,
+            pagerank=round(result.features[nid].pagerank, 6),
+            in_degree_centrality=round(result.features[nid].in_degree_centrality, 4),
+            out_degree_centrality=round(result.features[nid].out_degree_centrality, 4),
+            betweenness_approx=round(result.features[nid].betweenness_approx, 4),
+            clustering_coefficient=round(result.features[nid].clustering_coefficient, 4),
+            k_core_number=round(result.features[nid].k_core_number, 4),
+            risk_flags=explain_centrality_features(
+                result.features[nid],
+                pr_threshold=pr_threshold,
+            ),
+            is_fraud=fraud_map.get(nid),
+        )
+        for nid in top_nodes
+    ]
+
+    return CentralityResponse(
+        n_nodes=result.n_nodes,
+        n_edges=result.n_edges,
+        max_pagerank=round(result.max_pagerank, 6),
+        max_k_core_raw=result.max_k_core_raw,
+        nodes=node_responses,
+    )
+
+
+@app.get("/centrality/info")
+def centrality_info() -> dict:
+    """Описание centrality-признаков и их применение к fraud detection.
+
+    Используется для документации, onboarding аналитиков и аудита (EU AI Act).
+    """
+    return {
+        "feature_names": CENTRALITY_FEATURE_NAMES,
+        "algorithms": {
+            "pagerank": "Power iteration (Brin & Page 1998), d=0.85, converges in ~50 iter",
+            "degree_centrality": "Normalized in/out degree: k / (N-1)",
+            "betweenness_approx": "k-BFS approximation (Brandes 2001), O(k·(V+E))",
+            "clustering_coefficient": "Local triangles: 2·t(v) / (k·(k-1))",
+            "k_core_number": "Iterative peeling, normalized by max k-core",
+        },
+        "fraud_patterns": {
+            "high_pagerank": "Money mule aggregators receive from many sources → high PR",
+            "high_in_degree": "Accounts receiving many transfers (potential layering hub)",
+            "high_betweenness": "Coordinators routing funds between sub-rings",
+            "high_clustering": "Tight-knit fraud ring members (many shared neighbors)",
+            "high_k_core": "Deeply embedded nodes — removal-resistant fraud infrastructure",
+        },
+        "compliance": {
+            "EU_AI_Act_Article_13": "explain_centrality_features() provides human-readable flags",
+            "feature_count": len(CENTRALITY_FEATURE_NAMES),
+            "external_dependencies": "none (numpy + stdlib only)",
+        },
     }
