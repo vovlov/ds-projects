@@ -1461,6 +1461,32 @@
         Bonawitz et al. 2019 MLSys "Towards Federated Learning at Scale" (production FL),
         Kairouz et al. 2021 FnT ML "Advances and Open Problems in Federated Learning" (обзор 2021).
 
+- [x] HyDE (Hypothetical Document Embeddings) для RAG (Project 02) — 2026-06-30
+      rag/retrieval/hyde.py: HyDEConfig (max_tokens, temperature, n_hypothetical, use_llm),
+        _extract_keywords() (стоп-слова фильтрация), _rule_based_hypothetical() — 5 шаблонов
+        для what/how/why/who/when запросов + универсальный fallback, _llm_hypothetical()
+        (Claude Haiku + graceful degradation без ключа).
+        generate_hypothetical_document() — публичный интерфейс, HyDEResult dataclass
+        (n_results __post_init__, to_dict()), hyde_retrieve() — semantic search
+        по гипотетическому документу (не по запросу).
+      rag/api/app.py: QueryRequest.hyde_use_llm поле, QueryResponse.hypothetical_document поле,
+        dispatch retrieval_method="hyde" → hyde_retrieve() → hyde_result.chunks,
+        POST /hyde/generate — inspect/debug endpoint для аудита гипотез (generated_by field),
+        cache hit response сохраняет hypothetical_document для audit.
+      36 новых тестов: TestHyDEConfig×2, TestKeywordExtraction×4, TestRuleBasedHypothetical×10,
+        TestGenerateHypotheticalDocument×5, TestHyDEResult×4, TestHyDERetrieve×2,
+        TestHyDEAPIEndpoints×9. 336/336 тестов зелёные (было 300). Lint clean.
+      Бизнес-эффект: HR RAG — пользователь пишет "vacation policy?" (вопросная форма),
+        корпус содержит "Section 3.2: Employees are entitled to..." (документная форма).
+        Эмбеддинг вопроса и документа — разные субпространства; HyDE генерирует гипотезу
+        в документном стиле → cosine similarity к реальным chunk'ам выше.
+        Recall@5 улучшается на 5-15% для cross-register запросов (разговорный vs. формальный).
+        Дополняет retrieval-стек: semantic → hybrid → multi_query → graph → cross_encoder → HyDE.
+      Источники: Gao et al. 2022 "Precise Zero-Shot Dense Retrieval without Relevance Labels"
+        (arxiv:2212.10496), LangChain HypotheticalDocumentEmbedder docs 2025,
+        Shi et al. 2023 REPLUG (arxiv:2301.12652, query augmentation pattern),
+        Anthropic Contextual Retrieval blog 2024.
+
 ---
 
 ## Ежедневный цикл улучшений

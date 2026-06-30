@@ -19,6 +19,7 @@ from ..ingestion.loader import chunk_documents, load_documents
 from ..knowledge_graph.graph import KnowledgeGraph
 from ..memory.conversation_memory import ConversationMemory, MemoryConfig
 from ..retrieval.hybrid import HybridIndex, hybrid_search
+from ..retrieval.hyde import HyDEConfig, hyde_retrieve
 from ..retrieval.multi_query import MultiQueryConfig, multi_query_retrieve
 from ..retrieval.reranker import RerankConfig, rerank
 from ..retrieval.store import get_client, get_or_create_collection, index_chunks
@@ -75,10 +76,11 @@ class QueryRequest(BaseModel):
     n_results: int = 5
     check_faithfulness: bool = True
     faithfulness_threshold: float = 0.5
-    retrieval_method: str = "hybrid"  # "hybrid" | "semantic" | "graph" | "multi_query"
+    retrieval_method: str = "hybrid"  # "hybrid" | "semantic" | "graph" | "multi_query" | "hyde"
     n_query_variants: int = 3  # для multi_query: число переформулировок
     use_reranking: bool = False  # cross-encoder lexical reranking после первичного поиска
     session_id: str | None = None  # ID сессии для multi-turn диалога (опционально)
+    hyde_use_llm: bool = False  # HyDE: True = Claude Haiku; False = rule-based (CI-safe)
 
 
 class QueryResponse(BaseModel):
@@ -96,6 +98,7 @@ class QueryResponse(BaseModel):
     from_cache: bool = False  # True если ответ взят из semantic cache
     cache_similarity: float | None = None  # TF-IDF cosine similarity к найденной записи кэша
     session_id: str | None = None  # Echo session_id для client-side tracking
+    hypothetical_document: str | None = None  # HyDE: сгенерированный гипотетический документ
 
 
 @app.get("/health")
@@ -161,11 +164,23 @@ def query(request: QueryRequest) -> QueryResponse:
             from_cache=True,
             cache_similarity=round(cache_result.similarity, 4),
             session_id=request.session_id,
+            hypothetical_document=cached.get("hypothetical_document"),
         )
 
     mq_result = None  # populated only for multi_query method
+    hyde_result = None  # populated only for hyde method
 
-    if request.retrieval_method == "multi_query":
+    if request.retrieval_method == "hyde":
+        hyde_result = hyde_retrieve(
+            retrieval_question,
+            collection,
+            _hybrid_index,
+            n_results=request.n_results,
+            config=HyDEConfig(use_llm=request.hyde_use_llm),
+        )
+        context = hyde_result.chunks
+        used_method = "hyde"
+    elif request.retrieval_method == "multi_query":
         mq_result = multi_query_retrieve(
             retrieval_question,
             collection,
@@ -239,6 +254,7 @@ def query(request: QueryRequest) -> QueryResponse:
         "consistency_score": mq_result.consistency_score if mq_result else None,
         "reranked": did_rerank,
         "session_id": request.session_id,
+        "hypothetical_document": hyde_result.hypothetical_document if hyde_result else None,
     }
 
     # Кэшируем только faithful ответы — unfaithful могут быть нестабильны
@@ -850,6 +866,58 @@ def memory_sessions() -> dict:
     """
     active = _conversation_memory.list_sessions()
     return {"active_sessions": active, "count": len(active)}
+
+
+# ---------------------------------------------------------------------------
+# HyDE endpoints
+# ---------------------------------------------------------------------------
+
+
+class HyDEGenerateRequest(BaseModel):
+    """Запрос на генерацию гипотетического документа."""
+
+    query: str
+    use_llm: bool = False  # True = Claude Haiku; False = rule-based (CI-safe)
+    max_tokens: int = 150
+
+
+class HyDEGenerateResponse(BaseModel):
+    """Ответ с гипотетическим документом."""
+
+    query: str
+    hypothetical_document: str
+    generated_by: str  # "llm" или "rule_based"
+
+
+@app.post("/hyde/generate", response_model=HyDEGenerateResponse)
+def hyde_generate(request: HyDEGenerateRequest) -> HyDEGenerateResponse:
+    """Сгенерировать гипотетический документ для HyDE retrieval (debug/inspect).
+
+    HyDE (Gao et al. 2022, arxiv:2212.10496): вместо поиска по запросу пользователя
+    генерируется гипотетический ответ в стиле документов корпуса.
+    Эмбеддинг гипотезы ближе к реальным документам, чем эмбеддинг вопроса,
+    что улучшает semantic recall при большом стилистическом разрыве вопрос/документ.
+
+    Используйте этот endpoint для:
+    - Аудита что генерирует модель перед retrieval
+    - Отладки качества HyDE при низком recall
+    - Сравнения rule-based vs LLM генерации
+    """
+    from ..retrieval.hyde import HyDEConfig, generate_hypothetical_document
+
+    api_key_available = bool(__import__("os").environ.get("ANTHROPIC_API_KEY", ""))
+    config = HyDEConfig(
+        use_llm=request.use_llm and api_key_available,
+        max_tokens=request.max_tokens,
+    )
+    hyp_doc = generate_hypothetical_document(request.query, config)
+    generated_by = "llm" if (request.use_llm and api_key_available) else "rule_based"
+
+    return HyDEGenerateResponse(
+        query=request.query,
+        hypothetical_document=hyp_doc,
+        generated_by=generated_by,
+    )
 
 
 def ask(question: str, n_results: int = 5, use_hybrid: bool = True) -> str:
