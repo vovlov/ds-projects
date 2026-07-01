@@ -2555,3 +2555,350 @@ class TestEnsembleAPIEndpoints:
         client = self._client()
         body = client.get("/ensemble/strategies").json()
         assert "recommendation" in body
+
+
+# ---------------------------------------------------------------------------
+# STL Seasonal Decomposition Tests
+# ---------------------------------------------------------------------------
+
+
+def _make_seasonal_series(n: int = 96, period: int = 24, seed: int = 0) -> list[float]:
+    """Генерировать нормальный ряд с суточной сезонностью (без аномалий)."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(n)
+    seasonal = 10 * np.sin(2 * np.pi * t / period)
+    trend = 0.05 * t
+    noise = rng.normal(0, 0.5, n)
+    return (50 + trend + seasonal + noise).tolist()
+
+
+class TestSTLDetectorCore:
+    def test_calibrate_returns_result(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        data = _make_seasonal_series(n=96, period=24)
+        result = det.calibrate(data)
+        assert result.period == 24
+        assert result.n_samples == 96
+        assert result.n_complete_cycles == 4
+
+    def test_seasonal_pattern_length_equals_period(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=12))
+        data = _make_seasonal_series(n=60, period=12)
+        result = det.calibrate(data)
+        assert len(result.seasonal_pattern) == 12
+
+    def test_seasonal_pattern_sums_to_zero(self):
+        """Additive decomposition: сумма seasonal паттерна ≈ 0."""
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        data = _make_seasonal_series(n=96, period=24)
+        result = det.calibrate(data)
+        assert abs(sum(result.seasonal_pattern)) < 1e-6
+
+    def test_sigma_positive_after_calibrate(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        data = _make_seasonal_series(n=96, period=24)
+        result = det.calibrate(data)
+        assert result.sigma_residual > 0
+
+    def test_too_few_samples_raises(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24, min_periods=2))
+        with pytest.raises(ValueError, match="Need"):
+            det.calibrate([1.0] * 30)  # нужно >= 48
+
+    def test_calibrate_sets_is_calibrated(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        assert not det.is_calibrated
+        det.calibrate(_make_seasonal_series(n=96))
+        assert det.is_calibrated
+
+    def test_detect_output_length(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        data = _make_seasonal_series(n=96, period=24)
+        det.calibrate(data)
+        result = det.detect(data)
+        n = len(data)
+        assert len(result.trend) == n
+        assert len(result.seasonal) == n
+        assert len(result.residual) == n
+        assert len(result.anomaly_score) == n
+        assert len(result.predictions) == n
+
+    def test_detect_score_in_range(self):
+        """Anomaly score должен быть в [0, 1)."""
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        data = _make_seasonal_series(n=96, period=24)
+        det.calibrate(data)
+        result = det.detect(data)
+        assert all(0.0 <= s < 1.0 for s in result.anomaly_score)
+
+    def test_normal_data_low_anomaly_rate(self):
+        """На нормальных данных аномалий должно быть мало (<10%)."""
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        data = _make_seasonal_series(n=96, period=24)
+        det.calibrate(data)
+        result = det.detect(data)
+        rate = result.n_anomalies / len(data)
+        assert rate < 0.10
+
+    def test_injected_spike_detected(self):
+        """Одиночный всплеск вне сезонного паттерна должен быть обнаружен."""
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        rng = np.random.default_rng(42)
+        n = 96
+        period = 24
+        t = np.arange(n)
+        data = (50 + 10 * np.sin(2 * np.pi * t / period) + rng.normal(0, 0.3, n)).tolist()
+        # Обучаем на чистых данных
+        det = STLDetector(STLConfig(period=period, threshold_z=3.0))
+        det.calibrate(data)
+        # Инжектируем выброс в тестовый ряд
+        spiked = data.copy()
+        spike_idx = 50
+        spiked[spike_idx] += 30.0  # огромный выброс
+        result = det.detect(spiked)
+        assert spike_idx in result.anomaly_indices
+
+    def test_update_before_calibrate_raises(self):
+        from anomaly.models.stl import STLDetector
+
+        det = STLDetector()
+        with pytest.raises(RuntimeError, match="calibrate"):
+            det.update(42.0)
+
+    def test_update_increments_n_updates(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        det.calibrate(_make_seasonal_series(n=96))
+        r1 = det.update(50.0)
+        r2 = det.update(51.0)
+        assert r1.n_updates == 1
+        assert r2.n_updates == 2
+
+    def test_update_score_in_range(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        det.calibrate(_make_seasonal_series(n=96))
+        result = det.update(50.0)
+        assert 0.0 <= result.anomaly_score < 1.0
+
+    def test_extreme_spike_triggers_alert(self):
+        """Экстремальное значение должно вызвать is_anomaly=True в онлайн-режиме."""
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24, threshold_z=3.0))
+        det.calibrate(_make_seasonal_series(n=96))
+        result = det.update(9999.0)  # крайний выброс
+        assert result.is_anomaly
+
+    def test_reset_clears_calibration(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        det.calibrate(_make_seasonal_series(n=96))
+        det.reset()
+        assert not det.is_calibrated
+
+    def test_get_state_fields(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        state = det.get_state()
+        assert not state.is_calibrated
+        assert state.period == 24
+        assert isinstance(state.seasonal_pattern, list)
+
+    def test_detect_without_calibrate_uses_local_pattern(self):
+        """detect() работает без calibrate() — строит локальный паттерн."""
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=12))
+        data = _make_seasonal_series(n=60, period=12)
+        result = det.detect(data)
+        assert len(result.predictions) == 60
+
+    def test_detect_too_short_raises(self):
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=24))
+        with pytest.raises(ValueError, match="Need"):
+            det.detect([1.0] * 5)  # < period
+
+    def test_odd_period_works(self):
+        """Нечётный период (7 = недельный цикл почасовых данных) должен работать."""
+        from anomaly.models.stl import STLConfig, STLDetector
+
+        det = STLDetector(STLConfig(period=7))
+        data = _make_seasonal_series(n=35, period=7)
+        result = det.calibrate(data)
+        assert result.n_complete_cycles == 5
+
+
+class TestSTLAPIEndpoints:
+    def _client(self):
+        from anomaly.api.app import _reset_stl, app
+        from fastapi.testclient import TestClient
+
+        _reset_stl()
+        return TestClient(app)
+
+    def test_calibrate_200(self):
+        client = self._client()
+        data = _make_seasonal_series(n=96, period=24)
+        resp = client.post("/stl/calibrate", json={"normal_data": data, "period": 24})
+        assert resp.status_code == 200
+
+    def test_calibrate_response_structure(self):
+        client = self._client()
+        data = _make_seasonal_series(n=96, period=24)
+        body = client.post("/stl/calibrate", json={"normal_data": data, "period": 24}).json()
+        for field in (
+            "period",
+            "n_samples",
+            "n_complete_cycles",
+            "mu_residual",
+            "sigma_residual",
+            "seasonal_pattern",
+        ):
+            assert field in body, f"Missing field: {field}"
+
+    def test_calibrate_seasonal_pattern_length(self):
+        client = self._client()
+        data = _make_seasonal_series(n=96, period=24)
+        body = client.post("/stl/calibrate", json={"normal_data": data, "period": 24}).json()
+        assert len(body["seasonal_pattern"]) == 24
+
+    def test_calibrate_too_few_422(self):
+        client = self._client()
+        resp = client.post("/stl/calibrate", json={"normal_data": [1.0] * 10, "period": 24})
+        assert resp.status_code == 422
+
+    def test_detect_400_before_calibrate(self):
+        """detect() без калибровки на коротком ряде → 400 (< period)."""
+        client = self._client()
+        resp = client.post("/stl/detect", json={"data": [1.0] * 5})
+        assert resp.status_code == 400
+
+    def test_detect_200_after_calibrate(self):
+        client = self._client()
+        data = _make_seasonal_series(n=96, period=24)
+        client.post("/stl/calibrate", json={"normal_data": data, "period": 24})
+        resp = client.post("/stl/detect", json={"data": data})
+        assert resp.status_code == 200
+
+    def test_detect_response_structure(self):
+        client = self._client()
+        data = _make_seasonal_series(n=96, period=24)
+        client.post("/stl/calibrate", json={"normal_data": data, "period": 24})
+        body = client.post("/stl/detect", json={"data": data}).json()
+        for f in (
+            "trend",
+            "seasonal",
+            "residual",
+            "anomaly_score",
+            "predictions",
+            "anomaly_indices",
+            "n_anomalies",
+            "period",
+            "threshold_z",
+        ):
+            assert f in body
+
+    def test_detect_output_length_matches_input(self):
+        client = self._client()
+        data = _make_seasonal_series(n=72, period=24)
+        client.post("/stl/calibrate", json={"normal_data": data, "period": 24})
+        body = client.post("/stl/detect", json={"data": data}).json()
+        assert len(body["predictions"]) == 72
+
+    def test_update_400_before_calibrate(self):
+        client = self._client()
+        resp = client.post("/stl/update", json={"value": 50.0})
+        assert resp.status_code == 400
+
+    def test_update_200_after_calibrate(self):
+        client = self._client()
+        data = _make_seasonal_series(n=96, period=24)
+        client.post("/stl/calibrate", json={"normal_data": data, "period": 24})
+        resp = client.post("/stl/update", json={"value": 50.0})
+        assert resp.status_code == 200
+
+    def test_update_response_structure(self):
+        client = self._client()
+        data = _make_seasonal_series(n=96, period=24)
+        client.post("/stl/calibrate", json={"normal_data": data, "period": 24})
+        body = client.post("/stl/update", json={"value": 50.0}).json()
+        for f in (
+            "value",
+            "trend_estimate",
+            "seasonal_estimate",
+            "residual",
+            "anomaly_score",
+            "is_anomaly",
+            "n_updates",
+        ):
+            assert f in body
+
+    def test_update_n_updates_increments(self):
+        client = self._client()
+        data = _make_seasonal_series(n=96, period=24)
+        client.post("/stl/calibrate", json={"normal_data": data, "period": 24})
+        b1 = client.post("/stl/update", json={"value": 50.0}).json()
+        b2 = client.post("/stl/update", json={"value": 51.0}).json()
+        assert b1["n_updates"] == 1
+        assert b2["n_updates"] == 2
+
+    def test_status_uncalibrated(self):
+        client = self._client()
+        body = client.get("/stl/status").json()
+        assert body["is_calibrated"] is False
+
+    def test_status_after_calibrate(self):
+        client = self._client()
+        data = _make_seasonal_series(n=96, period=24)
+        client.post("/stl/calibrate", json={"normal_data": data, "period": 24})
+        body = client.get("/stl/status").json()
+        assert body["is_calibrated"] is True
+        assert body["period"] == 24
+        assert len(body["seasonal_pattern"]) == 24
+
+    def test_full_cycle(self):
+        """Полный цикл: calibrate → detect → update → status."""
+        client = self._client()
+        data = _make_seasonal_series(n=96, period=24)
+        # Calibrate
+        resp = client.post("/stl/calibrate", json={"normal_data": data, "period": 24})
+        assert resp.status_code == 200
+        # Detect
+        resp = client.post("/stl/detect", json={"data": data[:48]})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["n_anomalies"] >= 0
+        # Online update
+        resp = client.post("/stl/update", json={"value": 55.0})
+        assert resp.status_code == 200
+        assert resp.json()["n_updates"] == 1
+        # Status shows n_calibration
+        body = client.get("/stl/status").json()
+        assert body["n_calibration"] == 96
+        assert body["n_updates"] == 1

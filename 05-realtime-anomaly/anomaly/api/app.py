@@ -15,6 +15,7 @@ from ..models.isolation import IsolationConfig, IsolationForestDetector
 from ..models.isolation import is_available as isolation_available
 from ..models.kalman import KalmanConfig, KalmanDetector
 from ..models.lstm_autoencoder import LSTMConfig, create_autoencoder
+from ..models.stl import STLConfig, STLDetector
 
 app = FastAPI(
     title="Realtime Anomaly Detection API",
@@ -70,6 +71,16 @@ def _reset_kalman() -> None:
     """Пересоздать Kalman детектор — используется в тестах для изоляции."""
     global _kalman_detector
     _kalman_detector = KalmanDetector()
+
+
+# STL Seasonal Decomposition детектор — инициализируется при /stl/calibrate.
+_stl_detector = STLDetector()
+
+
+def _reset_stl() -> None:
+    """Пересоздать STL детектор — используется в тестах для изоляции."""
+    global _stl_detector
+    _stl_detector = STLDetector()
 
 
 class MetricPoint(BaseModel):
@@ -1073,4 +1084,217 @@ def ensemble_strategies() -> dict:
             "balanced_default": "majority — баланс precision/recall",
             "calibrated_detectors": "weighted — используйте AUC как веса",
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# STL Seasonal Decomposition endpoints
+# ---------------------------------------------------------------------------
+
+
+class STLCalibrateRequest(BaseModel):
+    """Калибровка STL-детектора на нормальных данных.
+
+    normal_data: временной ряд одной метрики
+        (например, CPU % за 1 неделю с шагом 1 час = 168 точек).
+    period: длина сезонного цикла. 24 = часовые данные, суточный цикл.
+    threshold_z: порог аномалии в MAD-sigma единицах.
+    robust: True = MAD (устойчив к аномалиям в train), False = std.
+    """
+
+    normal_data: list[float] = Field(
+        ...,
+        min_length=2,
+        description="Normal (non-anomalous) time series for calibration",
+    )
+    period: int = Field(
+        default=24,
+        ge=2,
+        le=365,
+        description="Seasonal period length in observations",
+    )
+    threshold_z: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=10.0,
+        description="Anomaly threshold in robust sigma units",
+    )
+    robust: bool = Field(default=True, description="Use MAD instead of std")
+
+
+class STLCalibrateResponse(BaseModel):
+    """Результат калибровки STL."""
+
+    period: int
+    n_samples: int
+    n_complete_cycles: int
+    mu_residual: float
+    sigma_residual: float
+    seasonal_pattern: list[float]
+
+
+class STLDetectRequest(BaseModel):
+    """Батч-детекция аномалий через STL-декомпозицию."""
+
+    data: list[float] = Field(
+        ...,
+        min_length=2,
+        description="Time series to decompose and score",
+    )
+
+
+class STLDetectResponse(BaseModel):
+    """Результат STL батч-декомпозиции."""
+
+    trend: list[float]
+    seasonal: list[float]
+    residual: list[float]
+    anomaly_score: list[float]
+    predictions: list[int]
+    anomaly_indices: list[int]
+    n_anomalies: int
+    period: int
+    threshold_z: float
+
+
+class STLUpdateRequest(BaseModel):
+    """Онлайн-обновление: одна новая точка."""
+
+    value: float = Field(..., description="New observed metric value")
+
+
+class STLUpdateResponse(BaseModel):
+    """Результат онлайн-обновления одной точки."""
+
+    value: float
+    trend_estimate: float
+    seasonal_estimate: float
+    residual: float
+    anomaly_score: float
+    is_anomaly: bool
+    n_updates: int
+
+
+@app.post("/stl/calibrate", response_model=STLCalibrateResponse)
+def stl_calibrate(request: STLCalibrateRequest) -> STLCalibrateResponse:
+    """Откалибровать STL-детектор на нормальных данных.
+
+    Декомпозирует временной ряд через Centered Moving Average и оценивает:
+    - seasonal_pattern — усреднённый сезонный профиль (длина = period)
+    - mu_residual, sigma_residual — статистики остатка для порога аномалий
+
+    Сезонный паттерн используется как при батч-детекции, так и при онлайн-обновлении.
+
+    Требует ≥ min_periods × period точек (по умолчанию ≥ 48 для period=24).
+    422 если данных недостаточно.
+    """
+    global _stl_detector
+
+    cfg = STLConfig(
+        period=request.period,
+        threshold_z=request.threshold_z,
+        robust=request.robust,
+    )
+    _stl_detector = STLDetector(cfg)
+
+    try:
+        result = _stl_detector.calibrate(request.normal_data)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    return STLCalibrateResponse(
+        period=result.period,
+        n_samples=result.n_samples,
+        n_complete_cycles=result.n_complete_cycles,
+        mu_residual=result.mu_residual,
+        sigma_residual=result.sigma_residual,
+        seasonal_pattern=result.seasonal_pattern,
+    )
+
+
+@app.post("/stl/detect", response_model=STLDetectResponse)
+def stl_detect(request: STLDetectRequest) -> STLDetectResponse:
+    """Батч-декомпозиция и аномальные метки.
+
+    Разбивает временной ряд на компоненты:
+    - trend: низкочастотное движение (CMA сглаживание)
+    - seasonal: повторяющийся паттерн (средний профиль по фазам)
+    - residual: остаток = data - trend - seasonal
+
+    Аномалии детектируются в residual (робастный Z-score > threshold_z).
+    Сезонные пики и трендовый рост не вызывают ложных тревог.
+
+    Требует calibrate() для корректных порогов; без калибровки оценивает паттерн
+    из текущих данных (менее надёжно). Требует ≥ period точек.
+    400 если данных меньше period.
+    """
+    try:
+        result = _stl_detector.detect(request.data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    return STLDetectResponse(
+        trend=result.trend,
+        seasonal=result.seasonal,
+        residual=result.residual,
+        anomaly_score=result.anomaly_score,
+        predictions=result.predictions,
+        anomaly_indices=result.anomaly_indices,
+        n_anomalies=result.n_anomalies,
+        period=result.period,
+        threshold_z=result.threshold_z,
+    )
+
+
+@app.post("/stl/update", response_model=STLUpdateResponse)
+def stl_update(request: STLUpdateRequest) -> STLUpdateResponse:
+    """Онлайн-обновление: одна новая метрика-точка → аномалия / норма.
+
+    O(period) памяти — хранит только последний скользящий буфер.
+    Сезонный паттерн берётся из калибровки (не пересчитывается).
+
+    Использует локальный moving average последних period точек для оценки
+    тренда, устраняя необходимость хранить всю историю.
+
+    Требует предварительной калибровки: POST /stl/calibrate.
+    400 если calibrate() не был вызван.
+    """
+    try:
+        result = _stl_detector.update(request.value)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    return STLUpdateResponse(
+        value=result.value,
+        trend_estimate=result.trend_estimate,
+        seasonal_estimate=result.seasonal_estimate,
+        residual=result.residual,
+        anomaly_score=result.anomaly_score,
+        is_anomaly=result.is_anomaly,
+        n_updates=result.n_updates,
+    )
+
+
+@app.get("/stl/status")
+def stl_status() -> dict:
+    """Состояние STL-детектора для health-check и Grafana gauge.
+
+    Возвращает:
+    - is_calibrated: готов ли детектор к обнаружению
+    - period, threshold_z: параметры конфигурации
+    - n_calibration: сколько точек использовалось для калибровки
+    - n_updates: сколько онлайн-обновлений выполнено после калибровки
+    - mu_residual, sigma_residual: порог в натуральных единицах метрики
+    - seasonal_pattern: извлечённый сезонный профиль (для Grafana/visualization)
+    """
+    state = _stl_detector.get_state()
+    return {
+        "is_calibrated": state.is_calibrated,
+        "period": state.period,
+        "threshold_z": state.threshold_z,
+        "n_calibration": state.n_calibration,
+        "n_updates": state.n_updates,
+        "mu_residual": state.mu_residual,
+        "sigma_residual": state.sigma_residual,
+        "seasonal_pattern": state.seasonal_pattern,
     }

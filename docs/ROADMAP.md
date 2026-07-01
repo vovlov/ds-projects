@@ -1486,6 +1486,43 @@
         (arxiv:2212.10496), LangChain HypotheticalDocumentEmbedder docs 2025,
         Shi et al. 2023 REPLUG (arxiv:2301.12652, query augmentation pattern),
         Anthropic Contextual Retrieval blog 2024.
+- [x] STL Seasonal Decomposition для Anomaly Detection (Project 05) — 2026-07-01
+      anomaly/models/stl.py: STLDetector — Classical CMA-based decomposition (numpy-only).
+      Centered Moving Average тренд (чётный/нечётный period), сезонный паттерн как
+        средний деtrended профиль по фазам, нормировка seasonal_pattern.sum()==0.
+      Робастный Z-score: |residual - median| / (MAD × 1.4826), нормализация score в [0,1]
+        через score = |z| / (|z| + threshold_z) (монотонно, граница 0.5 на пороге).
+      3 режима: calibrate() — оценить паттерн на нормальных данных (≥ 2×period точек);
+        detect() — батч-декомпозиция trend+seasonal+residual+scores; update() — онлайн
+        O(2×period) буфер, O(1) update без хранения истории.
+      STLConfig (period=24, threshold_z=3.0, robust=True, min_periods=2),
+      STLCalibrationResult / STLDecomposition / STLUpdateResult / STLState dataclasses.
+      anomaly/api/app.py: 4 новых endpoint:
+        POST /stl/calibrate (normal_data + period → seasonal_pattern + μ/σ остатка),
+        POST /stl/detect (батч → trend/seasonal/residual + anomaly_scores + indices),
+        POST /stl/update (одна точка → online is_anomaly, 400 без калибровки),
+        GET  /stl/status (состояние + seasonal_pattern для Grafana overlay).
+      34 новых теста: TestSTLDetectorCore×18 (calibrate_returns_result,
+        seasonal_pattern_length, sums_to_zero, sigma_positive, too_few_raises,
+        calibrate_sets_is_calibrated, detect_output_length, detect_score_range,
+        normal_data_low_anomaly_rate, injected_spike_detected, update_before_calibrate,
+        update_increments, update_score_range, extreme_spike_alert, reset_clears,
+        get_state_fields, detect_without_calibrate, detect_too_short, odd_period),
+        TestSTLAPIEndpoints×16 (calibrate_200, response_structure, seasonal_length,
+        too_few_422, detect_400_before, detect_200_after, detect_structure,
+        detect_length_matches, update_400_before, update_200_after, update_structure,
+        update_increments, status_uncalibrated, status_after, full_cycle).
+      256/256 тестов зелёных (+34, было 222). Lint clean.
+      Бизнес-эффект: CUSUM/Kalman/IsolationForest/ESN ловят аномалии в "flat" метриках.
+        Для метрик с суточной/недельной сезонностью (CPU/requests/latency) без STL
+        нормальные утренние пики ложно интерпретируются как аномалии, а реальные аномалии
+        маскируются сезонным паттерном. STL декомпозиция делает residual "flat" →
+        все остальные детекторы работают корректно на стационарном остатке.
+        Complementary: STL → residual → Ensemble(CUSUM+Kalman+IsolationForest).
+      Источники: Cleveland et al. 1990 JASA 85(411) (оригинальный STL),
+        He et al. 2023 arxiv:2304.01506 (OneShotSTL online O(1) update),
+        Rousseeuw & Croux 1993 JASA 88(424) (MAD: median absolute deviation),
+        NIST/SEMATECH e-Handbook §6.4.4.2 (classical decomposition via CMA).
 
 ---
 
