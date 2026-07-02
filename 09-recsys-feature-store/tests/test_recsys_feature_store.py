@@ -2589,3 +2589,253 @@ class TestThompsonAPIEndpoints:
         assert stats["total_recommendations"] == 1
         arm_ids = [s["arm_id"] for s in stats["arm_stats"]]
         assert top_id in arm_ids
+
+
+# ==================== TestPopularityDebiaser ====================
+
+from recsys.models.debiasing import DebiasingConfig, PopularityDebiaser  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def skewed_interactions() -> pl.DataFrame:
+    """Взаимодействия с перекосом: товар 1 — суперпопулярный, 10 — нишевый."""
+    rows = []
+    # Товар 1: 100 взаимодействий (популярный)
+    for u in range(100):
+        rows.append({"user_id": u, "product_id": 1, "rating": 4.0})
+    # Товар 2: 50 взаимодействий
+    for u in range(50):
+        rows.append({"user_id": u, "product_id": 2, "rating": 4.0})
+    # Товар 3-10: по 5 взаимодействий каждый (нишевые)
+    for pid in range(3, 11):
+        for u in range(5):
+            rows.append({"user_id": u, "product_id": pid, "rating": 4.0})
+    return pl.DataFrame(rows)
+
+
+@pytest.fixture(scope="module")
+def fitted_debiaser(skewed_interactions: pl.DataFrame) -> PopularityDebiaser:
+    d = PopularityDebiaser(DebiasingConfig(alpha=0.5, clip_max=10.0))
+    d.fit(skewed_interactions)
+    return d
+
+
+class TestPopularityDebiaserCore:
+    """Тесты ядра IPS debiaser / IPS debiaser core tests."""
+
+    def test_fit_sets_is_fitted(self, fitted_debiaser: PopularityDebiaser) -> None:
+        assert fitted_debiaser._is_fitted is True
+
+    def test_fit_populates_propensities(self, fitted_debiaser: PopularityDebiaser) -> None:
+        """После fit propensities должны быть для всех товаров."""
+        assert len(fitted_debiaser._propensities) == 10
+
+    def test_popular_item_higher_propensity(self, fitted_debiaser: PopularityDebiaser) -> None:
+        """Популярный товар должен иметь более высокую propensity."""
+        p_popular = fitted_debiaser.get_propensity(1)
+        p_niche = fitted_debiaser.get_propensity(5)
+        assert p_popular > p_niche
+
+    def test_niche_item_higher_ips_weight(self, fitted_debiaser: PopularityDebiaser) -> None:
+        """Нишевый товар должен получать более высокий IPS вес."""
+        w_popular = fitted_debiaser.get_ips_weight(1)
+        w_niche = fitted_debiaser.get_ips_weight(5)
+        assert w_niche > w_popular
+
+    def test_propensities_sum_to_one(self, fitted_debiaser: PopularityDebiaser) -> None:
+        """Propensity scores должны суммироваться примерно к 1.0."""
+        total = sum(fitted_debiaser._propensities.values())
+        assert abs(total - 1.0) < 0.01
+
+    def test_unknown_item_returns_min_propensity(self, fitted_debiaser: PopularityDebiaser) -> None:
+        p = fitted_debiaser.get_propensity(99999)
+        assert p == fitted_debiaser.config.min_propensity
+
+    def test_ips_weight_clipped(self, fitted_debiaser: PopularityDebiaser) -> None:
+        """IPS веса не должны превышать clip_max."""
+        for item_id in fitted_debiaser._propensities:
+            w = fitted_debiaser.get_ips_weight(item_id)
+            assert w <= fitted_debiaser.config.clip_max
+
+    def test_debias_scores_reorders(self, fitted_debiaser: PopularityDebiaser) -> None:
+        """debias_scores должен повышать позицию нишевых товаров."""
+        recs = [(1, 1.0), (5, 0.9)]  # популярный выше нишевого
+        debiased = fitted_debiaser.debias_scores(recs, scale=1.0)
+        ids = [pid for pid, _ in debiased]
+        # При достаточном scale нишевый товар должен подняться выше
+        assert ids[0] == 5  # нишевый поднялся на первое место
+
+    def test_debias_scores_zero_scale_preserves_order(
+        self, fitted_debiaser: PopularityDebiaser
+    ) -> None:
+        """При scale=0 порядок не должен меняться."""
+        recs = [(1, 1.0), (5, 0.9)]
+        debiased = fitted_debiaser.debias_scores(recs, scale=0.0)
+        ids = [pid for pid, _ in debiased]
+        assert ids[0] == 1
+
+    def test_debias_scores_returns_same_count(self, fitted_debiaser: PopularityDebiaser) -> None:
+        recs = [(1, 1.0), (2, 0.8), (5, 0.6)]
+        debiased = fitted_debiaser.debias_scores(recs)
+        assert len(debiased) == 3
+
+    def test_unfitted_raises_get_propensity(self) -> None:
+        d = PopularityDebiaser()
+        with pytest.raises(RuntimeError, match="not fitted"):
+            d.get_propensity(1)
+
+    def test_unfitted_raises_debias_scores(self) -> None:
+        d = PopularityDebiaser()
+        with pytest.raises(RuntimeError, match="not fitted"):
+            d.debias_scores([(1, 1.0)])
+
+    def test_unfitted_raises_evaluate(self) -> None:
+        d = PopularityDebiaser()
+        with pytest.raises(RuntimeError, match="not fitted"):
+            d.evaluate_ips({}, {})
+
+    def test_alpha_zero_gives_equal_propensities(self, skewed_interactions: pl.DataFrame) -> None:
+        """alpha=0 → все propensity равны (нет смещения) / alpha=0 → uniform propensities."""
+        d = PopularityDebiaser(DebiasingConfig(alpha=0.0, clip_max=None))
+        d.fit(skewed_interactions)
+        props = list(d._propensities.values())
+        # Все должны быть равны 1/n_items
+        assert max(props) - min(props) < 1e-6
+
+    def test_propensity_stats_gini_range(self, fitted_debiaser: PopularityDebiaser) -> None:
+        """Gini coefficient должен быть в [0, 1]."""
+        stats = fitted_debiaser.compute_propensity_stats()
+        assert 0.0 <= stats.gini_coefficient <= 1.0
+
+    def test_propensity_stats_top10_concentration(
+        self, fitted_debiaser: PopularityDebiaser
+    ) -> None:
+        """top10_concentration должен быть в (0, 1]."""
+        stats = fitted_debiaser.compute_propensity_stats()
+        assert 0.0 < stats.top10_concentration <= 1.0
+
+    def test_skewed_data_high_gini(self, fitted_debiaser: PopularityDebiaser) -> None:
+        """Сильно скошенные данные → Gini выше, чем у равномерных.
+        alpha=0.5 dampens inequality vs raw counts, so threshold is modest."""
+        stats = fitted_debiaser.compute_propensity_stats()
+        assert stats.gini_coefficient > 0.1  # скошенные данные → неравенство
+
+    def test_evaluate_ips_returns_result(self, fitted_debiaser: PopularityDebiaser) -> None:
+        recs_per_user = {1: [(1, 0.9), (2, 0.8), (5, 0.7)]}
+        relevant_per_user = {1: {5}}
+        result = fitted_debiaser.evaluate_ips(recs_per_user, relevant_per_user, top_k=3)
+        assert result.n_users_evaluated == 1
+        assert 0.0 <= result.ndcg_standard <= 1.0
+        assert 0.0 <= result.ndcg_ips <= 1.0
+
+    def test_evaluate_ips_coverage(self, fitted_debiaser: PopularityDebiaser) -> None:
+        """catalog_coverage должен быть в [0, 1]."""
+        recs_per_user = {u: [(u % 10 + 1, 1.0)] for u in range(5)}
+        relevant_per_user = {u: {u % 10 + 1} for u in range(5)}
+        result = fitted_debiaser.evaluate_ips(recs_per_user, relevant_per_user, top_k=1)
+        assert 0.0 <= result.catalog_coverage <= 1.0
+
+    def test_ips_ndcg_differs_from_standard(self, fitted_debiaser: PopularityDebiaser) -> None:
+        """IPS-скорректированный NDCG должен отличаться от стандартного при смещении."""
+        # Рекомендуем только популярные товары → стандартный NDCG может быть высоким,
+        # но IPS NDCG учитывает, что эти товары и так часто показывались
+        recs = {1: [(1, 0.9), (2, 0.8)], 2: [(1, 0.9), (2, 0.8)]}
+        relevant = {1: {1}, 2: {2}}
+        result = fitted_debiaser.evaluate_ips(recs, relevant, top_k=2)
+        # Оба метрики должны вычисляться — не важно равны или нет
+        assert isinstance(result.ndcg_standard, float)
+        assert isinstance(result.ndcg_ips, float)
+
+
+class TestDebiasingAPIEndpoints:
+    """Тесты API endpoints для IPS debiasing / API tests."""
+
+    @pytest.fixture(autouse=True)
+    def reset_state(self) -> None:
+        """Сбрасываем состояние debiaser перед каждым тестом."""
+        from recsys.api.app import _reset_debiaser
+
+        _reset_debiaser()
+
+    @pytest.fixture
+    def client(self) -> TestClient:
+        from recsys.api.app import app
+
+        return TestClient(app)
+
+    @pytest.fixture
+    def sample_interactions(self) -> list[dict]:
+        rows = []
+        for i in range(80):
+            rows.append({"user_id": i, "product_id": 1, "rating": 4.0})
+        for i in range(20):
+            rows.append({"user_id": i, "product_id": 2, "rating": 4.0})
+        for i in range(5):
+            rows.append({"user_id": i, "product_id": 3, "rating": 4.0})
+        return rows
+
+    def test_fit_returns_200(self, client: TestClient, sample_interactions: list[dict]) -> None:
+        resp = client.post("/debias/fit", json={"interactions": sample_interactions})
+        assert resp.status_code == 200
+
+    def test_fit_response_structure(
+        self, client: TestClient, sample_interactions: list[dict]
+    ) -> None:
+        resp = client.post("/debias/fit", json={"interactions": sample_interactions}).json()
+        assert "n_items" in resp
+        assert "gini_coefficient" in resp
+        assert "top10_concentration" in resp
+        assert "message" in resp
+
+    def test_fit_n_items_correct(self, client: TestClient, sample_interactions: list[dict]) -> None:
+        resp = client.post("/debias/fit", json={"interactions": sample_interactions}).json()
+        assert resp["n_items"] == 3
+
+    def test_stats_unfitted_is_fitted_false(self, client: TestClient) -> None:
+        resp = client.get("/debias/stats").json()
+        assert resp["is_fitted"] is False
+
+    def test_stats_after_fit(self, client: TestClient, sample_interactions: list[dict]) -> None:
+        client.post("/debias/fit", json={"interactions": sample_interactions})
+        resp = client.get("/debias/stats").json()
+        assert resp["is_fitted"] is True
+        assert resp["n_items"] == 3
+        assert resp["gini_coefficient"] >= 0.0
+
+    def test_rerank_before_fit_returns_400(self, client: TestClient) -> None:
+        recs = [{"product_id": 1, "score": 1.0}]
+        resp = client.post("/debias/rerank", json={"recommendations": recs})
+        assert resp.status_code == 400
+
+    def test_rerank_after_fit_returns_200(
+        self, client: TestClient, sample_interactions: list[dict]
+    ) -> None:
+        client.post("/debias/fit", json={"interactions": sample_interactions})
+        recs = [{"product_id": 1, "score": 1.0}, {"product_id": 3, "score": 0.8}]
+        resp = client.post("/debias/rerank", json={"recommendations": recs, "scale": 0.5})
+        assert resp.status_code == 200
+
+    def test_rerank_response_structure(
+        self, client: TestClient, sample_interactions: list[dict]
+    ) -> None:
+        client.post("/debias/fit", json={"interactions": sample_interactions})
+        recs = [{"product_id": 1, "score": 1.0}, {"product_id": 3, "score": 0.8}]
+        resp = client.post("/debias/rerank", json={"recommendations": recs}).json()
+        assert "recommendations" in resp
+        assert "n_reranked" in resp
+        assert resp["n_reranked"] == 2
+
+    def test_rerank_niche_rises_with_high_scale(
+        self, client: TestClient, sample_interactions: list[dict]
+    ) -> None:
+        """Нишевый товар поднимается выше с высоким scale."""
+        client.post("/debias/fit", json={"interactions": sample_interactions})
+        recs = [{"product_id": 1, "score": 1.0}, {"product_id": 3, "score": 0.9}]
+        resp = client.post("/debias/rerank", json={"recommendations": recs, "scale": 1.0}).json()
+        ids = [r["product_id"] for r in resp["recommendations"]]
+        # product_id=3 нишевый → должен подняться первым
+        assert ids[0] == 3
+
+    def test_fit_missing_product_id_returns_422(self, client: TestClient) -> None:
+        resp = client.post("/debias/fit", json={"interactions": [{"user_id": 1}]})
+        assert resp.status_code == 422

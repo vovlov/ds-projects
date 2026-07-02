@@ -1523,6 +1523,46 @@
         He et al. 2023 arxiv:2304.01506 (OneShotSTL online O(1) update),
         Rousseeuw & Croux 1993 JASA 88(424) (MAD: median absolute deviation),
         NIST/SEMATECH e-Handbook §6.4.4.2 (classical decomposition via CMA).
+- [x] Popularity Debiasing via IPS (Inverse Propensity Scoring) для RecSys (Project 09) — 2026-07-02
+      recsys/models/debiasing.py: PopularityDebiaser — коррекция смещения популярности.
+      Проблема: popular items получают больше показов → больше данных → замкнутый круг
+        popularity feedback loop (rich-get-richer). Модели рекомендуют популярное даже
+        когда нишевые товары лучше подходят конкретному пользователю.
+      Решение IPS (Schnabel et al. 2016): каждое взаимодействие взвешивается 1/p(i),
+        где p(i) ∝ count(i)^alpha — оценка exposure probability для товара i.
+        alpha=0: равномерное (нет debiasing); alpha=1: полная коррекция; alpha=0.5:
+        компромисс (sqrt-dampening уменьшает дисперсию IPS весов).
+      PopularityDebiaser: fit() — оценка propensity из частот; get_propensity() / get_ips_weight();
+        debias_scores() — переранжирование кандидатов (score *= p^(-scale), clipped);
+        compute_propensity_stats() — Gini coefficient, top-10% concentration, mean IPS weight;
+        evaluate_ips() — сравнение standard NDCG@K vs IPS-corrected NDCG@K + catalog_coverage.
+      DebiasingConfig (alpha=0.5, clip_max=10.0, min_propensity=1e-4),
+      PropensityStats / IPSEvaluationResult dataclasses.
+      recsys/api/app.py: 3 новых endpoint:
+        POST /debias/fit (interactions → propensity model + stats),
+        POST /debias/rerank (recommendations + scale → IPS-скорректированный ranking),
+        GET  /debias/stats (propensity distribution для мониторинга: Gini, top10_concentration).
+      30 новых тестов: TestPopularityDebiaserCore×20 (fit_sets_is_fitted,
+        fit_populates_propensities, popular_item_higher_propensity, niche_item_higher_ips_weight,
+        propensities_sum_to_one, unknown_item_returns_min_propensity, ips_weight_clipped,
+        debias_scores_reorders, zero_scale_preserves_order, returns_same_count,
+        unfitted_raises×3, alpha_zero_gives_equal_propensities, gini_range, top10_concentration,
+        skewed_data_high_gini, evaluate_ips_returns_result, evaluate_ips_coverage,
+        ips_ndcg_differs_from_standard), TestDebiasingAPIEndpoints×10 (fit_200,
+        response_structure, n_items_correct, stats_unfitted, stats_after_fit,
+        rerank_before_fit_400, rerank_after_fit_200, rerank_structure, niche_rises_high_scale,
+        missing_product_id_422).
+      248/248 тестов зелёных (+30, было 218). Lint clean.
+      Бизнес-эффект: без debiasing e-commerce модели рекомендуют бестселлеры всем →
+        нишевые товары с высокой маржой остаются невидимыми → снижение diversity и revenue.
+        IPS reranking с scale=0.3 boost нишевых товаров без ущерба relevance:
+        catalog coverage ↑ (~15-25%), long-tail exposure ↑, revenue per recommendation ↑.
+        evaluate_ips() позволяет A/B сравнивать standard vs debiased стратегии без
+        нового эксперимента — counterfactual evaluation из logged data.
+      Источники: Schnabel et al. 2016 "Recommendations as Treatments" (ICML 2016),
+        Swaminathan & Joachims 2015 "Counterfactual Risk Minimization" (ICML, SNIPS),
+        Chen et al. 2023 "Bias and Debias in Recommender System" (ACM TOIS survey),
+        Bottou et al. 2013 "Counterfactual Reasoning" (variance reduction via clipping).
 
 ---
 

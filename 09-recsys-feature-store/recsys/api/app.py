@@ -27,6 +27,10 @@ from recsys.feature_store.wap import WAPGate
 from recsys.models.bandit import BanditConfig, BanditResult, LinUCBBandit
 from recsys.models.collaborative import CollaborativeRecommender
 from recsys.models.content_based import get_popular_items
+from recsys.models.debiasing import (
+    DebiasingConfig,
+    PopularityDebiaser,
+)
 from recsys.models.diversity import DiversityConfig, DiversityResult, MMRDiversifier
 from recsys.models.session import SessionConfig, SessionRecommender, SessionResult
 from recsys.models.thompson import ThompsonBandit, ThompsonConfig, ThompsonResult
@@ -1060,4 +1064,162 @@ def thompson_stats() -> ThompsonStatsResponse:
         config_alpha_prior=bandit.config.alpha_prior,
         config_beta_prior=bandit.config.beta_prior,
         arm_stats=bandit.get_arm_stats(),
+    )
+
+
+# ==================== IPS Popularity Debiasing ====================
+
+_debiaser: PopularityDebiaser | None = None
+
+
+def _get_debiaser(alpha: float = 0.5, clip_max: float = 10.0) -> PopularityDebiaser:
+    global _debiaser
+    if _debiaser is None:
+        _debiaser = PopularityDebiaser(DebiasingConfig(alpha=alpha, clip_max=clip_max))
+    return _debiaser
+
+
+def _reset_debiaser() -> None:
+    global _debiaser
+    _debiaser = None
+
+
+class DebiasFitRequest(BaseModel):
+    """Запрос на обучение IPS debiaser / IPS debiaser fit request."""
+
+    interactions: list[dict]  # [{"user_id": int, "product_id": int, ...}]
+    alpha: float = 0.5
+    clip_max: float = 10.0
+
+
+class DebiasFitResponse(BaseModel):
+    """Результат обучения IPS debiaser / Fit result."""
+
+    n_items: int
+    mean_propensity: float
+    gini_coefficient: float
+    top10_concentration: float
+    message: str
+
+
+class DebiasScoresRequest(BaseModel):
+    """Запрос на IPS-коррекцию скоров рекомендаций.
+    Request to debias recommendation scores."""
+
+    recommendations: list[dict]  # [{"product_id": int, "score": float}]
+    scale: float = 0.3
+
+
+class DebiasScoresResponse(BaseModel):
+    """Debiased рекомендации (переранжированные) / Debiased recommendations."""
+
+    recommendations: list[dict]  # [{"product_id": int, "score": float}]
+    n_reranked: int
+
+
+class PropensityStatsResponse(BaseModel):
+    """Статистика propensity для мониторинга / Propensity stats for monitoring."""
+
+    n_items: int
+    mean_propensity: float
+    std_propensity: float
+    min_propensity: float
+    max_propensity: float
+    mean_ips_weight: float
+    gini_coefficient: float
+    top10_concentration: float
+    is_fitted: bool
+
+
+@app.post("/debias/fit", response_model=DebiasFitResponse)
+def debias_fit(request: DebiasFitRequest) -> DebiasFitResponse:
+    """
+    Обучает IPS debiaser на данных взаимодействий.
+    Fits IPS popularity debiaser on interaction data.
+
+    Оценивает propensity каждого товара: p(i) ∝ count(i)^alpha.
+    alpha=0: равномерное (нет debiasing), alpha=1: пропорционально популярности.
+
+    Estimates item propensities: popular items get higher p(i) → lower IPS weight.
+    """
+    _reset_debiaser()
+    debiaser = _get_debiaser(alpha=request.alpha, clip_max=request.clip_max)
+
+    import polars as pl
+
+    df = pl.DataFrame(request.interactions)
+    if "product_id" not in df.columns:
+        raise HTTPException(status_code=422, detail="interactions must contain 'product_id' field")
+
+    debiaser.fit(df)
+    stats = debiaser.compute_propensity_stats()
+
+    return DebiasFitResponse(
+        n_items=stats.n_items,
+        mean_propensity=stats.mean_propensity,
+        gini_coefficient=stats.gini_coefficient,
+        top10_concentration=stats.top10_concentration,
+        message=f"Fitted on {stats.n_items} items; Gini={stats.gini_coefficient:.3f}",
+    )
+
+
+@app.post("/debias/rerank", response_model=DebiasScoresResponse)
+def debias_rerank(request: DebiasScoresRequest) -> DebiasScoresResponse:
+    """
+    Переранжирует рекомендации с IPS-коррекцией скоров.
+    Re-ranks recommendations with IPS score correction.
+
+    Нишевые товары получают boost пропорционально 1/propensity^scale.
+    Popular items are down-weighted; niche items receive a score boost.
+    """
+    debiaser = _get_debiaser()
+    if not debiaser._is_fitted:
+        raise HTTPException(
+            status_code=400,
+            detail="Debiaser not fitted. Call POST /debias/fit first.",
+        )
+
+    recs = [(int(r["product_id"]), float(r["score"])) for r in request.recommendations]
+    debiased = debiaser.debias_scores(recs, scale=request.scale)
+
+    return DebiasScoresResponse(
+        recommendations=[{"product_id": pid, "score": score} for pid, score in debiased],
+        n_reranked=len(debiased),
+    )
+
+
+@app.get("/debias/stats", response_model=PropensityStatsResponse)
+def debias_stats() -> PropensityStatsResponse:
+    """
+    Статистика распределения propensity для мониторинга качества данных.
+    Propensity distribution stats for data quality monitoring.
+
+    Высокий Gini (> 0.7) → сильное смещение популярности → debiasing критичен.
+    High Gini (> 0.7) → strong popularity skew → debiasing is critical.
+    """
+    debiaser = _get_debiaser()
+    if not debiaser._is_fitted:
+        return PropensityStatsResponse(
+            n_items=0,
+            mean_propensity=0.0,
+            std_propensity=0.0,
+            min_propensity=0.0,
+            max_propensity=0.0,
+            mean_ips_weight=0.0,
+            gini_coefficient=0.0,
+            top10_concentration=0.0,
+            is_fitted=False,
+        )
+
+    stats = debiaser.compute_propensity_stats()
+    return PropensityStatsResponse(
+        n_items=stats.n_items,
+        mean_propensity=stats.mean_propensity,
+        std_propensity=stats.std_propensity,
+        min_propensity=stats.min_propensity,
+        max_propensity=stats.max_propensity,
+        mean_ips_weight=stats.mean_ips_weight,
+        gini_coefficient=stats.gini_coefficient,
+        top10_concentration=stats.top10_concentration,
+        is_fitted=True,
     )
