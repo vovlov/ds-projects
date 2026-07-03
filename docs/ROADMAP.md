@@ -1564,6 +1564,20 @@
         Chen et al. 2023 "Bias and Debias in Recommender System" (ACM TOIS survey),
         Bottou et al. 2013 "Counterfactual Reasoning" (variance reduction via clipping).
 
+- [x] **LIME (Local Interpretable Model-Agnostic Explanations) для Fraud Detection (Project 04)** — 2026-07-03
+      Реализован numpy-only LIME объяснитель для индивидуальных предсказаний мошенничества.
+      Новые файлы: `fraud/models/lime.py`, интеграция в `fraud/api/app.py`.
+      Новые тесты: 27 тестов (13 unit + 14 API integration) → 166/166 зелёных (+27, было 139). Lint clean.
+      Архитектура: LIMEExplainer (weighted Ridge regression) + LIMEConfig + LIMEExplanation dataclasses.
+      Критическое решение: ядерные веса exp(-d²/σ²) вычисляются в НОРМАЛИЗОВАННОМ пространстве признаков
+        (после стандартизации), иначе avg_amount ≈ 800 создаёт огромные расстояния → exp(-3055) ≈ 0
+        для всех соседей → Ridge деградирует в L2-regularization → нулевые коэффициенты.
+      API: POST /explain/lime (объяснение транзакции), GET /explain/info (обзор всех методов объяснения).
+      Compliance: EU AI Act Article 13 — трассируемость и прозрачность для высокорискованного AI.
+      Источники: Ribeiro et al. 2016 "Why Should I Trust You?" (ACM KDD, arxiv:1602.04938),
+        Guidotti et al. 2019 "A Survey of Methods for Explaining Black Box Models" (ACM CSUR §3.2),
+        EU AI Act Article 13 (трассируемость для высокорискованных AI-систем).
+
 ---
 
 ## Ежедневный цикл улучшений

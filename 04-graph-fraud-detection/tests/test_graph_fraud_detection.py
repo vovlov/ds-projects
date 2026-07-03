@@ -1457,3 +1457,241 @@ class TestCentralityAPIEndpoints:
         assert client.get("/health").json()["centrality_last_run"] is False
         client.post("/centrality/compute", json=self._simple_payload())
         assert client.get("/health").json()["centrality_last_run"] is True
+
+
+# ---------------------------------------------------------------------------
+# LIME Explainability
+# ---------------------------------------------------------------------------
+
+
+from fraud.models.lime import LIMEConfig, LIMEExplainer
+
+
+class TestLIMEExplainerUnit:
+    """Unit tests for LIMEExplainer — no API dependencies."""
+
+    def _make_model(self):
+        """Простая mock-модель: возвращает sigmoid(avg_amount / 1000)."""
+
+        class _Mock:
+            def predict_proba(self, x: np.ndarray) -> np.ndarray:
+                scores = 1.0 / (1.0 + np.exp(-x[:, 0] / 200.0))
+                return np.column_stack([1.0 - scores, scores])
+
+        return _Mock()
+
+    def test_explain_returns_explanation_object(self):
+        from fraud.models.lime import LIMEExplanation
+
+        model = self._make_model()
+        explainer = LIMEExplainer(
+            ["avg_amount", "n_transactions", "account_age_days"],
+            LIMEConfig(n_perturbations=100, seed=0),
+        )
+        instance = np.array([500.0, 10.0, 30.0])
+        result = explainer.explain(instance, predict_fn=model.predict_proba)
+        assert isinstance(result, LIMEExplanation)
+
+    def test_prediction_in_unit_interval(self):
+        model = self._make_model()
+        explainer = LIMEExplainer(["f0", "f1", "f2"], LIMEConfig(n_perturbations=100, seed=1))
+        result = explainer.explain(np.array([100.0, 5.0, 90.0]), predict_fn=model.predict_proba)
+        assert 0.0 <= result.prediction <= 1.0
+
+    def test_local_prediction_clipped(self):
+        """local_prediction должен быть в [0, 1] даже для экстремальных значений."""
+        model = self._make_model()
+        explainer = LIMEExplainer(["f0", "f1", "f2"], LIMEConfig(n_perturbations=100, seed=2))
+        result = explainer.explain(np.array([9999.0, 100.0, 1.0]), predict_fn=model.predict_proba)
+        assert 0.0 <= result.local_prediction <= 1.0
+
+    def test_local_fidelity_in_unit_interval(self):
+        model = self._make_model()
+        explainer = LIMEExplainer(["a", "b", "c"], LIMEConfig(n_perturbations=200, seed=3))
+        result = explainer.explain(np.array([300.0, 8.0, 50.0]), predict_fn=model.predict_proba)
+        assert 0.0 <= result.local_fidelity <= 1.0
+
+    def test_n_top_features_respects_config(self):
+        """n_features_in_explanation ограничивает список top_features."""
+        model = self._make_model()
+        explainer = LIMEExplainer(
+            ["f0", "f1", "f2"],
+            LIMEConfig(n_perturbations=100, n_features_in_explanation=2, seed=4),
+        )
+        result = explainer.explain(np.array([200.0, 3.0, 100.0]), predict_fn=model.predict_proba)
+        assert len(result.top_features) == 2
+
+    def test_feature_names_in_explanation(self):
+        """Имена признаков в объяснении совпадают с переданными."""
+        names = ["avg_amount", "n_transactions", "account_age_days"]
+        model = self._make_model()
+        explainer = LIMEExplainer(names, LIMEConfig(n_perturbations=100, seed=5))
+        result = explainer.explain(np.array([400.0, 7.0, 20.0]), predict_fn=model.predict_proba)
+        result_names = {f.feature_name for f in result.top_features}
+        assert result_names.issubset(set(names))
+
+    def test_direction_field_valid_values(self):
+        """direction должен быть одним из трёх допустимых значений."""
+        valid = {"increases_fraud_risk", "decreases_fraud_risk", "neutral"}
+        model = self._make_model()
+        explainer = LIMEExplainer(["a", "b", "c"], LIMEConfig(n_perturbations=100, seed=6))
+        result = explainer.explain(np.array([600.0, 12.0, 5.0]), predict_fn=model.predict_proba)
+        for feat in result.top_features:
+            assert feat.direction in valid
+
+    def test_high_amount_increases_fraud_risk(self):
+        """Высокая avg_amount → должна увеличивать риск для mock-модели."""
+        model = self._make_model()
+        explainer = LIMEExplainer(
+            ["avg_amount", "n_transactions", "account_age_days"],
+            LIMEConfig(n_perturbations=500, seed=7),
+        )
+        # Первый признак (avg_amount) — единственный информативный в mock
+        result = explainer.explain(np.array([800.0, 5.0, 30.0]), predict_fn=model.predict_proba)
+        amount_feat = next(f for f in result.top_features if f.feature_name == "avg_amount")
+        assert amount_feat.direction == "increases_fraud_risk"
+
+    def test_n_perturbations_echoed(self):
+        model = self._make_model()
+        config = LIMEConfig(n_perturbations=150, seed=8)
+        explainer = LIMEExplainer(["x", "y", "z"], config)
+        result = explainer.explain(np.array([100.0, 2.0, 60.0]), predict_fn=model.predict_proba)
+        assert result.n_perturbations == 150
+
+    def test_method_field(self):
+        model = self._make_model()
+        explainer = LIMEExplainer(["a", "b", "c"], LIMEConfig(n_perturbations=100, seed=9))
+        result = explainer.explain(np.array([200.0, 4.0, 40.0]), predict_fn=model.predict_proba)
+        assert result.method == "lime_ridge_regression"
+
+    def test_to_dict_structure(self):
+        """to_dict() возвращает сериализуемый словарь с требуемыми ключами."""
+        model = self._make_model()
+        explainer = LIMEExplainer(["a", "b", "c"], LIMEConfig(n_perturbations=100, seed=10))
+        result = explainer.explain(np.array([300.0, 6.0, 50.0]), predict_fn=model.predict_proba)
+        d = result.to_dict()
+        for key in (
+            "prediction",
+            "local_prediction",
+            "local_fidelity",
+            "intercept",
+            "top_features",
+            "n_perturbations",
+            "method",
+        ):
+            assert key in d, f"Missing key: {key}"
+        assert isinstance(d["top_features"], list)
+        assert all(
+            "feature_name" in f and "value" in f and "contribution" in f and "direction" in f
+            for f in d["top_features"]
+        )
+
+    def test_is_available(self):
+        assert LIMEExplainer.is_available() is True
+
+    def test_value_field_echoes_instance(self):
+        """value в объяснении совпадает с реальным значением признака в instance."""
+        model = self._make_model()
+        explainer = LIMEExplainer(
+            ["avg_amount", "n_transactions", "account_age_days"],
+            LIMEConfig(n_perturbations=100, seed=11),
+        )
+        instance = np.array([250.0, 7.0, 45.0])
+        result = explainer.explain(instance, predict_fn=model.predict_proba)
+        for feat in result.top_features:
+            idx = ["avg_amount", "n_transactions", "account_age_days"].index(feat.feature_name)
+            assert abs(feat.value - float(instance[idx])) < 1e-6
+
+
+class TestLIMEAPIEndpoints:
+    """Integration tests for POST /explain/lime and GET /explain/info."""
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        from fraud.api.app import _reset_lime_explainer, app
+
+        _reset_lime_explainer()
+        return TestClient(app)
+
+    def _payload(self, **overrides) -> dict:
+        base = {
+            "avg_amount": 500.0,
+            "n_transactions": 15,
+            "account_age_days": 10.0,
+            "n_perturbations": 200,
+        }
+        base.update(overrides)
+        return base
+
+    def test_explain_lime_returns_200(self):
+        resp = self._client().post("/explain/lime", json=self._payload())
+        assert resp.status_code == 200
+
+    def test_explain_lime_response_structure(self):
+        data = self._client().post("/explain/lime", json=self._payload()).json()
+        for key in (
+            "prediction",
+            "local_prediction",
+            "local_fidelity",
+            "intercept",
+            "top_features",
+            "n_perturbations",
+            "method",
+        ):
+            assert key in data, f"Missing key: {key}"
+
+    def test_explain_lime_prediction_in_range(self):
+        data = self._client().post("/explain/lime", json=self._payload()).json()
+        assert 0.0 <= data["prediction"] <= 1.0
+
+    def test_explain_lime_fidelity_in_range(self):
+        data = self._client().post("/explain/lime", json=self._payload()).json()
+        assert 0.0 <= data["local_fidelity"] <= 1.0
+
+    def test_explain_lime_top_features_non_empty(self):
+        data = self._client().post("/explain/lime", json=self._payload()).json()
+        assert len(data["top_features"]) > 0
+
+    def test_explain_lime_top_feature_fields(self):
+        data = self._client().post("/explain/lime", json=self._payload()).json()
+        feat = data["top_features"][0]
+        for key in ("feature_name", "value", "contribution", "direction"):
+            assert key in feat, f"Missing field: {key}"
+
+    def test_explain_lime_direction_valid(self):
+        data = self._client().post("/explain/lime", json=self._payload()).json()
+        valid = {"increases_fraud_risk", "decreases_fraud_risk", "neutral"}
+        for feat in data["top_features"]:
+            assert feat["direction"] in valid
+
+    def test_explain_lime_n_perturbations_echoed(self):
+        data = self._client().post("/explain/lime", json=self._payload(n_perturbations=300)).json()
+        assert data["n_perturbations"] == 300
+
+    def test_explain_lime_feature_names_are_valid(self):
+        valid_names = {"avg_amount", "n_transactions", "account_age_days"}
+        data = self._client().post("/explain/lime", json=self._payload()).json()
+        for feat in data["top_features"]:
+            assert feat["feature_name"] in valid_names
+
+    def test_explain_lime_422_on_negative_amount(self):
+        resp = self._client().post("/explain/lime", json=self._payload(avg_amount=-1.0))
+        assert resp.status_code == 422
+
+    def test_explain_lime_422_too_few_perturbations(self):
+        resp = self._client().post("/explain/lime", json=self._payload(n_perturbations=10))
+        assert resp.status_code == 422
+
+    def test_explain_info_returns_200(self):
+        resp = self._client().get("/explain/info")
+        assert resp.status_code == 200
+
+    def test_explain_info_has_methods(self):
+        data = self._client().get("/explain/info").json()
+        assert "methods" in data
+        assert "lime" in data["methods"]
+
+    def test_explain_info_has_compliance(self):
+        data = self._client().get("/explain/info").json()
+        assert "compliance" in data
+        assert "EU_AI_Act_Article_13" in data["compliance"]

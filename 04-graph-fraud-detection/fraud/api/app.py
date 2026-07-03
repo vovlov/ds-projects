@@ -20,6 +20,7 @@ from ..models.centrality import (
     explain_centrality_features,
 )
 from ..models.community import CommunityConfig, DetectionResult, FraudRingDetector
+from ..models.lime import LIMEConfig, LIMEExplainer
 from ..models.temporal import (
     TEMPORAL_FEATURE_NAMES,
     NodeTemporalFeatures,
@@ -56,6 +57,9 @@ _last_detection: DetectionResult | None = None
 _centrality_extractor = CentralityFeatureExtractor(CentralityConfig())
 _last_centrality: CentralityExtractResult | None = None
 
+# LIME-объяснитель (создаётся лениво при первом вызове /explain/lime)
+_lime_explainer: LIMEExplainer | None = None
+
 
 def _reset_calibrator() -> None:
     """Сбросить глобальный калибратор (для тестовой изоляции)."""
@@ -74,6 +78,12 @@ def _reset_centrality() -> None:
     """Сбросить последний centrality-результат (для тестовой изоляции)."""
     global _last_centrality
     _last_centrality = None
+
+
+def _reset_lime_explainer() -> None:
+    """Сбросить LIME-объяснитель (для тестовой изоляции)."""
+    global _lime_explainer
+    _lime_explainer = None
 
 
 def _ensure_model():
@@ -549,5 +559,144 @@ def centrality_info() -> dict:
             "EU_AI_Act_Article_13": "explain_centrality_features() provides human-readable flags",
             "feature_count": len(CENTRALITY_FEATURE_NAMES),
             "external_dependencies": "none (numpy + stdlib only)",
+        },
+    }
+
+
+# ─── LIME Explainability endpoints ──────────────────────────────────────────
+
+_BASE_FEATURE_NAMES = ["avg_amount", "n_transactions", "account_age_days"]
+
+
+def _get_lime_explainer(n_perturbations: int = 500) -> LIMEExplainer:
+    """Получить или создать LIME-объяснитель для базовых (3) признаков."""
+    global _lime_explainer
+    if _lime_explainer is None:
+        _lime_explainer = LIMEExplainer(
+            feature_names=_BASE_FEATURE_NAMES,
+            config=LIMEConfig(n_perturbations=n_perturbations, seed=42),
+        )
+    return _lime_explainer
+
+
+class LIMERequest(BaseModel):
+    """Транзакция для LIME-объяснения предсказания мошенничества."""
+
+    avg_amount: float = Field(..., ge=0, examples=[500.0])
+    n_transactions: int = Field(..., ge=0, examples=[15])
+    account_age_days: float = Field(..., ge=0, examples=[10.0])
+    n_perturbations: int = Field(
+        500, ge=50, le=2000, description="Число точек для аппроксимации (больше = точнее)"
+    )
+
+
+class LIMEFeatureResponse(BaseModel):
+    feature_name: str
+    value: float
+    contribution: float
+    direction: str
+
+
+class LIMEResponse(BaseModel):
+    """Объяснение одного предсказания через LIME."""
+
+    prediction: float
+    local_prediction: float
+    local_fidelity: float
+    intercept: float
+    top_features: list[LIMEFeatureResponse]
+    n_perturbations: int
+    method: str
+
+
+@app.post("/explain/lime", response_model=LIMEResponse)
+def explain_lime(req: LIMERequest) -> LIMEResponse:
+    """Объяснить предсказание мошенничества через LIME.
+
+    Строит локальную линейную аппроксимацию чёрного ящика в окрестности
+    данной транзакции. Возвращает top признаки по абсолютному вкладу:
+    - contribution > 0: признак увеличивает P(fraud)
+    - contribution < 0: признак снижает P(fraud)
+    - local_fidelity ≈ 1.0: локальная модель точно описывает оригинальную.
+
+    Соответствие EU AI Act Article 13 (право на объяснение автоматических решений).
+    """
+    model = _ensure_model()
+
+    def predict_fn(x: np.ndarray) -> np.ndarray:
+        return model.predict_proba(x)
+
+    explainer = _get_lime_explainer(n_perturbations=req.n_perturbations)
+    instance = np.array([req.avg_amount, req.n_transactions, req.account_age_days], dtype=float)
+    explanation = explainer.explain(instance, predict_fn=predict_fn)
+
+    logger.info(
+        f"LIME: P(fraud)={explanation.prediction:.4f}, "
+        f"fidelity={explanation.local_fidelity:.4f}, "
+        f"top_feature={explanation.top_features[0].feature_name if explanation.top_features else 'n/a'}"  # noqa: E501
+    )
+
+    return LIMEResponse(
+        prediction=explanation.prediction,
+        local_prediction=explanation.local_prediction,
+        local_fidelity=explanation.local_fidelity,
+        intercept=explanation.intercept,
+        top_features=[
+            LIMEFeatureResponse(
+                feature_name=f.feature_name,
+                value=f.value,
+                contribution=f.contribution,
+                direction=f.direction,
+            )
+            for f in explanation.top_features
+        ],
+        n_perturbations=explanation.n_perturbations,
+        method=explanation.method,
+    )
+
+
+@app.get("/explain/info")
+def explain_info() -> dict:
+    """Обзор методов объяснимости, реализованных в проекте.
+
+    Используется для документации, onboarding аналитиков и аудита (EU AI Act Article 13).
+    """
+    return {
+        "methods": {
+            "lime": {
+                "endpoint": "POST /explain/lime",
+                "type": "local, model-agnostic",
+                "algorithm": "Weighted Ridge regression on Gaussian perturbations",
+                "output": "feature contributions (signed) + local_fidelity",
+                "complexity": "O(n_perturbations × n_features)",
+                "reference": "Ribeiro et al. 2016 KDD (arxiv:1602.04938)",
+            },
+            "temporal_flags": {
+                "endpoint": "POST /score/graph",
+                "type": "local, rule-based",
+                "algorithm": "Threshold rules on temporal graph features",
+                "output": "human-readable risk flags per temporal feature",
+                "reference": "EU AI Act Article 13",
+            },
+            "centrality_flags": {
+                "endpoint": "POST /centrality/compute",
+                "type": "local, rule-based",
+                "algorithm": "Percentile thresholds on graph centrality features",
+                "output": "human-readable risk flags per structural feature",
+                "reference": "Malliaros et al. 2020 IEEE TKDE",
+            },
+        },
+        "compliance": {
+            "EU_AI_Act_Article_13": (
+                "All three methods provide human-readable explanations "
+                "for individual predictions as required by Article 13."
+            ),
+            "external_dependencies": "none (numpy + stdlib only for LIME)",
+        },
+        "lime_config": {
+            "n_perturbations_default": 500,
+            "kernel_width": 0.75,
+            "n_features_in_explanation": len(_BASE_FEATURE_NAMES),
+            "ridge_alpha": 1.0,
         },
     }
