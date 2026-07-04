@@ -1578,6 +1578,35 @@
         Guidotti et al. 2019 "A Survey of Methods for Explaining Black Box Models" (ACM CSUR §3.2),
         EU AI Act Article 13 (трассируемость для высокорискованных AI-систем).
 
+- [x] **Survival Analysis (Kaplan-Meier + Cox PH) для Churn (Project 01)** — 2026-07-04
+      Добавлен анализ выживаемости — отвечает "когда уйдёт?" вместо только "уйдёт ли?".
+      Новые файлы: `churn/survival/__init__.py`, `churn/survival/kaplan_meier.py`,
+        `churn/survival/cox_ph.py`.
+      Интеграция в `churn/api/app.py`: 5 новых endpoints.
+      Новые тесты: 45 тестов (TestKaplanMeierEstimator×11, TestLogRankTest×3,
+        TestCoxPHModel×14, TestSurvivalAPIEndpoints×17) → 341/341 зелёных (+45, было 296). Lint clean.
+      Kaplan-Meier: S(t) = Π(1 - d_i/n_i), Greenwood log-log 95% CI, log-rank test
+        (Mantel 1966) χ² с гипергеометрической дисперсией, scipy.stats.chi2.sf fallback.
+      Cox PH: h(t|x) = h₀(t)·exp(β·x), partial likelihood gradient descent + L2,
+        Breslow estimator Λ₀(t), C-index (Harrell's C), S(t|x) = exp(-exp(β·x)·Λ₀(t)).
+        Numpy-only (без scikit-survival) — CI совместимость.
+      generate_synthetic_survival_data(): 5 telco-признаков (monthly_charges, contract_type,
+        tech_support, senior_citizen, num_services), экспоненциальный закон выживания.
+      API: POST /survival/fit (KM + Cox PH на синтетике + log-rank группы),
+        POST /survival/predict (Cox mediana/S(t) для батча клиентов),
+        GET  /survival/curves (KM кривые с CI для дашборда),
+        GET  /survival/info (статус моделей и eval_times),
+        POST /survival/reset (сброс состояния).
+      Бизнес-эффект: retention-менеджер видит "медианный отток через 14 месяцев" вместо
+        абстрактного "вероятность 73%". Группы high/low risk сравниваются log-rank тестом
+        (p-value < 0.05 → статистически значимая разница в кривых выживаемости).
+        Cox HR интерпретируется: "двухлетний контракт снижает hazard в 2.4×".
+      Источники: Kaplan & Meier 1958 JASA 53(282):457-481 (оригинальный KM),
+        Greenwood 1926 J.Hyg. 33(2):216-226 (дисперсия), Mantel 1966 Cancer Chem.Reports 50(3),
+        Cox 1972 JRSS-B 34(2):187-220 (пропорциональные риски),
+        Breslow 1972 Biometrics 28(1):125-133 (baseline hazard),
+        arxiv:2510.11604 (churn + survival 2025), arxiv:2405.11377 (causal survival 2024).
+
 ---
 
 ## Ежедневный цикл улучшений

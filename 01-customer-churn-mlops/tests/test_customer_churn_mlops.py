@@ -3186,7 +3186,9 @@ class TestFedAvgAggregator:
 
         rng = np.random.default_rng(42)
         d = 4
-        datasets = [(rng.standard_normal((50, d)), rng.integers(0, 2, 50).astype(float)) for _ in range(3)]
+        datasets = [
+            (rng.standard_normal((50, d)), rng.integers(0, 2, 50).astype(float)) for _ in range(3)
+        ]
         clients = make_clients(3)
         agg = FedAvgAggregator(FederatedConfig(n_rounds=3))
         result = agg.train(clients, datasets)
@@ -3199,7 +3201,9 @@ class TestFedAvgAggregator:
 
         rng = np.random.default_rng(7)
         d = 6
-        datasets = [(rng.standard_normal((80, d)), rng.integers(0, 2, 80).astype(float)) for _ in range(2)]
+        datasets = [
+            (rng.standard_normal((80, d)), rng.integers(0, 2, 80).astype(float)) for _ in range(2)
+        ]
         clients = make_clients(2)
         agg = FedAvgAggregator(FederatedConfig(n_rounds=2))
         result = agg.train(clients, datasets)
@@ -3222,7 +3226,9 @@ class TestFedAvgAggregator:
 
         rng = np.random.default_rng(11)
         d = 5
-        datasets = [(rng.standard_normal((60, d)), rng.integers(0, 2, 60).astype(float)) for _ in range(2)]
+        datasets = [
+            (rng.standard_normal((60, d)), rng.integers(0, 2, 60).astype(float)) for _ in range(2)
+        ]
         clients = make_clients(2)
         agg = FedAvgAggregator(FederatedConfig(n_rounds=2))
         agg.train(clients, datasets)
@@ -3245,7 +3251,9 @@ class TestFedAvgAggregator:
 
         rng = np.random.default_rng(0)
         d = 3
-        datasets = [(rng.standard_normal((40, d)), rng.integers(0, 2, 40).astype(float)) for _ in range(2)]
+        datasets = [
+            (rng.standard_normal((40, d)), rng.integers(0, 2, 40).astype(float)) for _ in range(2)
+        ]
         clients = make_clients(2)
         agg = FedAvgAggregator(FederatedConfig(n_rounds=1, dp_noise_scale=0.01))
         result = agg.train(clients, datasets)
@@ -3257,7 +3265,9 @@ class TestFedAvgAggregator:
 
         rng = np.random.default_rng(0)
         d = 3
-        datasets = [(rng.standard_normal((40, d)), rng.integers(0, 2, 40).astype(float)) for _ in range(2)]
+        datasets = [
+            (rng.standard_normal((40, d)), rng.integers(0, 2, 40).astype(float)) for _ in range(2)
+        ]
         clients = make_clients(2)
         agg = FedAvgAggregator(FederatedConfig(n_rounds=1))
         agg.train(clients, datasets)
@@ -3272,7 +3282,10 @@ class TestFedAvgAggregator:
 
         rng = np.random.default_rng(99)
         d = 4
-        datasets = [(rng.standard_normal((200, d)), (rng.standard_normal(200) > 0).astype(float)) for _ in range(3)]
+        datasets = [
+            (rng.standard_normal((200, d)), (rng.standard_normal(200) > 0).astype(float))
+            for _ in range(3)
+        ]
         clients = make_clients(3)
         agg = FedAvgAggregator(FederatedConfig(n_rounds=20))
         result = agg.train(clients, datasets)
@@ -3285,7 +3298,9 @@ class TestFedAvgAggregator:
 
         rng = np.random.default_rng(0)
         d = 3
-        datasets = [(rng.standard_normal((40, d)), rng.integers(0, 2, 40).astype(float)) for _ in range(2)]
+        datasets = [
+            (rng.standard_normal((40, d)), rng.integers(0, 2, 40).astype(float)) for _ in range(2)
+        ]
         clients = make_clients(2)
         agg = FedAvgAggregator(FederatedConfig(n_rounds=2))
         result = agg.train(clients, datasets)
@@ -3353,7 +3368,12 @@ class TestFederatedAPIEndpoints:
         client = TestClient(app)
         data = client.post(
             "/federated/train",
-            json={"n_clients": 2, "n_rounds": 1, "n_samples_per_client": 40, "dp_noise_scale": 0.05},
+            json={
+                "n_clients": 2,
+                "n_rounds": 1,
+                "n_samples_per_client": 40,
+                "dp_noise_scale": 0.05,
+            },
         ).json()
         assert data["dp_noise_applied"] is True
 
@@ -3411,7 +3431,9 @@ class TestFederatedAPIEndpoints:
         from fastapi.testclient import TestClient
 
         client = TestClient(app)
-        client.post("/federated/train", json={"n_clients": 2, "n_rounds": 1, "n_samples_per_client": 40})
+        client.post(
+            "/federated/train", json={"n_clients": 2, "n_rounds": 1, "n_samples_per_client": 40}
+        )
         data = client.post("/federated/predict", json={"features": [[0.0] * 10]}).json()
         pred = data["predictions"][0]
         assert "churn_probability" in pred
@@ -3434,7 +3456,9 @@ class TestFederatedAPIEndpoints:
         from fastapi.testclient import TestClient
 
         client = TestClient(app)
-        client.post("/federated/train", json={"n_clients": 2, "n_rounds": 3, "n_samples_per_client": 50})
+        client.post(
+            "/federated/train", json={"n_clients": 2, "n_rounds": 3, "n_samples_per_client": 50}
+        )
         data = client.get("/federated/status").json()
         assert data["is_trained"] is True
         assert data["n_rounds_completed"] == 3
@@ -3445,7 +3469,9 @@ class TestFederatedAPIEndpoints:
         from fastapi.testclient import TestClient
 
         client = TestClient(app)
-        client.post("/federated/train", json={"n_clients": 2, "n_rounds": 2, "n_samples_per_client": 40})
+        client.post(
+            "/federated/train", json={"n_clients": 2, "n_rounds": 2, "n_samples_per_client": 40}
+        )
         client.post("/federated/reset")
         data = client.get("/federated/status").json()
         assert data["is_trained"] is False
@@ -3475,3 +3501,509 @@ class TestFederatedAPIEndpoints:
         client.post("/federated/reset")
         status2 = client.get("/federated/status").json()
         assert status2["is_trained"] is False
+
+
+# ---------------------------------------------------------------------------
+# TestSurvivalAnalysis — Kaplan-Meier + Cox PH unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestKaplanMeierEstimator:
+    """Unit tests for Kaplan-Meier estimator."""
+
+    def _make_data(self, n=50, seed=42):
+        rng = np.random.default_rng(seed)
+        durations = rng.integers(1, 60, n).astype(float)
+        events = rng.binomial(1, 0.6, n)
+        return durations, events
+
+    def test_fit_returns_self(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        km = KaplanMeierEstimator()
+        d, e = self._make_data()
+        result = km.fit(d, e)
+        assert result is km
+
+    def test_result_times_sorted(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        km = KaplanMeierEstimator()
+        d, e = self._make_data()
+        km.fit(d, e)
+        times = km.result.times
+        assert times == sorted(times)
+
+    def test_survival_non_increasing(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        km = KaplanMeierEstimator()
+        d, e = self._make_data()
+        km.fit(d, e)
+        s = km.result.survival
+        for i in range(1, len(s)):
+            assert s[i] <= s[i - 1] + 1e-9
+
+    def test_survival_between_0_and_1(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        km = KaplanMeierEstimator()
+        d, e = self._make_data()
+        km.fit(d, e)
+        for sv in km.result.survival:
+            assert 0.0 <= sv <= 1.0
+
+    def test_ci_lower_leq_survival_leq_upper(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        km = KaplanMeierEstimator()
+        d, e = self._make_data()
+        km.fit(d, e)
+        r = km.result
+        for lo, sv, hi in zip(r.ci_lower, r.survival, r.ci_upper, strict=True):
+            assert lo <= sv + 1e-9
+            assert sv <= hi + 1e-9
+
+    def test_n_events_total_matches(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        d = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        e = np.array([1, 0, 1, 0, 1])
+        km = KaplanMeierEstimator()
+        km.fit(d, e)
+        assert km.result.n_events_total == 3
+        assert km.result.n_total == 5
+
+    def test_median_survival_when_half_churned(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        # S(t) crosses 0.5 somewhere
+        d = np.arange(1, 11, dtype=float)
+        e = np.ones(10, dtype=int)
+        km = KaplanMeierEstimator()
+        km.fit(d, e)
+        assert km.result.median_survival is not None
+
+    def test_median_survival_none_when_no_event_crosses_half(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        # Only 1 event out of 50 — S(t) stays near 1
+        d = np.ones(50, dtype=float) * 10.0
+        e = np.zeros(50, dtype=int)
+        e[0] = 1
+        km = KaplanMeierEstimator()
+        km.fit(d, e)
+        assert km.result.median_survival is None
+
+    def test_empty_durations_raises(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        km = KaplanMeierEstimator()
+        with pytest.raises(ValueError):
+            km.fit(np.array([]), np.array([]))
+
+    def test_result_before_fit_raises(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        km = KaplanMeierEstimator()
+        with pytest.raises(RuntimeError):
+            _ = km.result
+
+    def test_to_dict_keys(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        km = KaplanMeierEstimator()
+        d, e = self._make_data()
+        km.fit(d, e)
+        d_dict = km.result.to_dict()
+        for key in [
+            "times",
+            "survival",
+            "ci_lower",
+            "ci_upper",
+            "n_at_risk",
+            "n_events",
+            "median_survival",
+            "n_total",
+            "n_events_total",
+        ]:
+            assert key in d_dict
+
+
+class TestLogRankTest:
+    """Unit tests for log-rank test."""
+
+    def test_different_groups_low_pvalue(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        rng = np.random.default_rng(0)
+        # Group A: short survival
+        t_a = rng.exponential(5, 80)
+        e_a = np.ones(80, dtype=int)
+        # Group B: long survival
+        t_b = rng.exponential(30, 80)
+        e_b = np.ones(80, dtype=int)
+        result = KaplanMeierEstimator.log_rank_test(t_a, e_a, t_b, e_b)
+        assert result.p_value < 0.05
+        assert result.reject_h0 is True
+
+    def test_identical_groups_high_pvalue(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        rng = np.random.default_rng(1)
+        t = rng.exponential(20, 100)
+        e = np.ones(100, dtype=int)
+        # Split same data randomly
+        idx = rng.permutation(100)
+        result = KaplanMeierEstimator.log_rank_test(
+            t[idx[:50]], e[idx[:50]], t[idx[50:]], e[idx[50:]]
+        )
+        assert result.statistic >= 0.0
+        assert 0.0 <= result.p_value <= 1.0
+
+    def test_result_fields_exist(self):
+        from churn.survival.kaplan_meier import KaplanMeierEstimator
+
+        result = KaplanMeierEstimator.log_rank_test(
+            np.array([1.0, 2.0, 3.0]),
+            np.array([1, 1, 1]),
+            np.array([4.0, 5.0, 6.0]),
+            np.array([1, 1, 1]),
+        )
+        assert hasattr(result, "statistic")
+        assert hasattr(result, "p_value")
+        assert hasattr(result, "reject_h0")
+        assert isinstance(result.reject_h0, bool)
+
+
+# ---------------------------------------------------------------------------
+# TestCoxPHModel — Cox Proportional Hazards unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestCoxPHModel:
+    """Unit tests for Cox PH model."""
+
+    def _make_data(self, n=150, p=4, seed=0):
+        from churn.survival.cox_ph import generate_synthetic_survival_data
+
+        X, durations, events, feature_names = generate_synthetic_survival_data(
+            n_samples=n, n_features=p, seed=seed
+        )
+        return X, durations, events, feature_names
+
+    def test_fit_returns_self(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        model = CoxPHModel()
+        X, d, e, fn = self._make_data()
+        result = model.fit(X, d, e, fn)
+        assert result is model
+
+    def test_coef_shape(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data(p=4)
+        model = CoxPHModel()
+        model.fit(X, d, e, fn)
+        assert len(model.result.coef) == 4
+
+    def test_hazard_ratios_positive(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data()
+        model = CoxPHModel()
+        model.fit(X, d, e, fn)
+        for hr in model.result.hazard_ratios:
+            assert hr > 0
+
+    def test_concordance_index_between_0_and_1(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data()
+        model = CoxPHModel()
+        model.fit(X, d, e, fn)
+        c = model.result.concordance_index
+        assert 0.0 <= c <= 1.0
+
+    def test_concordance_better_than_random(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data(n=200, seed=42)
+        model = CoxPHModel()
+        model.fit(X, d, e, fn)
+        assert model.result.concordance_index > 0.5
+
+    def test_predict_log_hazard_shape(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data(n=100)
+        model = CoxPHModel()
+        model.fit(X, d, e, fn)
+        X_test = X[:10]
+        lh = model.predict_log_hazard(X_test)
+        assert lh.shape == (10,)
+
+    def test_predict_survival_function_shape(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data(n=100)
+        model = CoxPHModel()
+        model.fit(X, d, e, fn)
+        times = np.array([6.0, 12.0, 24.0])
+        surv = model.predict_survival_function(X[:5], times)
+        assert surv.shape == (5, 3)
+
+    def test_survival_between_0_and_1(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data(n=100)
+        model = CoxPHModel()
+        model.fit(X, d, e, fn)
+        times = np.array([6.0, 12.0, 36.0])
+        surv = model.predict_survival_function(X[:20], times)
+        assert np.all(surv >= 0) and np.all(surv <= 1)
+
+    def test_predict_median_survival_shape(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data(n=100)
+        model = CoxPHModel()
+        model.fit(X, d, e, fn)
+        medians = model.predict_median_survival(X[:10])
+        assert len(medians) == 10
+
+    def test_predict_before_fit_raises(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        model = CoxPHModel()
+        with pytest.raises(RuntimeError):
+            model.predict_log_hazard(np.ones((3, 4)))
+
+    def test_no_events_raises(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, _ = self._make_data(n=50)
+        e_zero = np.zeros_like(e)
+        model = CoxPHModel()
+        with pytest.raises(ValueError):
+            model.fit(X, d, e_zero)
+
+    def test_predict_returns_survival_predictions(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data(n=100)
+        model = CoxPHModel()
+        model.fit(X, d, e, fn)
+        preds = model.predict(X[:5], eval_times=[6.0, 12.0, 24.0])
+        assert len(preds) == 5
+        for p in preds:
+            assert hasattr(p, "hazard_ratio")
+            assert hasattr(p, "median_survival")
+            assert hasattr(p, "risk_group")
+            assert p.risk_group in ("low", "medium", "high")
+
+    def test_feature_names_in_result(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data(p=3)
+        model = CoxPHModel()
+        model.fit(X, d, e, fn[:3])
+        assert model.result.feature_names == fn[:3]
+
+    def test_to_dict_keys(self):
+        from churn.survival.cox_ph import CoxPHModel
+
+        X, d, e, fn = self._make_data()
+        model = CoxPHModel()
+        model.fit(X, d, e, fn)
+        d_dict = model.result.to_dict()
+        for key in [
+            "coef",
+            "hazard_ratios",
+            "feature_names",
+            "log_partial_likelihood",
+            "concordance_index",
+            "n_samples",
+            "n_events",
+        ]:
+            assert key in d_dict
+
+
+# ---------------------------------------------------------------------------
+# TestSurvivalAPIEndpoints — API integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestSurvivalAPIEndpoints:
+    """Integration tests for /survival/* endpoints."""
+
+    def setup_method(self):
+        from churn.api.app import _reset_survival
+
+        _reset_survival()
+
+    def _client(self):
+        from churn.api.app import app
+        from fastapi.testclient import TestClient
+
+        return TestClient(app)
+
+    def test_fit_synthetic_200(self):
+        """POST /survival/fit без данных → 200 с синтетикой."""
+        client = self._client()
+        resp = client.post("/survival/fit", json={})
+        assert resp.status_code == 200
+
+    def test_fit_response_structure(self):
+        """POST /survival/fit возвращает ожидаемые поля."""
+        client = self._client()
+        data = client.post("/survival/fit", json={}).json()
+        assert "km_curve" in data
+        assert "cox_ph" in data
+        assert "log_rank_high_vs_low" in data
+        assert "n_samples" in data
+        assert "n_events" in data
+        assert "censoring_rate" in data
+
+    def test_fit_km_curve_has_times(self):
+        """KM curve содержит поля times и survival."""
+        client = self._client()
+        data = client.post("/survival/fit", json={}).json()
+        km = data["km_curve"]
+        assert "times" in km
+        assert "survival" in km
+        assert len(km["times"]) > 0
+
+    def test_fit_cox_ph_has_coef(self):
+        """Cox PH результат содержит coef и concordance_index."""
+        client = self._client()
+        data = client.post("/survival/fit", json={}).json()
+        cox = data["cox_ph"]
+        assert "coef" in cox
+        assert "concordance_index" in cox
+        assert 0.0 <= cox["concordance_index"] <= 1.0
+
+    def test_fit_log_rank_structure(self):
+        """Log-rank test возвращает statistic и p_value."""
+        client = self._client()
+        data = client.post("/survival/fit", json={}).json()
+        lr = data["log_rank_high_vs_low"]
+        assert "statistic" in lr
+        assert "p_value" in lr
+        assert "reject_h0" in lr
+
+    def test_fit_too_few_records_422(self):
+        """POST /survival/fit с < 20 записями → 422."""
+        client = self._client()
+        records = [{"duration": float(i + 1), "event": 1} for i in range(5)]
+        resp = client.post("/survival/fit", json={"records": records})
+        assert resp.status_code == 422
+
+    def test_predict_before_fit_400(self):
+        """POST /survival/predict без обученной модели → 400."""
+        client = self._client()
+        resp = client.post(
+            "/survival/predict",
+            json={"features": [[1.0, 0.0, 1.0, 0.0, 3.0]]},
+        )
+        assert resp.status_code == 400
+
+    def test_predict_after_fit_200(self):
+        """POST /survival/predict после fit → 200."""
+        client = self._client()
+        client.post("/survival/fit", json={})
+        resp = client.post(
+            "/survival/predict",
+            json={"features": [[50.0, 0.0, 1.0, 0.0, 3.0], [80.0, 2.0, 0.0, 1.0, 1.0]]},
+        )
+        assert resp.status_code == 200
+
+    def test_predict_n_customers(self):
+        """Число предсказаний соответствует числу входных клиентов."""
+        client = self._client()
+        client.post("/survival/fit", json={})
+        data = client.post(
+            "/survival/predict",
+            json={"features": [[50.0, 0.0, 1.0, 0.0, 3.0]] * 7},
+        ).json()
+        assert data["n_customers"] == 7
+
+    def test_predict_response_fields(self):
+        """Поля предсказания: median_survival, hazard_ratio, risk_group."""
+        client = self._client()
+        client.post("/survival/fit", json={})
+        data = client.post(
+            "/survival/predict",
+            json={"features": [[50.0, 0.0, 1.0, 0.0, 3.0]]},
+        ).json()
+        pred = data["predictions"][0]
+        assert "median_survival_months" in pred
+        assert "hazard_ratio" in pred
+        assert "risk_group" in pred
+        assert "survival_at_times" in pred
+        assert pred["risk_group"] in ("low", "medium", "high")
+
+    def test_curves_before_fit_400(self):
+        """GET /survival/curves без обученной модели → 400."""
+        client = self._client()
+        resp = client.get("/survival/curves")
+        assert resp.status_code == 400
+
+    def test_curves_after_fit_200(self):
+        """GET /survival/curves после fit → 200."""
+        client = self._client()
+        client.post("/survival/fit", json={})
+        resp = client.get("/survival/curves")
+        assert resp.status_code == 200
+
+    def test_curves_response_structure(self):
+        """GET /survival/curves содержит overall_km_curve и eval_times."""
+        client = self._client()
+        client.post("/survival/fit", json={})
+        data = client.get("/survival/curves").json()
+        assert "overall_km_curve" in data
+        assert "eval_times" in data
+        assert "interpretation" in data
+        assert "business_insight" in data
+
+    def test_info_200(self):
+        """GET /survival/info возвращает 200."""
+        client = self._client()
+        resp = client.get("/survival/info")
+        assert resp.status_code == 200
+
+    def test_info_structure(self):
+        """GET /survival/info содержит models и endpoints."""
+        client = self._client()
+        data = client.get("/survival/info").json()
+        assert "models" in data
+        assert "kaplan_meier" in data["models"]
+        assert "cox_ph" in data["models"]
+        assert "endpoints" in data
+
+    def test_reset_200(self):
+        """POST /survival/reset возвращает 200."""
+        client = self._client()
+        resp = client.post("/survival/reset")
+        assert resp.status_code == 200
+        assert resp.json()["reset"] is True
+
+    def test_full_cycle(self):
+        """Полный цикл: fit → predict → curves → reset."""
+        client = self._client()
+        # fit
+        fit_data = client.post("/survival/fit", json={}).json()
+        assert fit_data["n_samples"] > 0
+        # predict
+        pred_data = client.post(
+            "/survival/predict",
+            json={"features": [[50.0, 0.0, 1.0, 0.0, 3.0], [100.0, 2.0, 0.0, 1.0, 1.0]]},
+        ).json()
+        assert pred_data["n_customers"] == 2
+        # curves
+        curves_data = client.get("/survival/curves").json()
+        assert curves_data["overall_km_curve"]["n_total"] > 0
+        # reset
+        reset_data = client.post("/survival/reset").json()
+        assert reset_data["reset"] is True

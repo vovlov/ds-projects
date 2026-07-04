@@ -7,11 +7,11 @@ import pickle
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import polars as pl
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-import numpy as np
 from ..ab_testing.experiment import ABExperiment, VariantConfig
 from ..counterfactual.dice import CounterfactualConfig, DIcEChurn
 from ..data.load import CATEGORICAL_FEATURES, add_features
@@ -29,6 +29,12 @@ from ..optimization.quantizer import (
     quantize_tree_ensemble,
 )
 from ..retraining.trigger import PSI_YELLOW
+from ..survival.cox_ph import (
+    CoxPHConfig,
+    CoxPHModel,
+    generate_synthetic_survival_data,
+)
+from ..survival.kaplan_meier import KaplanMeierEstimator, KMConfig, LogRankResult
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +60,19 @@ def _reset_fed_aggregator() -> None:
     global _fed_aggregator, _fed_result
     _fed_aggregator = None
     _fed_result = None
+
+
+# Survival analysis state: Kaplan-Meier + Cox PH models.
+_km_estimator: KaplanMeierEstimator | None = None
+_cox_model: CoxPHModel | None = None
+_survival_eval_times: list[float] = [6.0, 12.0, 24.0, 36.0, 60.0]
+
+
+def _reset_survival() -> None:
+    """Сброс для тестовой изоляции."""
+    global _km_estimator, _cox_model
+    _km_estimator = None
+    _cox_model = None
 
 
 # Глобальный эксперимент: control (v1) vs treatment (v2).
@@ -1407,7 +1426,7 @@ def federated_train(request: FederatedTrainRequest) -> dict:
     # Генерируем синтетические датасеты для каждого оператора.
     # Каждый оператор имеет немного разный паттерн оттока — разные регионы.
     datasets: list[tuple[np.ndarray, np.ndarray]] = []
-    for i in range(request.n_clients):
+    for _i in range(request.n_clients):
         X = rng.standard_normal((request.n_samples_per_client, d))
         # Истинные веса немного отличаются между операторами
         true_w = rng.standard_normal(d) * 0.5 + np.arange(d) * 0.1
@@ -1489,9 +1508,7 @@ def federated_status() -> dict:
         )
         if agg.global_weights
         else None,
-        "dp_noise_applied": _fed_result.get("dp_noise_applied", False)
-        if _fed_result
-        else False,
+        "dp_noise_applied": _fed_result.get("dp_noise_applied", False) if _fed_result else False,
     }
 
 
@@ -1504,3 +1521,266 @@ def federated_reset() -> dict:
     """
     _reset_fed_aggregator()
     return {"reset": True, "message": "Сервер федерации сброшен / Federation server reset"}
+
+
+# ---------------------------------------------------------------------------
+# Survival Analysis endpoints — Kaplan-Meier + Cox PH
+# ---------------------------------------------------------------------------
+
+
+class SurvivalRecord(BaseModel):
+    """Одна запись для обучения модели выживаемости.
+
+    One training record for survival analysis.
+    """
+
+    duration: float = Field(..., gt=0, description="Observed tenure in months")
+    event: int = Field(..., ge=0, le=1, description="1=churned, 0=still active (censored)")
+    features: list[float] = Field(default_factory=list, description="Feature vector")
+
+
+class SurvivalFitRequest(BaseModel):
+    """Запрос на обучение модели выживаемости.
+
+    Request to fit Kaplan-Meier + Cox PH survival models.
+    """
+
+    records: list[SurvivalRecord] = Field(
+        default_factory=list,
+        description="Training data. If empty, uses synthetic telco data (n=300).",
+    )
+    feature_names: list[str] = Field(
+        default_factory=list,
+        description="Feature names for interpretability",
+    )
+    eval_times: list[float] = Field(
+        default=[6.0, 12.0, 24.0, 36.0, 60.0],
+        description="Time points (months) for S(t) evaluation",
+    )
+
+
+class SurvivalPredictRequest(BaseModel):
+    """Запрос на предсказание выживаемости для новых клиентов.
+
+    Request to predict survival curves for new customers.
+    """
+
+    features: list[list[float]] = Field(..., description="Feature matrix — one row per customer")
+    eval_times: list[float] | None = Field(
+        default=None,
+        description="Time points for S(t). Defaults to training eval_times.",
+    )
+
+
+@app.post("/survival/fit")
+def survival_fit(request: SurvivalFitRequest) -> dict:
+    """Обучить Kaplan-Meier и Cox PH модели выживаемости клиентов.
+
+    Fit Kaplan-Meier and Cox Proportional Hazards models on survival data.
+    If no records provided, generates synthetic telco-style training data.
+
+    Returns KM curve, Cox PH coefficients, concordance index, and log-rank test
+    comparing high-risk vs low-risk groups (by Cox PH median split).
+    """
+    global _km_estimator, _cox_model, _survival_eval_times
+
+    if request.records:
+        durations = np.array([r.duration for r in request.records], dtype=float)
+        events = np.array([r.event for r in request.records], dtype=int)
+
+        feat_lists = [r.features for r in request.records]
+        if any(feat_lists):
+            max_len = max(len(f) for f in feat_lists)
+            X = np.array([f + [0.0] * (max_len - len(f)) for f in feat_lists], dtype=float)
+        else:
+            X = np.zeros((len(durations), 1))
+
+        feature_names = request.feature_names or [f"x{i}" for i in range(X.shape[1])]
+    else:
+        X, durations, events, feature_names = generate_synthetic_survival_data(n_samples=300)
+
+    if len(durations) < 20:
+        raise HTTPException(
+            status_code=422, detail="Need at least 20 records for survival analysis"
+        )
+    if int(events.sum()) < 5:
+        raise HTTPException(status_code=422, detail="Need at least 5 events (churned customers)")
+
+    _survival_eval_times = request.eval_times
+
+    # Fit Kaplan-Meier on full dataset
+    km = KaplanMeierEstimator(KMConfig())
+    km.fit(durations, events)
+    _km_estimator = km
+
+    # Fit Cox PH
+    cox = CoxPHModel(CoxPHConfig())
+    cox.fit(X, durations, events, feature_names=feature_names)
+    _cox_model = cox
+
+    # Log-rank test: high-risk vs low-risk split by median Cox score
+    lh = cox.predict_log_hazard(X)
+    median_lh = float(np.median(lh))
+    mask_high = lh > median_lh
+
+    lr_result: LogRankResult | None = None
+    if mask_high.sum() >= 5 and (~mask_high).sum() >= 5:
+        lr_result = KaplanMeierEstimator.log_rank_test(
+            durations[mask_high],
+            events[mask_high],
+            durations[~mask_high],
+            events[~mask_high],
+        )
+
+    return {
+        "km_curve": km.result.to_dict(),
+        "cox_ph": cox.result.to_dict(),
+        "log_rank_high_vs_low": {
+            "statistic": lr_result.statistic if lr_result else None,
+            "p_value": lr_result.p_value if lr_result else None,
+            "reject_h0": lr_result.reject_h0 if lr_result else None,
+            "description": (
+                "High-risk group (Cox score > median) vs low-risk group. "
+                "reject_h0=True means significantly different survival."
+            ),
+        },
+        "eval_times": _survival_eval_times,
+        "n_samples": len(durations),
+        "n_events": int(events.sum()),
+        "censoring_rate": round(1.0 - float(events.mean()), 3),
+    }
+
+
+@app.post("/survival/predict")
+def survival_predict(request: SurvivalPredictRequest) -> dict:
+    """Предсказать медианное время до оттока и S(t) для новых клиентов.
+
+    Predict median survival time and survival function S(t) for new customers.
+    Requires POST /survival/fit to be called first.
+
+    Returns for each customer:
+    - median_survival: expected months until churn (None if >60 months)
+    - hazard_ratio: relative risk vs baseline (>1 = higher than average)
+    - survival_at_times: P(still_active at months 6/12/24/36/60)
+    - risk_group: low / medium / high
+    """
+    if _cox_model is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Модель не обучена — сначала вызовите POST /survival/fit",
+        )
+
+    X = np.array(request.features, dtype=float)
+    if X.ndim != 2:
+        raise HTTPException(status_code=422, detail="features must be a 2D array")
+
+    eval_times = request.eval_times if request.eval_times is not None else _survival_eval_times
+    preds = _cox_model.predict(X, eval_times=eval_times)
+
+    return {
+        "n_customers": len(preds),
+        "eval_times": eval_times,
+        "predictions": [
+            {
+                "median_survival_months": p.median_survival,
+                "hazard_ratio": p.hazard_ratio,
+                "log_hazard": p.log_hazard,
+                "survival_at_times": dict(zip(eval_times, p.survival_at_times, strict=False)),
+                "risk_group": p.risk_group,
+            }
+            for p in preds
+        ],
+    }
+
+
+@app.get("/survival/curves")
+def survival_curves() -> dict:
+    """Получить KM-кривую выживаемости + кривые по группам риска.
+
+    Return overall KM survival curve and KM curves by Cox PH risk group.
+    Requires POST /survival/fit to be called first.
+    """
+    if _km_estimator is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Модель не обучена — сначала вызовите POST /survival/fit",
+        )
+
+    overall = _km_estimator.result.to_dict()
+    overall["group"] = "overall"
+
+    return {
+        "overall_km_curve": overall,
+        "eval_times": _survival_eval_times,
+        "interpretation": {
+            "survival_value": "P(customer still active at time t)",
+            "ci_lower_upper": "95% confidence interval (log-log transform)",
+            "median_survival": "Months until 50% of customers have churned",
+            "n_at_risk": "Number of customers still observable at time t",
+        },
+        "business_insight": (
+            f"Median customer tenure: "
+            f"{_km_estimator.result.median_survival or '>60'} months. "
+            "Customers in the high-risk Cox PH group have a hazard_ratio >1 — "
+            "contact them earlier in the retention cycle."
+        ),
+    }
+
+
+@app.get("/survival/info")
+def survival_info() -> dict:
+    """Описание методов анализа выживаемости.
+
+    Return documentation about the survival analysis methods used.
+    """
+    return {
+        "models": {
+            "kaplan_meier": {
+                "type": "Non-parametric estimator",
+                "description": "S(t) = Π(1 - d_i/n_i) — product-limit estimator",
+                "output": "Survival function S(t) with 95% CI (Greenwood)",
+                "use_case": "Overall churn timeline, cohort comparison",
+            },
+            "cox_ph": {
+                "type": "Semi-parametric regression",
+                "description": "h(t|x) = h₀(t) · exp(β·x) — proportional hazards",
+                "output": "Hazard ratios, concordance index, per-customer S(t)",
+                "use_case": "Feature importance, individual churn timing, risk stratification",
+            },
+        },
+        "endpoints": {
+            "POST /survival/fit": "Fit both models on data (or synthetic if empty)",
+            "POST /survival/predict": "Predict median_survival + S(t) for new customers",
+            "GET /survival/curves": "Return fitted KM curve with confidence bands",
+            "GET /survival/info": "This endpoint",
+        },
+        "key_metrics": {
+            "median_survival": "Months until 50% churn — lower = higher priority segment",
+            "hazard_ratio": ">1 means higher churn risk than baseline customer",
+            "concordance_index": "C-index: 0.5=random, 1.0=perfect ranking (like AUC for survival)",
+            "log_rank_p_value": "<0.05 means high-risk and low-risk groups have different survival",
+        },
+        "business_value": (
+            "Binary churn models answer 'Will they leave?' (P(churn)). "
+            "Survival analysis answers 'When will they leave?' (median tenure + S(t)). "
+            "This enables TIME-BASED retention: contact high-risk customers at month 6 "
+            "before they reach the median churn point, not just once their P(churn) > 0.7."
+        ),
+        "sources": [
+            "Cox 1972 J. R. Stat. Soc. B 34(2):187-220",
+            "Kaplan & Meier 1958 JASA 53(282):457-481",
+            "Breslow 1972 Biometrics 28(1):89-99",
+            "arxiv:2510.11604 (survival analysis for churn, 2025)",
+            "arxiv:2405.11377 (causal survival analysis, 2024)",
+        ],
+    }
+
+
+@app.post("/survival/reset")
+def survival_reset() -> dict:
+    """Сбросить обученные модели выживаемости.
+
+    Reset fitted survival models — useful for testing or retraining.
+    """
+    _reset_survival()
+    return {"reset": True}
