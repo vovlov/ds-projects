@@ -11,6 +11,7 @@ from ..metrics.prometheus_exporter import AnomalyMetrics, is_available
 from ..models.cusum import CUSUMConfig, CUSUMDetector
 from ..models.detector import MultiMetricDetector
 from ..models.ensemble import STRATEGIES, AnomalyEnsemble, DetectorVote, EnsembleConfig
+from ..models.hmm import HMMDetector
 from ..models.isolation import IsolationConfig, IsolationForestDetector
 from ..models.isolation import is_available as isolation_available
 from ..models.kalman import KalmanConfig, KalmanDetector
@@ -1297,4 +1298,192 @@ def stl_status() -> dict:
         "mu_residual": state.mu_residual,
         "sigma_residual": state.sigma_residual,
         "seasonal_pattern": state.seasonal_pattern,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Hidden Markov Model (HMM) endpoints                                          #
+# --------------------------------------------------------------------------- #
+
+# HMM Gaussian детектор — инициализируется при /hmm/calibrate.
+_hmm_detector = HMMDetector()
+
+
+def _reset_hmm() -> None:
+    """Пересоздать HMM детектор — используется в тестах для изоляции."""
+    global _hmm_detector
+    _hmm_detector = HMMDetector()
+
+
+class HMMCalibrateRequest(BaseModel):
+    """Запрос для Baum-Welch оценки параметров HMM.
+
+    scores: обучающая последовательность (≥ 10 точек).
+    anomaly_scores: опционально — скоры аномальных периодов
+        для улучшенной инициализации состояния ANOMALY.
+    anomaly_threshold: порог P(ANOMALY) для классификации.
+    """
+
+    scores: list[float]
+    anomaly_scores: list[float] | None = None
+    anomaly_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class HMMCalibrateResponse(BaseModel):
+    n_iter_done: int
+    converged: bool
+    log_likelihood: float
+    transition_matrix: list[list[float]]
+    means: list[float]
+    stds: list[float]
+    normal_state: int
+    anomaly_state: int
+
+
+class HMMDecodeRequest(BaseModel):
+    """Запрос для Viterbi-декодирования последовательности скоров."""
+
+    scores: list[float]
+
+
+class HMMDecodeResponse(BaseModel):
+    states: list[int]
+    state_names: list[str]
+    anomaly_probability: list[float]
+    predictions: list[bool]
+    anomaly_indices: list[int]
+    n_anomalies: int
+    change_points: list[int]
+
+
+class HMMUpdateRequest(BaseModel):
+    """Запрос для онлайн-обновления одной точкой."""
+
+    value: float
+
+
+class HMMUpdateResponse(BaseModel):
+    value: float
+    current_state: int
+    state_name: str
+    anomaly_probability: float
+    is_anomaly: bool
+    n_updates: int
+
+
+@app.post("/hmm/calibrate", response_model=HMMCalibrateResponse)
+def hmm_calibrate(request: HMMCalibrateRequest) -> HMMCalibrateResponse:
+    """Оценить параметры Gaussian HMM методом Baum-Welch EM.
+
+    Принимает обучающую последовательность скоров (нормальные данные) и
+    опционально — скоры аномальных периодов для лучшей инициализации.
+
+    Алгоритм:
+    - Инициализация μ, σ по нижним/верхним 50% наблюдений.
+    - Итерации EM: E-step (forward-backward posterior) + M-step (обновление θ).
+    - Сходимость: |ΔlogL| < tol или n_iter итераций.
+    - Состояние ANOMALY = state с большим μ (автодетекция, не hardcoded).
+
+    Минимум 10 точек. 422 при недостаточных данных.
+    """
+    try:
+        _hmm_detector._cfg.anomaly_threshold = request.anomaly_threshold
+        result = _hmm_detector.calibrate(
+            scores=request.scores,
+            anomaly_scores=request.anomaly_scores,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    return HMMCalibrateResponse(
+        n_iter_done=result.n_iter_done,
+        converged=result.converged,
+        log_likelihood=result.log_likelihood,
+        transition_matrix=result.transition_matrix,
+        means=result.means,
+        stds=result.stds,
+        normal_state=result.normal_state,
+        anomaly_state=result.anomaly_state,
+    )
+
+
+@app.post("/hmm/decode", response_model=HMMDecodeResponse)
+def hmm_decode(request: HMMDecodeRequest) -> HMMDecodeResponse:
+    """Viterbi-декодирование: найти наиболее вероятную последовательность режимов.
+
+    Возвращает:
+    - states: Viterbi path (0=NORMAL, 1=ANOMALY per timestep).
+    - anomaly_probability: P(ANOMALY_t | Y_{1:T}) из forward-backward γ.
+    - predictions: is_anomaly[t] = anomaly_probability[t] > threshold.
+    - change_points: индексы переходов между режимами.
+
+    400 если calibrate() не был вызван; 400 если < 2 точек.
+    """
+    try:
+        result = _hmm_detector.decode(request.scores)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    return HMMDecodeResponse(
+        states=result.states,
+        state_names=result.state_names,
+        anomaly_probability=result.anomaly_probability,
+        predictions=result.predictions,
+        anomaly_indices=result.anomaly_indices,
+        n_anomalies=result.n_anomalies,
+        change_points=result.change_points,
+    )
+
+
+@app.post("/hmm/update", response_model=HMMUpdateResponse)
+def hmm_update(request: HMMUpdateRequest) -> HMMUpdateResponse:
+    """Онлайн-обновление: одна новая точка → текущий режим + P(ANOMALY).
+
+    Использует скользящий буфер (последние 200 точек) + Viterbi.
+    O(buffer_len) на вызов, O(buffer_maxlen) память.
+
+    Подходит для real-time streaming от Prometheus / метрического экспортера.
+    400 если calibrate() не был вызван.
+    """
+    try:
+        result = _hmm_detector.update(request.value)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    return HMMUpdateResponse(
+        value=result.value,
+        current_state=result.current_state,
+        state_name=result.state_name,
+        anomaly_probability=result.anomaly_probability,
+        is_anomaly=result.is_anomaly,
+        n_updates=result.n_updates,
+    )
+
+
+@app.get("/hmm/status")
+def hmm_status() -> dict:
+    """Состояние HMM детектора для health-check и Grafana gauge.
+
+    Возвращает:
+    - is_calibrated: готов ли детектор
+    - n_states, anomaly_threshold: параметры конфигурации
+    - n_calibration / n_updates: статистика использования
+    - transition_matrix: A[i,j] — вероятности переходов
+    - means / stds: параметры Гауссовских эмиссий
+    - normal_state / anomaly_state: индексы состояний
+    """
+    state = _hmm_detector.get_state()
+    return {
+        "is_calibrated": state.is_calibrated,
+        "n_states": state.n_states,
+        "anomaly_threshold": state.anomaly_threshold,
+        "n_calibration": state.n_calibration,
+        "n_updates": state.n_updates,
+        "transition_matrix": state.transition_matrix,
+        "means": state.means,
+        "stds": state.stds,
+        "normal_state": state.normal_state,
+        "anomaly_state": state.anomaly_state,
     }

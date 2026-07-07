@@ -1607,6 +1607,45 @@
         Breslow 1972 Biometrics 28(1):125-133 (baseline hazard),
         arxiv:2510.11604 (churn + survival 2025), arxiv:2405.11377 (causal survival 2024).
 
+- [x] **Hidden Markov Model (HMM) Regime Detection для Anomaly Detection (Project 05)** — 2026-07-07
+      Двухсостояниевая Gaussian HMM: NORMAL (низкие скоры) / ANOMALY (высокие скоры).
+      Новые файлы: `anomaly/models/hmm.py`, интеграция в `anomaly/api/app.py`.
+      Архитектура: HMMDetector (Baum-Welch EM + Viterbi + online update).
+        Baum-Welch: log-domain forward-backward → E-step (γ, ξ) → M-step (A, μ, σ, π).
+        Viterbi: log-domain traceback → наиболее вероятная последовательность режимов.
+        Online: скользящий буфер (200 точек) + Viterbi для текущего состояния O(buffer).
+      Критическое решение: при наличии anomaly_scores — конкатенируются с normal в EM,
+        иначе M-step коллапсирует аномальное состояние (γ≈0 → μ1→0 → потеря разделения).
+      HMMConfig/HMMCalibrationResult/HMMDecodeResult/HMMUpdateResult/HMMState dataclasses.
+      API: POST /hmm/calibrate (Baum-Welch, ≥10 точек + опциональные anomaly_scores),
+           POST /hmm/decode (Viterbi path + forward-backward posterior P(ANOMALY_t)),
+           POST /hmm/update (онлайн single-point → текущий режим + P(ANOMALY)),
+           GET  /hmm/status (параметры модели + n_calibration/n_updates для мониторинга).
+      42 новых теста: TestHMMDetector×23 (calibrate_returns_result, sets_is_calibrated,
+        too_few_raises, transition_matrix_shape/rows_sum_to_one, means_ordered_by_anomaly_state,
+        calibrate_with_anomaly_scores, decode_correct_length/before_calibrate/too_short/
+        anomaly_prob_in_range/normal_data_mostly_normal/anomaly_block_detected/
+        change_points_consistent, viterbi_returns_valid_states, update_before_calibrate/
+        increments/probability_in_range/state_name_valid/high_value_may_be_anomaly,
+        reset_clears_state, get_state_fields_before/after_calibrate),
+        TestHMMAPIEndpoints×19 (calibrate_200/response_structure/too_few_422/
+        with_anomaly_scores/transition_matrix_shape/log_likelihood_finite,
+        decode_400_before/200_after/response_structure/length_matches/state_names_valid/
+        probabilities_in_range, update_400_before/200_after/response_structure/
+        n_updates_increments, status_uncalibrated/after_calibrate, full_cycle).
+      298/298 тестов зелёных (+42, было 256). Lint clean.
+      Бизнес-эффект: HMM добавляет память о режимах — однажды войдя в ANOMALY-режим,
+        система вероятно останется в нём (A[1,1]>>A[1,0]). Уменьшает false alarms:
+        одиночный spike не переключает режим, если вероятность перехода низка.
+        Complementary: STL (сезонность) → Isolation Forest (многомерные паттерны) →
+        CUSUM (персистентный сдвиг) → Kalman (тренд+UQ) → Ensemble → HMM (режимы).
+        P(ANOMALY_t | Y_{1:T}) → calibrated probability вместо binary boolean → ROC/F1.
+      Источники: Baum & Petrie 1966 Ann. Math. Stat. 37(6):1554-1563 (HMM foundations),
+        Welch 2003 IEEE SP Mag. 20(6) (Baum-Welch tutorial),
+        Rabiner 1989 Proc. IEEE 77(2):257-286 (классический tutorial + Viterbi),
+        Bilmes 1998 ICSI TR-97-021 (численно стабильный forward-backward),
+        Smyth 1994 "Hidden Markov Models for Fault Detection" (ранняя Anomaly HMM работа).
+
 ---
 
 ## Ежедневный цикл улучшений

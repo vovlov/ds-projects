@@ -2902,3 +2902,430 @@ class TestSTLAPIEndpoints:
         body = client.get("/stl/status").json()
         assert body["n_calibration"] == 96
         assert body["n_updates"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# HMM helpers
+# --------------------------------------------------------------------------- #
+
+
+def _make_hmm_normal_scores(n: int = 100, seed: int = 42) -> list[float]:
+    """Нормальные скоры ~ N(0.1, 0.05)."""
+    rng = np.random.default_rng(seed)
+    return list(np.clip(rng.normal(0.1, 0.05, n), 0.0, 1.0))
+
+
+def _make_hmm_anomaly_scores(n: int = 50, seed: int = 0) -> list[float]:
+    """Аномальные скоры ~ N(0.8, 0.1)."""
+    rng = np.random.default_rng(seed)
+    return list(np.clip(rng.normal(0.8, 0.1, n), 0.0, 1.0))
+
+
+def _make_hmm_mixed_scores(n_normal: int = 80, n_anomaly: int = 20, seed: int = 42) -> list[float]:
+    """Смешанная последовательность: нормальный блок + аномальный блок."""
+    normal = _make_hmm_normal_scores(n_normal, seed=seed)
+    anomaly = _make_hmm_anomaly_scores(n_anomaly, seed=seed + 1)
+    return normal + anomaly
+
+
+# --------------------------------------------------------------------------- #
+# Unit tests: HMMDetector
+# --------------------------------------------------------------------------- #
+
+
+class TestHMMDetector:
+    def _make_detector(self):
+        from anomaly.models.hmm import HMMConfig, HMMDetector
+
+        return HMMDetector(HMMConfig(n_iter=30, tol=1e-3))
+
+    def test_calibrate_returns_result(self):
+        det = self._make_detector()
+        scores = _make_hmm_normal_scores(100)
+        result = det.calibrate(scores)
+        assert result.n_iter_done > 0
+        assert isinstance(result.converged, bool)
+        assert np.isfinite(result.log_likelihood)
+
+    def test_calibrate_sets_is_calibrated(self):
+        det = self._make_detector()
+        assert not det._is_calibrated
+        det.calibrate(_make_hmm_normal_scores(100))
+        assert det._is_calibrated
+
+    def test_calibrate_too_few_raises(self):
+        det = self._make_detector()
+        with pytest.raises(ValueError):
+            det.calibrate([0.1] * 5)
+
+    def test_transition_matrix_shape(self):
+        det = self._make_detector()
+        result = det.calibrate(_make_hmm_normal_scores(100))
+        A = np.array(result.transition_matrix)
+        assert A.shape == (2, 2)
+
+    def test_transition_matrix_rows_sum_to_one(self):
+        det = self._make_detector()
+        result = det.calibrate(_make_hmm_normal_scores(100))
+        A = np.array(result.transition_matrix)
+        np.testing.assert_allclose(A.sum(axis=1), 1.0, atol=1e-6)
+
+    def test_means_ordered_by_anomaly_state(self):
+        """После калибровки anomaly_state имеет бо́льшее среднее."""
+        det = self._make_detector()
+        result = det.calibrate(_make_hmm_normal_scores(100))
+        means = result.means
+        # anomaly_state — state с большим μ
+        assert means[result.anomaly_state] >= means[result.normal_state]
+
+    def test_calibrate_with_anomaly_scores(self):
+        det = self._make_detector()
+        normal = _make_hmm_normal_scores(80)
+        anom = _make_hmm_anomaly_scores(30)
+        result = det.calibrate(normal, anomaly_scores=anom)
+        assert result.n_iter_done > 0
+        # Аномальное среднее должно быть выше нормального
+        assert result.means[result.anomaly_state] > result.means[result.normal_state]
+
+    def test_decode_returns_correct_length(self):
+        det = self._make_detector()
+        det.calibrate(_make_hmm_normal_scores(100))
+        scores = _make_hmm_normal_scores(50)
+        result = det.decode(scores)
+        assert len(result.states) == 50
+        assert len(result.anomaly_probability) == 50
+        assert len(result.predictions) == 50
+        assert len(result.state_names) == 50
+
+    def test_decode_before_calibrate_raises(self):
+        det = self._make_detector()
+        with pytest.raises(RuntimeError):
+            det.decode([0.1, 0.2, 0.3])
+
+    def test_decode_too_short_raises(self):
+        det = self._make_detector()
+        det.calibrate(_make_hmm_normal_scores(100))
+        with pytest.raises(ValueError):
+            det.decode([0.5])
+
+    def test_decode_anomaly_probability_in_range(self):
+        det = self._make_detector()
+        det.calibrate(_make_hmm_normal_scores(100))
+        result = det.decode(_make_hmm_mixed_scores())
+        probs = result.anomaly_probability
+        assert all(0.0 <= p <= 1.0 for p in probs), "Вероятности должны быть в [0, 1]"
+
+    def test_decode_normal_data_mostly_normal(self):
+        """Viterbi-path на нормальных данных должен давать NORMAL state для большинства точек."""
+        from anomaly.models.hmm import HMMConfig, HMMDetector
+
+        det = HMMDetector(HMMConfig(n_iter=50, tol=1e-3, anomaly_threshold=0.5))
+        normal = _make_hmm_normal_scores(200)
+        anom = _make_hmm_anomaly_scores(50)
+        # Калибруем с обоими классами для чёткого разделения
+        det.calibrate(normal, anomaly_scores=anom)
+        # Проверяем Viterbi: нормальные данные → нормальное состояние
+        normal_result = det.decode(normal[:80])
+        normal_state_count = normal_result.states.count(det._normal_state)
+        anomaly_state_count = normal_result.states.count(det._anomaly_state)
+        # Аномальные данные → аномальное состояние
+        anom_result = det.decode(anom[:30])
+        anom_anomaly_count = anom_result.states.count(det._anomaly_state)
+        # Нормальные данные: больше NORMAL, чем ANOMALY
+        assert normal_state_count > anomaly_state_count, (
+            f"Нормальные данные: NORMAL={normal_state_count} "
+            f"должно быть > ANOMALY={anomaly_state_count}"
+        )
+        # Аномальные данные: больше ANOMALY state
+        assert anom_anomaly_count > len(anom_result.states) // 3, (
+            f"Аномальные данные: ANOMALY={anom_anomaly_count} слишком мало"
+        )
+
+    def test_decode_anomaly_block_detected(self):
+        """Инжектированный аномальный блок должен иметь высокий P(ANOMALY)."""
+        from anomaly.models.hmm import HMMConfig, HMMDetector
+
+        det = HMMDetector(HMMConfig(n_iter=50, tol=1e-3, anomaly_threshold=0.5))
+        normal = _make_hmm_normal_scores(200)
+        det.calibrate(normal)
+        mixed = _make_hmm_mixed_scores(n_normal=50, n_anomaly=30)
+        result = det.decode(mixed)
+        # Последние 30 точек — аномальный блок, должен иметь более высокий score
+        normal_probs = result.anomaly_probability[:50]
+        anomaly_probs = result.anomaly_probability[50:]
+        assert np.mean(anomaly_probs) > np.mean(normal_probs), (
+            "Аномальный блок должен иметь более высокий P(ANOMALY)"
+        )
+
+    def test_decode_change_points_consistent(self):
+        """change_points = индексы, где states[t] != states[t-1]."""
+        det = self._make_detector()
+        det.calibrate(_make_hmm_normal_scores(100))
+        result = det.decode(_make_hmm_mixed_scores())
+        states = result.states
+        expected_cps = [i for i in range(1, len(states)) if states[i] != states[i - 1]]
+        assert result.change_points == expected_cps
+
+    def test_viterbi_returns_valid_states(self):
+        """Viterbi path содержит только допустимые индексы состояний."""
+        det = self._make_detector()
+        det.calibrate(_make_hmm_normal_scores(100))
+        states, log_probs = det.viterbi(_make_hmm_normal_scores(30))
+        assert all(s in (0, 1) for s in states)
+        assert len(states) == 30
+
+    def test_update_before_calibrate_raises(self):
+        det = self._make_detector()
+        with pytest.raises(RuntimeError):
+            det.update(0.5)
+
+    def test_update_increments_counter(self):
+        det = self._make_detector()
+        det.calibrate(_make_hmm_normal_scores(100))
+        r1 = det.update(0.1)
+        r2 = det.update(0.2)
+        assert r1.n_updates == 1
+        assert r2.n_updates == 2
+
+    def test_update_probability_in_range(self):
+        det = self._make_detector()
+        det.calibrate(_make_hmm_normal_scores(100))
+        result = det.update(0.15)
+        assert 0.0 <= result.anomaly_probability <= 1.0
+
+    def test_update_state_name_valid(self):
+        det = self._make_detector()
+        det.calibrate(_make_hmm_normal_scores(100))
+        result = det.update(0.1)
+        assert result.state_name in ("NORMAL", "ANOMALY")
+
+    def test_update_high_value_may_be_anomaly(self):
+        """Экстремально высокое значение должно давать высокий P(ANOMALY)."""
+        from anomaly.models.hmm import HMMConfig, HMMDetector
+
+        det = HMMDetector(HMMConfig(n_iter=50, tol=1e-3, anomaly_threshold=0.5))
+        # Обучить только на нормальных (~0.1) — μ_normal << μ_anomaly
+        det.calibrate(_make_hmm_normal_scores(200))
+        # Инжектировать аномальные точки в буфер для переключения контекста
+        for _ in range(20):
+            det.update(0.95)
+        result = det.update(0.99)
+        assert result.anomaly_probability > 0.3, (
+            "Экстремальное значение должно давать P(ANOMALY) > 0.3"
+        )
+
+    def test_reset_clears_state(self):
+        det = self._make_detector()
+        det.calibrate(_make_hmm_normal_scores(100))
+        det.reset()
+        assert not det._is_calibrated
+        assert det._n_calibration == 0
+        assert det._n_updates == 0
+        assert det._A is None
+
+    def test_get_state_fields_before_calibrate(self):
+        det = self._make_detector()
+        state = det.get_state()
+        assert state.is_calibrated is False
+        assert state.transition_matrix is None
+        assert state.means is None
+
+    def test_get_state_fields_after_calibrate(self):
+        det = self._make_detector()
+        det.calibrate(_make_hmm_normal_scores(100))
+        state = det.get_state()
+        assert state.is_calibrated is True
+        assert state.transition_matrix is not None
+        assert state.means is not None
+        assert len(state.means) == 2
+        assert state.normal_state is not None
+        assert state.anomaly_state is not None
+
+
+# --------------------------------------------------------------------------- #
+# Integration tests: HMM API endpoints
+# --------------------------------------------------------------------------- #
+
+
+class TestHMMAPIEndpoints:
+    def _client(self):
+        from anomaly.api.app import _reset_hmm, app
+        from fastapi.testclient import TestClient
+
+        _reset_hmm()
+        return TestClient(app)
+
+    def _calibrate(self, client, n: int = 100, **kwargs):
+        scores = _make_hmm_normal_scores(n)
+        return client.post(
+            "/hmm/calibrate",
+            json={"scores": scores, **kwargs},
+        )
+
+    def test_calibrate_200(self):
+        client = self._client()
+        resp = self._calibrate(client)
+        assert resp.status_code == 200
+
+    def test_calibrate_response_structure(self):
+        client = self._client()
+        body = self._calibrate(client).json()
+        for field in (
+            "n_iter_done",
+            "converged",
+            "log_likelihood",
+            "transition_matrix",
+            "means",
+            "stds",
+            "normal_state",
+            "anomaly_state",
+        ):
+            assert field in body, f"Missing field: {field}"
+
+    def test_calibrate_too_few_422(self):
+        client = self._client()
+        resp = client.post("/hmm/calibrate", json={"scores": [0.1] * 5})
+        assert resp.status_code == 422
+
+    def test_calibrate_with_anomaly_scores(self):
+        client = self._client()
+        normal = _make_hmm_normal_scores(80)
+        anom = _make_hmm_anomaly_scores(30)
+        resp = client.post(
+            "/hmm/calibrate",
+            json={"scores": normal, "anomaly_scores": anom},
+        )
+        assert resp.status_code == 200
+
+    def test_calibrate_transition_matrix_shape(self):
+        client = self._client()
+        body = self._calibrate(client).json()
+        A = body["transition_matrix"]
+        assert len(A) == 2
+        assert len(A[0]) == 2
+
+    def test_calibrate_log_likelihood_finite(self):
+        client = self._client()
+        body = self._calibrate(client).json()
+        assert np.isfinite(body["log_likelihood"])
+
+    def test_decode_400_before_calibrate(self):
+        client = self._client()
+        scores = _make_hmm_normal_scores(20)
+        resp = client.post("/hmm/decode", json={"scores": scores})
+        assert resp.status_code == 400
+
+    def test_decode_200_after_calibrate(self):
+        client = self._client()
+        self._calibrate(client)
+        scores = _make_hmm_normal_scores(30)
+        resp = client.post("/hmm/decode", json={"scores": scores})
+        assert resp.status_code == 200
+
+    def test_decode_response_structure(self):
+        client = self._client()
+        self._calibrate(client)
+        scores = _make_hmm_normal_scores(30)
+        body = client.post("/hmm/decode", json={"scores": scores}).json()
+        for f in (
+            "states",
+            "state_names",
+            "anomaly_probability",
+            "predictions",
+            "anomaly_indices",
+            "n_anomalies",
+            "change_points",
+        ):
+            assert f in body, f"Missing field: {f}"
+
+    def test_decode_length_matches_input(self):
+        client = self._client()
+        self._calibrate(client)
+        scores = _make_hmm_normal_scores(40)
+        body = client.post("/hmm/decode", json={"scores": scores}).json()
+        assert len(body["states"]) == 40
+        assert len(body["predictions"]) == 40
+
+    def test_decode_state_names_valid(self):
+        client = self._client()
+        self._calibrate(client)
+        body = client.post("/hmm/decode", json={"scores": _make_hmm_normal_scores(20)}).json()
+        assert all(s in ("NORMAL", "ANOMALY") for s in body["state_names"])
+
+    def test_decode_probabilities_in_range(self):
+        client = self._client()
+        self._calibrate(client)
+        body = client.post("/hmm/decode", json={"scores": _make_hmm_mixed_scores()}).json()
+        probs = body["anomaly_probability"]
+        assert all(0.0 <= p <= 1.0 for p in probs)
+
+    def test_update_400_before_calibrate(self):
+        client = self._client()
+        resp = client.post("/hmm/update", json={"value": 0.5})
+        assert resp.status_code == 400
+
+    def test_update_200_after_calibrate(self):
+        client = self._client()
+        self._calibrate(client)
+        resp = client.post("/hmm/update", json={"value": 0.2})
+        assert resp.status_code == 200
+
+    def test_update_response_structure(self):
+        client = self._client()
+        self._calibrate(client)
+        body = client.post("/hmm/update", json={"value": 0.15}).json()
+        for f in (
+            "value",
+            "current_state",
+            "state_name",
+            "anomaly_probability",
+            "is_anomaly",
+            "n_updates",
+        ):
+            assert f in body, f"Missing field: {f}"
+
+    def test_update_n_updates_increments(self):
+        client = self._client()
+        self._calibrate(client)
+        b1 = client.post("/hmm/update", json={"value": 0.1}).json()
+        b2 = client.post("/hmm/update", json={"value": 0.2}).json()
+        assert b1["n_updates"] == 1
+        assert b2["n_updates"] == 2
+
+    def test_status_uncalibrated(self):
+        client = self._client()
+        body = client.get("/hmm/status").json()
+        assert body["is_calibrated"] is False
+        assert body["transition_matrix"] is None
+        assert body["means"] is None
+
+    def test_status_after_calibrate(self):
+        client = self._client()
+        self._calibrate(client)
+        body = client.get("/hmm/status").json()
+        assert body["is_calibrated"] is True
+        assert body["transition_matrix"] is not None
+        assert len(body["means"]) == 2
+        assert body["normal_state"] is not None
+        assert body["anomaly_state"] is not None
+
+    def test_full_cycle(self):
+        """Полный цикл: calibrate → decode → update → status."""
+        client = self._client()
+        normal = _make_hmm_normal_scores(100)
+        # Calibrate
+        resp = client.post("/hmm/calibrate", json={"scores": normal})
+        assert resp.status_code == 200
+        # Decode batch
+        mixed = _make_hmm_mixed_scores(n_normal=30, n_anomaly=10)
+        resp = client.post("/hmm/decode", json={"scores": mixed})
+        assert resp.status_code == 200
+        assert resp.json()["n_anomalies"] >= 0
+        # Online update
+        resp = client.post("/hmm/update", json={"value": 0.12})
+        assert resp.status_code == 200
+        assert resp.json()["n_updates"] == 1
+        # Status
+        body = client.get("/hmm/status").json()
+        assert body["is_calibrated"] is True
+        assert body["n_updates"] == 1
