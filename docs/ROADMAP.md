@@ -1646,6 +1646,34 @@
         Bilmes 1998 ICSI TR-97-021 (численно стабильный forward-backward),
         Smyth 1994 "Hidden Markov Models for Fault Detection" (ранняя Anomaly HMM работа).
 
+- [x] **Shewhart SPC Control Charts для Data Quality Platform (Project 10)** — 2026-07-08
+      `quality/spc/control_charts.py` + `quality/spc/__init__.py` — Контрольные карты
+      Шухарта (X-chart) для мониторинга метрик качества данных по batch-запускам пайплайна.
+      Каждая точка = один запуск ETL/ML пайплайна (null_rate, mean, std и т.д.).
+      Western Electric Rules (WECO 1956) — 4 правила детекции аномальных паттернов:
+        Rule 1: 1 точка за ±3σ (немедленный out-of-control сигнал).
+        Rule 2: 2 из 3 последних за ±2σ с одной стороны (тренд к пределу).
+        Rule 3: 4 из 5 последних за ±1σ с одной стороны (систематическое смещение).
+        Rule 4: 8 подряд с одной стороны от центральной линии (устойчивый сдвиг).
+      Архитектура: ShewhartChart(SPCConfig) → calibrate(normal_values) → update(new_value)
+        → ControlChartResult(z_score, violation, is_out_of_control, ucl/lcl±1σ/±2σ/±3σ).
+      Rolling deque(maxlen=window_size) буфер засевается хвостом калибровочных данных
+        → правила WER работают корректно с первого update().
+      5 REST API эндпоинтов (tags=["spc"]): POST /spc/calibrate → 201,
+        POST /spc/update → 200 (400 если не откалибровано),
+        POST /spc/detect → 200 (батч с n_violations/violation_indices),
+        GET /spc/status/{metric_name} → 200, POST /spc/reset → 200.
+      Независимые карты на каждую именованную метрику (dict registry).
+      53 теста: TestSPCCalibration×10, TestWesternElectricRules×11,
+        TestShewhartChartUpdate×10, TestShewhartBatchDetect×3, TestSPCAPIEndpoints×19.
+      608/608 тестов зелёных (+53, было 555). Lint clean.
+      Бизнес-эффект: SPC дополняет PSI/KS/Wasserstein/Chi2 (два набора данных → дрейф)
+        мониторингом одной метрики во времени → ранняя детекция деградации пайплайна.
+        WECO чувствительнее чистого ±3σ: Rules 2-4 ловят gradual drift до выхода за пределы.
+        Complementary: Statistical Tests (одновременный снимок) → SPC (трендовый мониторинг).
+      Источники: Shewhart 1931 "Economic Control of Quality of Manufactured Product",
+        Western Electric Handbook (WECO) 1956 — канонические 4 правила детекции.
+
 ---
 
 ## Ежедневный цикл улучшений

@@ -51,6 +51,7 @@ from quality.security.owasp import OWASPMLAudit
 from quality.security.pii_detector import detect_pii
 from quality.sla.monitor import get_monitor, reset_monitor
 from quality.sla.slo import SLIObservation, SLIType, SLODefinition
+from quality.spc.control_charts import ShewhartChart, SPCConfig
 from quality.synthetic.generator import SyntheticConfig, SyntheticDataGenerator
 
 app = FastAPI(
@@ -1562,3 +1563,178 @@ def deduplication_info() -> JSONResponse:
             ],
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Statistical Process Control (SPC) — контрольные карты Шухарта
+# ---------------------------------------------------------------------------
+
+# Словарь именованных карт: metric_name → ShewhartChart
+# Named chart registry: metric_name → ShewhartChart instance
+_spc_charts: dict[str, ShewhartChart] = {}
+
+
+def _get_spc_chart(metric_name: str) -> ShewhartChart:
+    """Ленивое создание карты / Lazy chart creation."""
+    if metric_name not in _spc_charts:
+        _spc_charts[metric_name] = ShewhartChart()
+    return _spc_charts[metric_name]
+
+
+def _reset_spc_charts() -> None:
+    """Сброс всех карт для тестовой изоляции / Reset for test isolation."""
+    _spc_charts.clear()
+
+
+class SPCCalibrateRequest(BaseModel):
+    """Запрос калибровки контрольной карты / Control chart calibration request."""
+
+    metric_name: str = Field("default", description="Имя метрики / Metric identifier")
+    values: list[float] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Значения метрики при нормальной работе пайплайна (in-control data). "
+            "Quality metric values from normal pipeline runs."
+        ),
+    )
+    n_sigma: float = Field(
+        3.0, gt=0, description="Ширина контрольных пределов в σ / Control limit width in σ"
+    )
+
+
+class SPCUpdateRequest(BaseModel):
+    """Запрос обновления карты одной точкой / Single-point chart update request."""
+
+    metric_name: str = Field("default", description="Имя метрики / Metric identifier")
+    value: float = Field(..., description="Новое значение метрики / New metric value")
+
+
+class SPCBatchRequest(BaseModel):
+    """Запрос батч-проверки метрики / Batch metric check request."""
+
+    metric_name: str = Field("default", description="Имя метрики / Metric identifier")
+    values: list[float] = Field(
+        ...,
+        min_length=1,
+        description="Значения последовательных запусков пайплайна / Sequential pipeline run values",
+    )
+
+
+@app.post("/spc/calibrate", status_code=201, tags=["spc"])
+def spc_calibrate(req: SPCCalibrateRequest) -> JSONResponse:
+    """
+    Откалибровать контрольную карту Шухарта из нормальных данных.
+    Calibrate a Shewhart control chart from in-control (normal) data.
+
+    Устанавливает центральную линию (μ) и контрольные пределы (UCL/LCL = μ ± n_sigma·σ).
+    Одна карта = одна метрика качества (null_rate, mean_age, row_count и т.д.).
+    Несколько карт для разных метрик: используйте разные metric_name.
+
+    Sets center line (μ) and control limits (UCL/LCL = μ ± n_sigma·σ).
+    One chart = one quality metric (null_rate, mean_age, row_count, etc.).
+    Use different metric_name values for multiple metrics.
+
+    Требования / Requirements:
+        values: не менее 10 нормальных наблюдений (запусков пайплайна)
+    """
+    chart = _get_spc_chart(req.metric_name)
+    chart._config = SPCConfig(n_sigma=req.n_sigma)
+
+    try:
+        result = chart.calibrate(req.values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return JSONResponse(
+        status_code=201,
+        content={"metric_name": req.metric_name, **result.to_dict()},
+    )
+
+
+@app.post("/spc/update", status_code=200, tags=["spc"])
+def spc_update(req: SPCUpdateRequest) -> JSONResponse:
+    """
+    Добавить одну точку (запуск пайплайна) и проверить WER-нарушения.
+    Add one pipeline run observation and check Western Electric Rule violations.
+
+    Возвращает позицию точки относительно контрольных пределов и тип нарушения:
+    - none: в пределах контроля
+    - rule_1_beyond_3sigma: выход за ±3σ
+    - rule_2_two_of_three_2sigma: 2 из 3 последних за ±2σ (тренд к пределу)
+    - rule_3_four_of_five_1sigma: 4 из 5 последних за ±1σ (систематическое смещение)
+    - rule_4_eight_consecutive: 8 подряд с одной стороны от μ (устойчивый сдвиг)
+
+    Returns point position relative to control limits and WER violation type.
+    """
+    chart = _get_spc_chart(req.metric_name)
+
+    try:
+        result = chart.update(req.value)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return JSONResponse(content={"metric_name": req.metric_name, **result.to_dict()})
+
+
+@app.post("/spc/detect", status_code=200, tags=["spc"])
+def spc_detect_batch(req: SPCBatchRequest) -> JSONResponse:
+    """
+    Проверить батч значений метрики последовательно.
+    Check a batch of metric values (multiple pipeline runs) sequentially.
+
+    Контекст WER накапливается между значениями внутри батча и с предыдущими вызовами.
+    WER context accumulates across values within the batch and from prior updates.
+
+    Возвращает список результатов по каждой точке + сводку нарушений.
+    Returns per-point results and a violation summary.
+    """
+    chart = _get_spc_chart(req.metric_name)
+
+    try:
+        results = chart.detect_batch(req.values)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    violations = [i for i, r in enumerate(results) if r.is_out_of_control]
+    violation_types = list({r.violation for r in results if r.is_out_of_control})
+
+    return JSONResponse(
+        content={
+            "metric_name": req.metric_name,
+            "n_values": len(results),
+            "n_violations": len(violations),
+            "violation_indices": violations,
+            "violation_types": violation_types,
+            "results": [r.to_dict() for r in results],
+        }
+    )
+
+
+@app.get("/spc/status/{metric_name}", tags=["spc"])
+def spc_status(metric_name: str) -> JSONResponse:
+    """
+    Состояние контрольной карты для конкретной метрики.
+    Control chart state for a specific metric.
+
+    Полезно для Grafana-дашбордов: center_line, UCL, LCL, число нарушений.
+    Useful for Grafana dashboards: center_line, UCL, LCL, violation counts.
+    """
+    if metric_name not in _spc_charts:
+        return JSONResponse(content={"metric_name": metric_name, "is_calibrated": False})
+    state = _spc_charts[metric_name].get_state()
+    return JSONResponse(content={"metric_name": metric_name, **state.to_dict()})
+
+
+@app.post("/spc/reset", status_code=200, tags=["spc"])
+def spc_reset(metric_name: str = "default") -> JSONResponse:
+    """
+    Сбросить контрольную карту для конкретной метрики.
+    Reset the control chart for a specific metric (e.g., after schema change).
+
+    Используйте при смене версии датасета, схемы или логики трансформации.
+    Use when dataset version, schema, or transformation logic changes.
+    """
+    if metric_name in _spc_charts:
+        _spc_charts[metric_name].reset()
+    return JSONResponse(content={"metric_name": metric_name, "reset": True})
