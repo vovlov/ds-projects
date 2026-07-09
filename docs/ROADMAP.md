@@ -1674,6 +1674,29 @@
       Источники: Shewhart 1931 "Economic Control of Quality of Manufactured Product",
         Western Electric Handbook (WECO) 1956 — канонические 4 правила детекции.
 
+- [x] **IR Retrieval Evaluation Framework (P@K, R@K, MRR, MAP, NDCG@K) для RAG (Project 02)** — 2026-07-09
+      `rag/evaluation/retrieval_metrics.py` + `rag/evaluation/golden_queries.py` — Оффлайн-оценка
+      качества retrieval-системы по стандартным IR метрикам (Manning et al. 2008, TREC).
+      20 golden queries (5 категорий × 3 сложности: easy/medium/hard), выровненных с реальным
+      корпусом (data_governance, engineering_standards, sample_policy, sample_onboarding, product_faq).
+      Keyword-overlap proxy для relevance judgment — CI-safe без labeled data и внешних LLM API.
+      Метрики: Precision@K, Recall@K (K={1,3,5,10}), MRR (Voorhees 1999),
+        MAP (average precision площадь под P-R кривой), NDCG@K (Järvelin & Kekäläinen 2002).
+      Архитектура: precision_at_k/recall_at_k/reciprocal_rank/average_precision/ndcg_at_k()
+        → compute_query_metrics() → QueryMetrics → aggregate_metrics() → RetrievalEvalReport.
+      2 новых REST API эндпоинта: POST /evaluation/retrieval (полный прогон golden queries),
+        GET /evaluation/golden-queries (список с фильтрацией по category/difficulty).
+      63 теста: TestIRMetrics×20, TestQueryMetrics×5, TestAggregateMetrics×5,
+        TestGoldenQueryDataset×11, TestChunkRelevance×7, TestRetrievalEvalAPI×15.
+      286/286 тестов зелёных (+63, было 223). Lint clean.
+      Бизнес-эффект: RAGAS оценивает качество генерации (faithfulness/relevance), но НЕ retrieval.
+        IR метрики позволяют измерить P(найдён релевантный чанк) независимо от LLM.
+        MRR и MAP — стандарт TREC для сравнения retrieval-систем (hybrid vs semantic vs BM25).
+        Offline evaluation reproducible в CI: никаких внешних API, нет недетерминизма.
+      Источники: Manning et al. 2008 "Introduction to Information Retrieval" §8,
+        Järvelin & Kekäläinen 2002 ACM TOIS 20(4):422-446 (NDCG),
+        Thakur et al. 2021 BEIR Benchmark arxiv:2104.08663 (golden query design).
+
 ---
 
 ## Ежедневный цикл улучшений

@@ -920,6 +920,163 @@ def hyde_generate(request: HyDEGenerateRequest) -> HyDEGenerateResponse:
     )
 
 
+# ---------------------------------------------------------------------------
+# Retrieval Evaluation endpoints
+# ---------------------------------------------------------------------------
+
+
+class RetrievalEvalRequest(BaseModel):
+    """Запрос на оффлайн-оценку качества retrieval."""
+
+    retrieval_method: str = "hybrid"  # "hybrid" | "semantic"
+    k_values: list[int] = [1, 3, 5, 10]
+    min_keywords: int = 2  # порог для определения релевантности чанка
+    category: str | None = None  # фильтр по категории golden queries
+    difficulty: str | None = None  # фильтр по сложности: easy | medium | hard
+
+
+class RetrievalEvalResponse(BaseModel):
+    """Результат оффлайн-оценки retrieval-системы."""
+
+    n_queries: int
+    k_values: list[int]
+    retrieval_method: str
+    mean_precision_at_k: dict[str, float]
+    mean_recall_at_k: dict[str, float]
+    mrr: float
+    map: float
+    mean_ndcg_at_k: dict[str, float]
+    per_query: list[dict]
+
+
+@app.post("/evaluation/retrieval", response_model=RetrievalEvalResponse)
+def evaluate_retrieval(request: RetrievalEvalRequest) -> RetrievalEvalResponse:
+    """Оффлайн-оценка качества retrieval по стандартным IR-метрикам.
+
+    Запускает 20 golden queries через retrieval-систему и сравнивает результаты
+    с keyword-based ground truth. Метрики: P@K, R@K, MRR, MAP, NDCG@K.
+
+    Используйте для:
+    - Сравнения retrieval-методов (semantic vs hybrid)
+    - Обнаружения регрессий после изменения индекса или chunking-стратегии
+    - Выбора оптимального n_results
+
+    Источники: Manning et al. 2008 "Introduction to Information Retrieval" §8,
+    Järvelin & Kekäläinen 2002 ACM TOIS 20(4) (NDCG).
+    """
+    from ..evaluation.golden_queries import find_relevant_chunks, get_golden_queries
+    from ..evaluation.retrieval_metrics import aggregate_metrics, compute_query_metrics
+    from ..retrieval.store import search as semantic_search
+
+    collection = _get_collection()
+
+    golden = get_golden_queries(
+        category=request.category,
+        difficulty=request.difficulty,
+    )
+    if not golden:
+        raise HTTPException(status_code=422, detail="No golden queries match the given filters")
+
+    if collection.count() == 0:
+        # Нет документов — возвращаем нулевые метрики с пояснением
+        return RetrievalEvalResponse(
+            n_queries=len(golden),
+            k_values=request.k_values,
+            retrieval_method=request.retrieval_method,
+            mean_precision_at_k={str(k): 0.0 for k in request.k_values},
+            mean_recall_at_k={str(k): 0.0 for k in request.k_values},
+            mrr=0.0,
+            map=0.0,
+            mean_ndcg_at_k={str(k): 0.0 for k in request.k_values},
+            per_query=[],
+        )
+
+    all_query_metrics = []
+
+    for golden_q in golden:
+        # 1. Найти ground-truth relevant chunks через keyword overlap
+        relevant_ids = find_relevant_chunks(
+            _indexed_chunks, golden_q, min_keywords=request.min_keywords
+        )
+
+        # 2. Получить retrieved chunks (max k_values[-1] результатов)
+        max_k = max(request.k_values)
+        if request.retrieval_method == "hybrid":
+            retrieved_chunks = hybrid_search(
+                golden_q.query, collection, _hybrid_index, n_results=max_k
+            )
+        else:
+            retrieved_chunks = semantic_search(golden_q.query, collection, n_results=max_k)
+
+        # 3. Построить ordered list retrieved IDs (по убыванию score)
+        # Chunk IDs соответствуют позициям в _indexed_chunks.
+        # Ищем текстовое совпадение, так как ChromaDB не возвращает "chunk_N" IDs.
+        chunk_text_to_id: dict[str, str] = {
+            c.get("text", ""): f"chunk_{i}" for i, c in enumerate(_indexed_chunks)
+        }
+        retrieved_ids = [
+            chunk_text_to_id.get(c.get("text", ""), f"unknown_{j}")
+            for j, c in enumerate(retrieved_chunks)
+        ]
+
+        # 4. Вычислить IR-метрики для запроса
+        qm = compute_query_metrics(
+            query=golden_q.query,
+            retrieved=retrieved_ids,
+            relevant=relevant_ids if relevant_ids else set(),
+            k_values=request.k_values,
+        )
+        all_query_metrics.append(qm)
+
+    # 5. Агрегировать метрики по всем запросам
+    report = aggregate_metrics(all_query_metrics, k_values=request.k_values)
+    report_dict = report.to_dict()
+
+    return RetrievalEvalResponse(
+        n_queries=report.n_queries,
+        k_values=report.k_values,
+        retrieval_method=request.retrieval_method,
+        mean_precision_at_k=report_dict["mean_precision_at_k"],
+        mean_recall_at_k=report_dict["mean_recall_at_k"],
+        mrr=report.mrr,
+        map=report.map_score,
+        mean_ndcg_at_k=report_dict["mean_ndcg_at_k"],
+        per_query=report_dict["per_query"],
+    )
+
+
+@app.get("/evaluation/golden-queries")
+def get_evaluation_golden_queries(
+    category: str | None = None,
+    difficulty: str | None = None,
+) -> dict:
+    """Получить golden query dataset для оффлайн-оценки retrieval.
+
+    Возвращает аннотированные запросы с ключевыми словами для оценки релевантности.
+    Фильтрация по категории (governance/engineering/remote/onboarding/product)
+    и сложности (easy/medium/hard).
+    """
+    from ..evaluation.golden_queries import get_dataset_stats, get_golden_queries
+
+    queries = get_golden_queries(category=category, difficulty=difficulty)
+    stats = get_dataset_stats()
+
+    return {
+        "n_queries": len(queries),
+        "filters_applied": {"category": category, "difficulty": difficulty},
+        "queries": [
+            {
+                "query": q.query,
+                "relevant_keywords": list(q.relevant_keywords),
+                "category": q.category,
+                "difficulty": q.difficulty,
+            }
+            for q in queries
+        ],
+        "dataset_stats": stats,
+    }
+
+
 def ask(question: str, n_results: int = 5, use_hybrid: bool = True) -> str:
     """RAG pipeline: retrieve → generate → faithfulness gate."""
     if not question.strip():
